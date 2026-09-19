@@ -1,5 +1,5 @@
 /**
- * agentbot - netvar 反射层实现。
+ * AgPB - netvar 反射层实现。
  *
  * 数组处理的细节见 netvars.h 顶部注释（两套机制 + 引擎源码行号）。
  */
@@ -10,7 +10,7 @@
 #include "netvars.h"
 
 // 单个实体最多能展开多少条字段（防御性上限）
-#define AGENTBOT_MAX_NETVARS 2048
+#define AgPB_MAX_NETVARS 2048
 
 // ---------------------------------------------------------------------------
 // CNetVarTable
@@ -48,7 +48,7 @@ void CNetVarTable::AddProp( const SendProp *pProp, int baseOffset )
 	if ( pProp == NULL || pProp->GetName() == NULL )
 		return;
 
-	if ( m_Props.Count() >= AGENTBOT_MAX_NETVARS )
+	if ( m_Props.Count() >= AgPB_MAX_NETVARS )
 		return;
 
 	int offset = pProp->GetOffset();
@@ -76,7 +76,7 @@ void CNetVarTable::AddArray( const char *name, int offset,
 	if ( name == NULL )
 		return;
 
-	if ( m_Props.Count() >= AGENTBOT_MAX_NETVARS )
+	if ( m_Props.Count() >= AgPB_MAX_NETVARS )
 		return;
 
 	BotNetVar &nv = m_Props[m_Props.AddToTail()];

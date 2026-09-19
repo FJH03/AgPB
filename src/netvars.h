@@ -1,5 +1,5 @@
 /**
- * agentbot - 网络字段（netvar）反射层。
+ * AgPB - 网络字段（netvar）反射层。
  *
  * 数据全部来自引擎自己构建的 SendTable。整条链路都是编译器解析的
  * 虚调用 / 成员访问，**没有任何硬编码的 vtable 索引，也不需要特征码扫描**：
@@ -71,8 +71,8 @@
  * （GetDataDescMap），那条路要 vtable 索引，留待后续。
  */
 
-#ifndef _INCLUDE_AGENTBOT_NETVARS_H_
-#define _INCLUDE_AGENTBOT_NETVARS_H_
+#ifndef _INCLUDE_AGPB_NETVARS_H_
+#define _INCLUDE_AGPB_NETVARS_H_
 
 #include <eiface.h>
 #include <edict.h>
@@ -310,4 +310,4 @@ inline uintp NetVar_ReadHandleRaw( const void *pBase, const BotNetVar &nv )
 	return (uintp)( *(const uint32 *)p );
 }
 
-#endif // _INCLUDE_AGENTBOT_NETVARS_H_
+#endif // _INCLUDE_AGPB_NETVARS_H_

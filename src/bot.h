@@ -1,5 +1,5 @@
 /**
- * agentbot - bot 生命周期与底层控制。
+ * AgPB - bot 生命周期与底层控制。
  *
  * 当前阶段：
  *   1. 用 IBotManager("BotManager001") 创建无 AI 假客户端
@@ -13,8 +13,8 @@
  * 只依赖引擎对外暴露的虚接口，不需要特征码扫描，也不需要链接 server.dll。
  */
 
-#ifndef _INCLUDE_AGENTBOT_BOT_H_
-#define _INCLUDE_AGENTBOT_BOT_H_
+#ifndef _INCLUDE_AGPB_BOT_H_
+#define _INCLUDE_AGPB_BOT_H_
 
 #include <eiface.h>
 #include <edict.h>
@@ -28,9 +28,9 @@
 #include "netvars.h"
 
 // CS:S 队伍编号（见 game/shared/cstrike/cs_shareddefs.h）
-#define AGENTBOT_TEAM_SPECTATOR 1
-#define AGENTBOT_TEAM_T         2
-#define AGENTBOT_TEAM_CT        3
+#define AgPB_TEAM_SPECTATOR 1
+#define AgPB_TEAM_T         2
+#define AgPB_TEAM_CT        3
 
 /**
  * 引擎上下文：插件 Load() 时填一次，之后只读。
@@ -60,10 +60,10 @@ struct BotEngineContext
 	}
 };
 
-class CAgentBot
+class CAgPB
 {
 public:
-	CAgentBot();
+	CAgPB();
 
 	bool Create( const BotEngineContext &ctx,
 				 const char *name,
@@ -161,10 +161,10 @@ private:
 	float m_flTestYaw;
 };
 
-class CAgentBotManager
+class CAgPBManager
 {
 public:
-	CAgentBotManager();
+	CAgPBManager();
 
 	void Init( const BotEngineContext &ctx, CreateInterfaceFn pServerFactory );
 	void Shutdown();
@@ -172,7 +172,7 @@ public:
 	bool IsReady() const { return m_Ctx.IsReady(); }
 	IBotManager *BotManager() { return m_Ctx.pBotManager; }
 
-	CAgentBot *Add( int team, char *error, size_t maxlen );
+	CAgPB *Add( int team, char *error, size_t maxlen );
 	bool Remove( int listIndex );
 	void RemoveAll();
 	void RemoveByEdict( edict_t *pEdict );
@@ -180,12 +180,12 @@ public:
 	void ThinkAll( CGlobalVars *pGlobals );
 
 	int Count() const { return m_Bots.Count(); }
-	CAgentBot *Get( int listIndex );
+	CAgPB *Get( int listIndex );
 
 private:
 	BotEngineContext m_Ctx;
 
-	CUtlVector<CAgentBot *> m_Bots;
+	CUtlVector<CAgPB *> m_Bots;
 	int m_iNextSerial;
 };
 
@@ -196,12 +196,12 @@ CNetVarRegistry &BotNetVarRegistry();
  * edict -> ServerClass 名（如 "CCSPlayer" / "CWeaponUSP45"）。
  * 抽出来是为了让 plugin.cpp 不必引入 iserverunknown.h。
  */
-const char *AgentBot_EntityClassName( edict_t *pEdict );
+const char *AgPB_EntityClassName( edict_t *pEdict );
 
 /**
  * 引擎为该实体维护的 ref ehandle 的整值（`CBaseHandle::ToInt()`）。
  * 取不到时返回 INVALID_EHANDLE_INDEX。
  */
-uintp AgentBot_RefEHandle( edict_t *pEdict );
+uintp AgPB_RefEHandle( edict_t *pEdict );
 
-#endif // _INCLUDE_AGENTBOT_BOT_H_
+#endif // _INCLUDE_AGPB_BOT_H_

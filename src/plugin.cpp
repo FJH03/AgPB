@@ -1,5 +1,5 @@
 /**
- * agentbot - Metamod:Source plugin entry point.
+ * AgPB - Metamod:Source plugin entry point.
  *
  * 目标引擎：Counter-Strike: Source（Source 1 / x86_64）
  * 不使用 SourceMod，也不使用引擎自带的 CCSBot。
@@ -19,7 +19,7 @@
 #include "plugin.h"
 #include "bot.h"
 
-AgentBotPlugin g_AgentBotPlugin;
+AgPBPlugin g_AgPBPlugin;
 
 SH_DECL_HOOK1_void(IServerGameDLL, GameFrame, SH_NOATTRIB, 0, bool);
 SH_DECL_HOOK1_void(IServerGameClients, ClientDisconnect, SH_NOATTRIB, 0, edict_t *);
@@ -34,17 +34,17 @@ IServerPluginHelpers *helpers = NULL;
 IServerGameEnts *gameents = NULL;
 CGlobalVars *gpGlobals = NULL;
 
-static CAgentBotManager g_Bots;
+static CAgPBManager g_Bots;
 
 // ---------------------------------------------------------------------------
 // ConVars / ConCommands
 // ---------------------------------------------------------------------------
 
-static ConVar agentbot_enable( "agentbot_enable", "1", FCVAR_GAMEDLL,
-                               "Enable or disable per-tick agent bot thinking." );
+static ConVar agpb_enable( "agpb_enable", "1", FCVAR_GAMEDLL,
+                          "Enable or disable per-tick AgPB bot thinking." );
 
-static ConVar agentbot_team( "agentbot_team", "2", FCVAR_GAMEDLL,
-                             "Default team for agentbot_add (1=spectator, 2=T, 3=CT)." );
+static ConVar agpb_team( "agpb_team", "2", FCVAR_GAMEDLL,
+                         "Default team for agpb_add (1=spectator, 2=T, 3=CT)." );
 
 /**
  * MMS 要求插件通过 IConCommandBaseAccessor 注册自己的 ConVar / ConCommand。
@@ -60,27 +60,27 @@ public:
 
 static void Cmd_Add( const CCommand &args )
 {
-	int team = agentbot_team.GetInt();
+	int team = agpb_team.GetInt();
 	if ( args.ArgC() >= 2 )
 		team = atoi( args.Arg( 1 ) );
 
 	if ( team != 1 && team != 2 && team != 3 )
 	{
-		META_CONPRINTF( "[AGENTBOT] invalid team %d (use 1=spec, 2=T, 3=CT)\n", team );
+		META_CONPRINTF( "[AgPB] invalid team %d (use 1=spec, 2=T, 3=CT)\n", team );
 		return;
 	}
 
 	char error[256];
 	error[0] = '\0';
 
-	CAgentBot *pBot = g_Bots.Add( team, error, sizeof( error ) );
+	CAgPB *pBot = g_Bots.Add( team, error, sizeof( error ) );
 	if ( pBot == NULL )
 	{
-		META_CONPRINTF( "[AGENTBOT] agentbot_add failed: %s\n", error );
+		META_CONPRINTF( "[AgPB] agpb_add failed: %s\n", error );
 		return;
 	}
 
-	META_CONPRINTF( "[AGENTBOT] created bot '%s' (slot=%d, team=%d)\n",
+	META_CONPRINTF( "[AgPB] created bot '%s' (slot=%d, team=%d)\n",
 	                pBot->Name(), pBot->Index(), team );
 }
 
@@ -90,25 +90,25 @@ static void Cmd_Kick( const CCommand &args )
 	{
 		const int n = g_Bots.Count();
 		g_Bots.RemoveAll();
-		META_CONPRINTF( "[AGENTBOT] removed %d bot(s).\n", n );
+		META_CONPRINTF( "[AgPB] removed %d bot(s).\n", n );
 		return;
 	}
 
 	const int index = ( args.ArgC() >= 2 ) ? atoi( args.Arg( 1 ) ) : -1;
 	if ( !g_Bots.Remove( index ) )
-		META_CONPRINTF( "[AGENTBOT] invalid list index: %d (use agentbot_list)\n", index );
+		META_CONPRINTF( "[AgPB] invalid list index: %d (use agpb_list)\n", index );
 }
 
 static void Cmd_List( const CCommand &args )
 {
-	META_CONPRINTF( "[AGENTBOT] %d bot(s), IBotManager=%s, helpers=%s\n",
+	META_CONPRINTF( "[AgPB] %d bot(s), IBotManager=%s, helpers=%s\n",
 	                g_Bots.Count(),
 	                g_Bots.IsReady() ? "ok" : "missing",
 	                helpers ? "ok" : "missing" );
 
 	for ( int i = 0; i < g_Bots.Count(); ++i )
 	{
-		CAgentBot *pBot = g_Bots.Get( i );
+		CAgPB *pBot = g_Bots.Get( i );
 		IPlayerInfo *pInfo = pBot->PlayerInfo();
 
 		Vector origin( 0.0f, 0.0f, 0.0f );
@@ -134,26 +134,26 @@ static void Cmd_SetTeam( const CCommand &args )
 {
 	if ( args.ArgC() < 3 )
 	{
-		META_CONPRINTF( "[AGENTBOT] usage: agentbot_team <idx> <1=spec|2=T|3=CT>\n" );
+		META_CONPRINTF( "[AgPB] usage: agpb_team <idx> <1=spec|2=T|3=CT>\n" );
 		return;
 	}
 
-	CAgentBot *pBot = g_Bots.Get( atoi( args.Arg( 1 ) ) );
+	CAgPB *pBot = g_Bots.Get( atoi( args.Arg( 1 ) ) );
 	if ( pBot == NULL )
 	{
-		META_CONPRINTF( "[AGENTBOT] invalid list index: %s\n", args.Arg( 1 ) );
+		META_CONPRINTF( "[AgPB] invalid list index: %s\n", args.Arg( 1 ) );
 		return;
 	}
 
 	const int team = atoi( args.Arg( 2 ) );
 	if ( !pBot->SetTeam( team ) )
 	{
-		META_CONPRINTF( "[AGENTBOT] invalid team %d (use 1=spec, 2=T, 3=CT)\n", team );
+		META_CONPRINTF( "[AgPB] invalid team %d (use 1=spec, 2=T, 3=CT)\n", team );
 		return;
 	}
 
 	const int curTeam = ( pBot->PlayerInfo() != NULL ) ? pBot->PlayerInfo()->GetTeamIndex() : -1;
-	META_CONPRINTF( "[AGENTBOT] bot %s: requested team %d (current=%d)\n",
+	META_CONPRINTF( "[AgPB] bot %s: requested team %d (current=%d)\n",
 	                pBot->Name(), team, curTeam );
 }
 
@@ -200,7 +200,7 @@ static bool ContainsNoCase( const char *haystack, const char *needle )
 }
 
 /**
- * agentbot_netlist <idx> [name-filter]
+ * agpb_netlist <idx> [name-filter]
  *
  * 把某个 bot 的 ServerClass 展开成 (名字, 偏移, 类型) 列表并打印当前值。
  * 这是 M2 反射层的验证工具，也是移植 EBot Entity 层时查字段名的字典。
@@ -209,34 +209,34 @@ static void Cmd_NetList( const CCommand &args )
 {
 	if ( args.ArgC() < 2 )
 	{
-		META_CONPRINTF( "[AGENTBOT] usage: agentbot_netlist <idx> [name-filter]\n" );
+		META_CONPRINTF( "[AgPB] usage: agpb_netlist <idx> [name-filter]\n" );
 		return;
 	}
 
-	CAgentBot *pBot = g_Bots.Get( atoi( args.Arg( 1 ) ) );
+	CAgPB *pBot = g_Bots.Get( atoi( args.Arg( 1 ) ) );
 	if ( pBot == NULL )
 	{
-		META_CONPRINTF( "[AGENTBOT] invalid list index: %s\n", args.Arg( 1 ) );
+		META_CONPRINTF( "[AgPB] invalid list index: %s\n", args.Arg( 1 ) );
 		return;
 	}
 
 	const CNetVarTable *pTable = pBot->NetVarTable();
 	if ( pTable == NULL )
 	{
-		META_CONPRINTF( "[AGENTBOT] no SendTable for bot %s\n", pBot->Name() );
+		META_CONPRINTF( "[AgPB] no SendTable for bot %s\n", pBot->Name() );
 		return;
 	}
 
 	const char *pFilter = ( args.ArgC() >= 3 ) ? args.Arg( 2 ) : NULL;
 	void *pBase = pBot->NetVarBase();
 
-	META_CONPRINTF( "[AGENTBOT] %s class=%s props=%d base=%p filter=%s\n",
+	META_CONPRINTF( "[AgPB] %s class=%s props=%d base=%p filter=%s\n",
 	                pBot->Name(), pTable->ClassName(), pTable->Count(), pBase,
 	                ( pFilter != NULL ) ? pFilter : "(none)" );
 
 	if ( pBase == NULL )
 	{
-		META_CONPRINTF( "[AGENTBOT] entity base pointer unavailable, values suppressed\n" );
+		META_CONPRINTF( "[AgPB] entity base pointer unavailable, values suppressed\n" );
 		return;
 	}
 
@@ -315,12 +315,12 @@ static void Cmd_NetList( const CCommand &args )
 
 	if ( pFilter != NULL && printed == 0 )
 	{
-		META_CONPRINTF( "[AGENTBOT] no field matched '%s'\n", pFilter );
+		META_CONPRINTF( "[AgPB] no field matched '%s'\n", pFilter );
 	}
 }
 
 /**
- * agentbot_nethandle <idx> <field-name>
+ * agpb_nethandle <idx> <field-name>
  *
  * 把一个 EHANDLE 字段解包成 entry / serial，再解析回实体。
  * M3 的武器系统（m_hActiveWeapon 等）靠的就是这条链路。
@@ -329,21 +329,21 @@ static void Cmd_NetHandle( const CCommand &args )
 {
 	if ( args.ArgC() < 3 )
 	{
-		META_CONPRINTF( "[AGENTBOT] usage: agentbot_nethandle <idx> <field-name>\n" );
+		META_CONPRINTF( "[AgPB] usage: agpb_nethandle <idx> <field-name>\n" );
 		return;
 	}
 
-	CAgentBot *pBot = g_Bots.Get( atoi( args.Arg( 1 ) ) );
+	CAgPB *pBot = g_Bots.Get( atoi( args.Arg( 1 ) ) );
 	if ( pBot == NULL )
 	{
-		META_CONPRINTF( "[AGENTBOT] invalid list index: %s\n", args.Arg( 1 ) );
+		META_CONPRINTF( "[AgPB] invalid list index: %s\n", args.Arg( 1 ) );
 		return;
 	}
 
 	const BotNetVar *pVar = pBot->FindNetVar( args.Arg( 2 ) );
 	if ( pVar == NULL )
 	{
-		META_CONPRINTF( "[AGENTBOT] field '%s' not found (table has %d props)\n",
+		META_CONPRINTF( "[AgPB] field '%s' not found (table has %d props)\n",
 		                args.Arg( 2 ),
 		                ( pBot->NetVarTable() != NULL ) ? pBot->NetVarTable()->Count() : 0 );
 		return;
@@ -352,7 +352,7 @@ static void Cmd_NetHandle( const CCommand &args )
 	void *pBase = pBot->NetVarBase();
 
 	// 先把字段本身的信息全部打出来，失败时才能看出原因。
-	META_CONPRINTF( "[AGENTBOT] %s offset=+%d type=%d elems=%d stride=%d base=%p\n",
+	META_CONPRINTF( "[AgPB] %s offset=+%d type=%d elems=%d stride=%d base=%p\n",
 	                pVar->name, pVar->offset, (int)pVar->type, pVar->elements, pVar->stride, pBase );
 
 	if ( pBase == NULL )
@@ -361,11 +361,11 @@ static void Cmd_NetHandle( const CCommand &args )
 	// 读寄存器宽度由 stride 决定；不拿 stride 做门禁。
 	const uintp h = NetVar_ReadHandleRaw( pBase, *pVar );
 
-	META_CONPRINTF( "[AGENTBOT] %s raw=0x%016llX\n", pVar->name, (unsigned long long)h );
+	META_CONPRINTF( "[AgPB] %s raw=0x%016llX\n", pVar->name, (unsigned long long)h );
 
 	if ( !NetVar_HandleIsValid( h ) )
 	{
-		META_CONPRINTF( "[AGENTBOT] %s handle is INVALID (empty, INVALID_EHANDLE_INDEX)\n", pVar->name );
+		META_CONPRINTF( "[AgPB] %s handle is INVALID (empty, INVALID_EHANDLE_INDEX)\n", pVar->name );
 		return;
 	}
 
@@ -373,9 +373,9 @@ static void Cmd_NetHandle( const CCommand &args )
 	const int serial = NetVar_HandleSerial( h );
 
 	edict_t *pTarget = pBot->HandleToEdict( h );
-	const char *pszClass = AgentBot_EntityClassName( pTarget );
+	const char *pszClass = AgPB_EntityClassName( pTarget );
 
-	META_CONPRINTF( "[AGENTBOT] %s entry=%d serial=%d resolved=%s class=%s\n",
+	META_CONPRINTF( "[AgPB] %s entry=%d serial=%d resolved=%s class=%s\n",
 	                pVar->name, entry, serial,
 	                ( pTarget != NULL ) ? "yes" : "NO",
 	                ( pszClass != NULL ) ? pszClass : "-" );
@@ -394,8 +394,8 @@ static void Cmd_NetHandle( const CCommand &args )
 		META_CONPRINTF( "  edict[%d]: free=%d EdictIndex=%d netSerial=%d refEHandle=0x%016llX class=%s\n",
 		                entry, pAtEntry->IsFree() ? 1 : 0,
 		                (int)pAtEntry->m_EdictIndex, (int)pAtEntry->m_NetworkSerialNumber,
-		                (unsigned long long)AgentBot_RefEHandle( pAtEntry ),
-		                AgentBot_EntityClassName( pAtEntry ) );
+		                (unsigned long long)AgPB_RefEHandle( pAtEntry ),
+		                AgPB_EntityClassName( pAtEntry ) );
 	}
 	else
 	{
@@ -414,28 +414,28 @@ static void Cmd_NetHandle( const CCommand &args )
 			continue;
 
 		// 比的是引擎自己维护的 ref ehandle 整值，不猜 serial 口径。
-		if ( AgentBot_RefEHandle( pE ) != h )
+		if ( AgPB_RefEHandle( pE ) != h )
 			continue;
 
 		++matches;
 		META_CONPRINTF( "  MATCH edict[%d] EdictIndex=%d serial=%d class=%s\n",
 		                i, (int)pE->m_EdictIndex, (int)pE->m_NetworkSerialNumber,
-		                AgentBot_EntityClassName( pE ) );
+		                AgPB_EntityClassName( pE ) );
 	}
 
 	META_CONPRINTF( "  scan of %d edicts done, %d match(es)\n", maxEnts, matches );
 }
 
 /**
- * agentbot_testmove <idx> <forward> [yaw]
+ * agpb_testmove <idx> <forward> [yaw]
  *
  * 临时验证手段：把 forwardmove / viewangles.y 写进下一条 CUserCmd，
  * 用来确认 IBotController::RunPlayerMove() 真的驱动了玩家。
  *
  * 验证方法：
- *     agentbot_testmove 0 400 90
- *     agentbot_netlist 0 m_vecVelocity     // 三个分量应变非零，bot 开始走
- *     agentbot_netlist 0 m_angEyeAngles    // [1] 应等于 90
+ *     agpb_testmove 0 400 90
+ *     agpb_netlist 0 m_vecVelocity     // 三个分量应变非零，bot 开始走
+ *     agpb_netlist 0 m_angEyeAngles    // [1] 应等于 90
  *
  * 验证完即可删除；M3 移植的 control 模块会取代它。
  */
@@ -443,14 +443,14 @@ static void Cmd_TestMove( const CCommand &args )
 {
 	if ( args.ArgC() < 3 )
 	{
-		META_CONPRINTF( "[AGENTBOT] usage: agentbot_testmove <idx> <forward> [yaw]\n" );
+		META_CONPRINTF( "[AgPB] usage: agpb_testmove <idx> <forward> [yaw]\n" );
 		return;
 	}
 
-	CAgentBot *pBot = g_Bots.Get( atoi( args.Arg( 1 ) ) );
+	CAgPB *pBot = g_Bots.Get( atoi( args.Arg( 1 ) ) );
 	if ( pBot == NULL )
 	{
-		META_CONPRINTF( "[AGENTBOT] invalid list index: %s\n", args.Arg( 1 ) );
+		META_CONPRINTF( "[AgPB] invalid list index: %s\n", args.Arg( 1 ) );
 		return;
 	}
 
@@ -459,32 +459,32 @@ static void Cmd_TestMove( const CCommand &args )
 
 	pBot->SetTestInput( forward, yaw );
 
-	META_CONPRINTF( "[AGENTBOT] %s test input set: forward=%.1f yaw=%.1f\n",
+	META_CONPRINTF( "[AgPB] %s test input set: forward=%.1f yaw=%.1f\n",
 	                pBot->Name(), forward, yaw );
 }
 
-static ConCommand agentbot_add_cmd( "agentbot_add", Cmd_Add,
-                                    "Create an agent-controlled bot. [team]", FCVAR_GAMEDLL );
-static ConCommand agentbot_kick_cmd( "agentbot_kick", Cmd_Kick,
-                                     "Remove bot(s): agentbot_kick <idx|all>", FCVAR_GAMEDLL );
-static ConCommand agentbot_list_cmd( "agentbot_list", Cmd_List,
-                                     "List all agent bots.", FCVAR_GAMEDLL );
-static ConCommand agentbot_team_cmd( "agentbot_team", Cmd_SetTeam,
-                                     "Switch a bot's team: agentbot_team <idx> <1=spec|2=T|3=CT>", FCVAR_GAMEDLL );
-static ConCommand agentbot_netlist_cmd( "agentbot_netlist", Cmd_NetList,
-                                     "Dump a bot's netvar table: agentbot_netlist <idx> [name-filter]", FCVAR_GAMEDLL );
-static ConCommand agentbot_nethandle_cmd( "agentbot_nethandle", Cmd_NetHandle,
-                                     "Resolve an EHANDLE field: agentbot_nethandle <idx> <field-name>", FCVAR_GAMEDLL );
-static ConCommand agentbot_testmove_cmd( "agentbot_testmove", Cmd_TestMove,
-                                     "TEMPORARY ucmd injection check: agentbot_testmove <idx> <forward> [yaw]", FCVAR_GAMEDLL );
+static ConCommand agpb_add_cmd( "agpb_add", Cmd_Add,
+                                "Create an AgPB bot. [team]", FCVAR_GAMEDLL );
+static ConCommand agpb_kick_cmd( "agpb_kick", Cmd_Kick,
+                                 "Remove bot(s): agpb_kick <idx|all>", FCVAR_GAMEDLL );
+static ConCommand agpb_list_cmd( "agpb_list", Cmd_List,
+                                 "List all AgPB bots.", FCVAR_GAMEDLL );
+static ConCommand agpb_team_cmd( "agpb_team", Cmd_SetTeam,
+                                 "Switch a bot's team: agpb_team <idx> <1=spec|2=T|3=CT>", FCVAR_GAMEDLL );
+static ConCommand agpb_netlist_cmd( "agpb_netlist", Cmd_NetList,
+                                 "Dump a bot's netvar table: agpb_netlist <idx> [name-filter]", FCVAR_GAMEDLL );
+static ConCommand agpb_nethandle_cmd( "agpb_nethandle", Cmd_NetHandle,
+                                 "Resolve an EHANDLE field: agpb_nethandle <idx> <field-name>", FCVAR_GAMEDLL );
+static ConCommand agpb_testmove_cmd( "agpb_testmove", Cmd_TestMove,
+                                 "TEMPORARY ucmd injection check: agpb_testmove <idx> <forward> [yaw]", FCVAR_GAMEDLL );
 
 // ---------------------------------------------------------------------------
 // Plugin
 // ---------------------------------------------------------------------------
 
-PLUGIN_EXPOSE( AgentBotPlugin, g_AgentBotPlugin );
+PLUGIN_EXPOSE( AgPBPlugin, g_AgPBPlugin );
 
-bool AgentBotPlugin::Load( PluginId id, ISmmAPI *ismm, char *error, size_t maxlen, bool late )
+bool AgPBPlugin::Load( PluginId id, ISmmAPI *ismm, char *error, size_t maxlen, bool late )
 {
 	PLUGIN_SAVEVARS();
 
@@ -510,8 +510,8 @@ bool AgentBotPlugin::Load( PluginId id, ISmmAPI *ismm, char *error, size_t maxle
 		ismm->EnableVSPListener();
 	}
 
-	SH_ADD_HOOK_MEMFUNC( IServerGameDLL, GameFrame, server, this, &AgentBotPlugin::Hook_GameFrame, true );
-	SH_ADD_HOOK_MEMFUNC( IServerGameClients, ClientDisconnect, gameclients, this, &AgentBotPlugin::Hook_ClientDisconnect, true );
+	SH_ADD_HOOK_MEMFUNC( IServerGameDLL, GameFrame, server, this, &AgPBPlugin::Hook_GameFrame, true );
+	SH_ADD_HOOK_MEMFUNC( IServerGameClients, ClientDisconnect, gameclients, this, &AgPBPlugin::Hook_ClientDisconnect, true );
 
 	g_pCVar = icvar;
 	ConVar_Register( 0, &s_BaseAccessor );
@@ -526,22 +526,22 @@ bool AgentBotPlugin::Load( PluginId id, ISmmAPI *ismm, char *error, size_t maxle
 
 	g_Bots.Init( ctx, ismm->GetServerFactory( false ) );
 
-	META_CONPRINTF( "[AGENTBOT] loaded. gpGlobals=%p, IBotManager=%p, helpers=%p\n",
+	META_CONPRINTF( "[AgPB] loaded. gpGlobals=%p, IBotManager=%p, helpers=%p\n",
 	                gpGlobals, g_Bots.BotManager(), helpers );
 
 	if ( !g_Bots.IsReady() )
 	{
-		META_CONPRINTF( "[AGENTBOT] warning: interface '%s' not found, agentbot_add will not work.\n",
+		META_CONPRINTF( "[AgPB] warning: interface '%s' not found, agpb_add will not work.\n",
 		                INTERFACEVERSION_PLAYERBOTMANAGER );
 	}
 
 	return true;
 }
 
-bool AgentBotPlugin::Unload( char *error, size_t maxlen )
+bool AgPBPlugin::Unload( char *error, size_t maxlen )
 {
-	SH_REMOVE_HOOK_MEMFUNC( IServerGameDLL, GameFrame, server, this, &AgentBotPlugin::Hook_GameFrame, true );
-	SH_REMOVE_HOOK_MEMFUNC( IServerGameClients, ClientDisconnect, gameclients, this, &AgentBotPlugin::Hook_ClientDisconnect, true );
+	SH_REMOVE_HOOK_MEMFUNC( IServerGameDLL, GameFrame, server, this, &AgPBPlugin::Hook_GameFrame, true );
+	SH_REMOVE_HOOK_MEMFUNC( IServerGameClients, ClientDisconnect, gameclients, this, &AgPBPlugin::Hook_ClientDisconnect, true );
 
 	g_Bots.RemoveAll();
 	g_Bots.Shutdown();
@@ -549,41 +549,41 @@ bool AgentBotPlugin::Unload( char *error, size_t maxlen )
 	return true;
 }
 
-bool AgentBotPlugin::Pause( char *error, size_t maxlen )
+bool AgPBPlugin::Pause( char *error, size_t maxlen )
 {
 	return true;
 }
 
-bool AgentBotPlugin::Unpause( char *error, size_t maxlen )
+bool AgPBPlugin::Unpause( char *error, size_t maxlen )
 {
 	return true;
 }
 
-void AgentBotPlugin::AllPluginsLoaded()
+void AgPBPlugin::AllPluginsLoaded()
 {
-	META_CONPRINTF( "[AGENTBOT] all plugins loaded, IBotManager=%s, helpers=%s\n",
+	META_CONPRINTF( "[AgPB] all plugins loaded, IBotManager=%s, helpers=%s\n",
 	                g_Bots.IsReady() ? "ready" : "MISSING",
 	                helpers ? "ready" : "MISSING" );
 }
 
-void AgentBotPlugin::OnLevelShutdown()
+void AgPBPlugin::OnLevelShutdown()
 {
 	// 换图会销毁所有 edict，先清掉本地记录，避免悬挂指针。
 	g_Bots.RemoveAll();
 }
 
-void AgentBotPlugin::Hook_GameFrame( bool simulating )
+void AgPBPlugin::Hook_GameFrame( bool simulating )
 {
 	if ( !simulating || gpGlobals == NULL )
 		return;
 
-	if ( !agentbot_enable.GetBool() )
+	if ( !agpb_enable.GetBool() )
 		return;
 
 	g_Bots.ThinkAll( gpGlobals );
 }
 
-void AgentBotPlugin::Hook_ClientDisconnect( edict_t *pEntity )
+void AgPBPlugin::Hook_ClientDisconnect( edict_t *pEntity )
 {
 	g_Bots.RemoveByEdict( pEntity );
 }

@@ -1,4 +1,4 @@
-# agentbot 验证清单
+# AgPB 验证清单
 
 > 所有验证都是**控制台命令**，源码里不放任何测试脚本。
 > 状态：M1 ✅ / M2 ✅ / **M2.5 ✅ 已实测通过**
@@ -10,25 +10,25 @@
 ## 准备
 
 ```
-cstrike/addons/agentbot/bin/win64/agentbot_mm.dll
-cstrike/addons/metamod/agentbot.vdf
+cstrike/addons/AgPB/bin/win64/agpb_mm.dll
+cstrike/addons/metamod/AgPB.vdf
 ```
 
 加载成功的标志：
 
 ```
-[AGENTBOT] loaded. gpGlobals=..., IBotManager=..., agents=...
+[AgPB] loaded. gpGlobals=..., IBotManager=..., helpers=...
 ```
 
-（`IBotManager` 必须是 `ok`，否则 `agentbot_add` 不会工作。）
+（`IBotManager` 必须是 `ok`，否则 `agpb_add` 不会工作。）
 
 ---
 
 ## 阶段 A —— 建 bot 并出生
 
 ```
-agentbot_kick all
-agentbot_add 3
+agpb_kick all
+agpb_add 3
 mp_restartgame 1
 ```
 
@@ -40,27 +40,27 @@ mp_restartgame 1
 ## 阶段 B —— 反射层全量检查
 
 ```
-agentbot_list
-agentbot_netlist 0 m_iHealth
-agentbot_netlist 0 m_iTeamNum
-agentbot_netlist 0 m_lifeState
-agentbot_netlist 0 m_vecOrigin
-agentbot_netlist 0 m_vecVelocity
-agentbot_netlist 0 m_angEyeAngles
-agentbot_netlist 0 m_iAmmo
-agentbot_netlist 0 m_iAccount
-agentbot_netlist 0 m_iClass
-agentbot_netlist 0 m_iShotsFired
-agentbot_netlist 0 m_hActiveWeapon
-agentbot_netlist 0 m_flNextAttack
-agentbot_nethandle 0 m_hActiveWeapon
+agpb_list
+agpb_netlist 0 m_iHealth
+agpb_netlist 0 m_iTeamNum
+agpb_netlist 0 m_lifeState
+agpb_netlist 0 m_vecOrigin
+agpb_netlist 0 m_vecVelocity
+agpb_netlist 0 m_angEyeAngles
+agpb_netlist 0 m_iAmmo
+agpb_netlist 0 m_iAccount
+agpb_netlist 0 m_iClass
+agpb_netlist 0 m_iShotsFired
+agpb_netlist 0 m_hActiveWeapon
+agpb_netlist 0 m_flNextAttack
+agpb_nethandle 0 m_hActiveWeapon
 ```
 
 ### 期望值与判读
 
 | 命令 | 已实测的期望输出 | 在验证什么 |
 |---|---|---|
-| `agentbot_list` | `[0] agent_xx slot=.. team=3 want=3 hp=100 wpn=usp` | 基线：队伍/血量/武器 |
+| `agpb_list` | `[0] AgPB_xx slot=.. team=3 want=3 hp=100 wpn=usp` | 基线：队伍/血量/武器 |
 | `m_iHealth` | `+364 int = 100` | 标量 + `baseclass` 偏移递归 |
 | `m_iTeamNum` | `+716 int = 3` | 同上 |
 | `m_lifeState` | `int = 0` | `LIFE_ALIVE` |
@@ -72,11 +72,11 @@ agentbot_nethandle 0 m_hActiveWeapon
 | `m_flNextAttack` | `float`（实测 11.43，= 可再次攻击的时间点） | **它在网络表里**，不需要 datamap |
 | `m_vecOrigin` | **会出现 3 次**，同名同偏移 | 不是 bug：`cs_player.cpp` 235/322/341 在三个玩家表里各注册一次 |
 | `m_lifeState` | `+368 int = 0`（`LIFE_ALIVE`） | **int 宽度只能从 proxy 得到**，见 ARCHIVE §4 |
-| `agentbot_nethandle 0 m_hActiveWeapon` | `stride=-1` → `raw=0x...` → `entry=N` → **`resolved=yes class=CWeaponUSP`**（实测） | **EHANDLE 解包 + 实体解析** |
+| `agpb_nethandle 0 m_hActiveWeapon` | `stride=-1` → `raw=0x...` → `entry=N` → **`resolved=yes class=CWeaponUSP`**（实测） | **EHANDLE 解包 + 实体解析** |
 
-`class=` 里的武器名要和 `agentbot_list` 的 `wpn=` 对得上（一个是 ServerClass 名，一个是 `IPlayerInfo` 的说法）。
+`class=` 里的武器名要和 `agpb_list` 的 `wpn=` 对得上（一个是 ServerClass 名，一个是 `IPlayerInfo` 的说法）。
 
-`agentbot_nethandle` 会先把字段信息全打出来，所以失败时能立刻看出是
+`agpb_nethandle` 会先把字段信息全打出来，所以失败时能立刻看出是
 「字段不存在」还是「句柄为空」还是「serial 校验没过」。
 
 ---
@@ -88,31 +88,31 @@ agentbot_nethandle 0 m_hActiveWeapon
 而整个架构（不走 CCSBot、自己注入 usercmd）的前提就是它。
 
 ```
-agentbot_testmove 0 400 90
+agpb_testmove 0 400 90
 ```
 
 **★ 这里等 2 秒**，同时看着游戏里的 bot 是否开始往前走。
 
 ```
-agentbot_netlist 0 m_vecVelocity
-agentbot_netlist 0 m_angEyeAngles
-agentbot_netlist 0 m_vecOrigin
-agentbot_testmove 0 0 0
-agentbot_netlist 0 m_vecVelocity
+agpb_netlist 0 m_vecVelocity
+agpb_netlist 0 m_angEyeAngles
+agpb_netlist 0 m_vecOrigin
+agpb_testmove 0 0 0
+agpb_netlist 0 m_vecVelocity
 ```
 
-`agentbot_testmove` 的输入是**持续生效**的（值存在 bot 对象里，每 tick 写进 `CUserCmd`），
-直到下一条 `agentbot_testmove` 把它改掉，所以不需要掐时间。
+`agpb_testmove` 的输入是**持续生效**的（值存在 bot 对象里，每 tick 写进 `CUserCmd`），
+直到下一条 `agpb_testmove` 把它改掉，所以不需要掉时间。
 
 ### ✅ 已实测通过（2026-09-19）
 
 ```
-agentbot_testmove 0 400 90
+agpb_testmove 0 400 90
   m_vecVelocity[0] = -0.0000
   m_vecVelocity[1] = 250.0000     <-- yaw=90 即 +Y 方向；250 正好是 USP 跑速上限
   m_vecVelocity[2] =  0.0000
   m_angEyeAngles[1] = 90.0000     <-- 我给的 yaw 原样出现在视角字段里
-agentbot_testmove 0 0 0
+agpb_testmove 0 0 0
 ```
 
 方向、大小、速度上限**三个都对**：
@@ -145,12 +145,12 @@ Think() -> IBotController::RunPlayerMove() -> CPlayerMove::RunCommand -> PM_Move
 
 | 命令 | 说明 |
 |---|---|
-| `agentbot_add [team]` | 创建 bot（1=观察者 2=T 3=CT） |
-| `agentbot_kick <idx\|all>` | 移除 bot |
-| `agentbot_list` | 列出所有 bot |
-| `agentbot_team <idx> <team>` | 运行时切换队伍 |
-| `agentbot_netlist <idx> [filter]` | 展开 SendTable 字段表（字段名 / 偏移 / 当前值） |
-| `agentbot_nethandle <idx> <field>` | 解包 EHANDLE 并解析回实体 |
-| `agentbot_testmove <idx> <fwd> [yaw]` | **【临时】** 注入 `forwardmove` / `viewangles.y`；M3 的 `control` 模块接管后删除。值存在 bot 对象里，**持续生效**直到被改掉 |
+| `agpb_add [team]` | 创建 bot（1=观察者 2=T 3=CT） |
+| `agpb_kick <idx\|all>` | 移除 bot |
+| `agpb_list` | 列出所有 bot |
+| `agpb_team <idx> <team>` | 运行时切换队伍 |
+| `agpb_netlist <idx> [filter]` | 展开 SendTable 字段表（字段名 / 偏移 / 当前值） |
+| `agpb_nethandle <idx> <field>` | 解包 EHANDLE 并解析回实体 |
+| `agpb_testmove <idx> <fwd> [yaw]` | **【临时】** 注入 `forwardmove` / `viewangles.y`；M3 的 `control` 模块接管后删除。值存在 bot 对象里，**持续生效**直到被改掉 |
 
-ConVar：`agentbot_enable`（默认 1）、`agentbot_team`（默认 2）。
+ConVar：`agpb_enable`（默认 1）、`agpb_team`（默认 2）。

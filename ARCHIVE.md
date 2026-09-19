@@ -1,6 +1,6 @@
-# agentbot 项目归档
+# AgPB 项目归档
 
-> Counter-Strike: Source（Source 1 / Win64）的 agent 控制 bot
+> AgPB —— Counter-Strike: Source（Source 1 / Win64）的 agent 控制 bot 插件
 > 归档时间：2026-09-19
 > 状态：**M2.5 完成** —— 包括「ucmd 注入真的驱动玩家」这条关键验证
 > M1 / M2 / M2.5 全部实测通过；下一步 M3：EBot 移植（`Engine` → `Client` → `waypoint` → `control`/`navigate`/`combat`）
@@ -27,7 +27,7 @@ E:\Plugins-Platform\
 ├─ metamod-source\             # Metamod:Source 2.0.0-Rel (CNSR-nillerusr-x64)
 ├─ sourcemod\                  # 未使用，仅作参考
 ├─ refs\CS-EBOT\               # EBot 参考源码（clone 自 EfeDursun125/CS-EBOT）
-└─ agentbot\                   # 本插件
+└─ AgPB\                       # 本插件
 ```
 
 | 项 | 值 |
@@ -214,21 +214,21 @@ IServerGameEnts::EdictToBaseEntity(edict)   // "ServerGameEnts001"，eiface.h:67
 ## 4. 当前代码
 
 ```
-agentbot/
+AgPB/
 ├─ AMBuildScript          # AMBuild 2.2（由 s2_sample_mm 改造，删掉 Source2-only 断言）
 ├─ configure.py
-├─ AMBuilder              # 产出 agentbot_mm.dll
+├─ AMBuilder              # 产出 agpb_mm.dll
 ├─ plugin-metadata.json
 ├─ ARCHIVE.md             # 本文档
 ├─ README.md
-├─ addons/metamod/agentbot.vdf
+├─ addons/metamod/AgPB.vdf
 └─ src/
    ├─ plugin.h / plugin.cpp     # MMS 入口、GameFrame 钩子、控制台命令
    ├─ bot.h    / bot.cpp        # 假客户端生命周期、队伍切换、命令链驱动、netvar 取值
    └─ netvars.h / netvars.cpp   # M2：SendTable 反射层（字段名 → 偏移 → 读值）
 ```
 
-规模：**6 个文件 / 1973 行 / 60.2 KB**，产物 `agentbot_mm.dll` ≈ 398 KB。
+规模：**6 个文件 / 1973 行 / 60.2 KB**，产物 `agpb_mm.dll` ≈ 398 KB。
 
 > 编译告警：`/W3` 下插件代码自身 **0 warning**；但 `cl` 命令行会多报一条
 > `warning D9025: 正在重写 "/Zi"(用 "/Z7")`，来自 manifest 的默认 flags，无害。
@@ -379,7 +379,7 @@ float / vec3 仍是直接内存读（宽度无歧义 4 / 12 字节），顺便�
 ### M2.5 实测结果：ucmd 注入真的驱动了玩家（2026-09-19）
 
 ```
-agentbot_testmove 0 400 90     // forwardmove=400, viewangles.y=90
+agpb_testmove 0 400 90     // forwardmove=400, viewangles.y=90
   m_vecVelocity[0] = -0.0000
   m_vecVelocity[1] = 250.0000     <-- yaw=90 即 +Y 方向，而 250 正好是 USP 跑速上限
   m_vecVelocity[2] =  0.0000
@@ -407,7 +407,7 @@ Think() -> IBotController::RunPlayerMove() -> CPlayerMove::RunCommand -> PM_Move
 | `props=` | 652（虚高） | **268** |
 | `m_iAmmo` | 找不到（只剩 32 个匿名 `"000"`..`"031"`） | `+2136 array [32 x 4] elem=int` |
 
-`m_iTeamNum` 读回 `3`（CT，与 `agentbot_list` 一致），
+`m_iTeamNum` 读回 `3`（CT，与 `agpb_list` 一致），
 `m_iAmmo` 元素 `[8] = 100`，而这个 bot 手里拿的是 **USP（12/100）**，
 即 8 号弹药 = 9mm、备弹 100 发 —— **数值与游戏内完全对得上**。
 
@@ -460,7 +460,7 @@ pEdict = engine->PEntityOfEntIndex( entry );                    // eiface.h:143
 **实测已通过（2026-09-19）**：
 
 ```
-agentbot_nethandle 0 m_hActiveWeapon
+agpb_nethandle 0 m_hActiveWeapon
   offset=+2648 type=0 elems=1 stride=-1
   raw=0x0000000002C42061
   entry=97 serial=11330 resolved=yes class=CWeaponUSP
@@ -508,7 +508,7 @@ NetVar_GetArrayInt / NetVar_GetArrayFloat( pBase, nv, index )   // base + offset
 实体基址：`pEdict->GetUnknown()->GetBaseEntity()`（`iserverunknown.h:31`），
 公开头文件里 `CBaseEntity` 只有前置声明，所以当不透明指针用。
 
-`CAgentBot` 上的便捷封装（名字查表 + 类型检查，失败返回默认值）：
+`CAgPB` 上的便捷封装（名字查表 + 类型检查，失败返回默认值）：
 
 ```cpp
 void *NetVarBase() const;
@@ -532,7 +532,7 @@ SendTable 只覆盖**网络字段**。CS:S 里绝大多数需要的量（`m_iHea
 flowchart TB
   ENG["引擎事件：GameFrame（66 Hz）"]
 
-  subgraph PLUGIN["agentbot（只做引擎适配）"]
+  subgraph PLUGIN["AgPB（只做引擎适配）"]
     JOIN["TryJoinTeam()<br/>ChangeTeam + joinclass"]
     MOVE["IBotController::RunPlayerMove()"]
     NET["CNetVarRegistry<br/>edict -> ServerClass -> SendTable"]
@@ -563,7 +563,7 @@ struct BotEngineContext {
     bool IsReady() const;
 };
 
-class CAgentBot {
+class CAgPB {
     bool Create( const BotEngineContext &ctx, const char *name, int team, char *error, size_t maxlen );
     void Destroy();
     void Think( CGlobalVars *pGlobals );
@@ -601,15 +601,15 @@ class CAgentBot {
 
 | 命令 | 说明 |
 |---|---|
-| `agentbot_add [team]` | 创建 bot（1=观察者 2=T 3=CT） |
-| `agentbot_team <idx> <team>` | 运行时切换队伍 |
-| `agentbot_list` | 列出所有 bot（实际队伍 / 目标队伍 / 血量 / 武器 / 坐标） |
-| `agentbot_kick <idx\|all>` | 移除 bot |
-| `agentbot_netlist <idx> [filter]` | 展开该 bot 的 SendTable 字段表（字段名 / 偏移 / 当前值），M2 的验证工具 |
-| `agentbot_nethandle <idx> <field>` | 把 EHANDLE 字段解包并解析回实体（打印 entry / serial / class） |
-| `agentbot_testmove <idx> <fwd> [yaw]` | **【临时】** 把 `forwardmove` / `viewangles.y` 写进下一条 `CUserCmd`，验证 ucmd 注入链路 |
+| `agpb_add [team]` | 创建 bot（1=观察者 2=T 3=CT） |
+| `agpb_team <idx> <team>` | 运行时切换队伍 |
+| `agpb_list` | 列出所有 bot（实际队伍 / 目标队伍 / 血量 / 武器 / 坐标） |
+| `agpb_kick <idx\|all>` | 移除 bot |
+| `agpb_netlist <idx> [filter]` | 展开该 bot 的 SendTable 字段表（字段名 / 偏移 / 当前值），M2 的验证工具 |
+| `agpb_nethandle <idx> <field>` | 把 EHANDLE 字段解包并解析回实体（打印 entry / serial / class） |
+| `agpb_testmove <idx> <fwd> [yaw]` | **【临时】** 把 `forwardmove` / `viewangles.y` 写进下一条 `CUserCmd`，验证 ucmd 注入链路 |
 
-ConVar：`agentbot_enable`（默认 1）、`agentbot_team`（默认 2）。
+ConVar：`agpb_enable`（默认 1）、`agpb_team`（默认 2）。
 
 ---
 
@@ -618,28 +618,28 @@ ConVar：`agentbot_enable`（默认 1）、`agentbot_team`（默认 2）。
 ### 构建
 
 ```powershell
-cd E:\Plugins-Platform\agentbot
+cd E:\Plugins-Platform\AgPB
 mkdir build
 cd build
 cmd /c '"E:\vs\VC\Auxiliary\Build\vcvarsall.bat" amd64 && chcp 65001 && set PYTHONIOENCODING=utf-8 && py ../configure.py -s css --targets x86_64 --enable-optimize && ambuild'
 ```
 
-产物：`build\agentbot_mm\windows-x86_64\agentbot_mm.dll`
+产物：`build\agpb_mm\windows-x86_64\agpb_mm.dll`
 
 ### 部署（x64 子目录约定）
 
 ```
-cstrike/addons/agentbot/bin/win64/agentbot_mm.dll
-cstrike/addons/metamod/agentbot.vdf
+cstrike/addons/AgPB/bin/win64/agpb_mm.dll
+cstrike/addons/metamod/AgPB.vdf
 ```
 
-`agentbot.vdf`：
+`AgPB.vdf`：
 
 ```
 "Metamod Plugin"
 {
-	"alias"		"agentbot"
-	"file"		"addons/agentbot/bin/win64/agentbot_mm"
+	"alias"		"AgPB"
+	"file"		"addons/AgPB/bin/win64/agpb_mm"
 }
 ```
 
@@ -649,47 +649,47 @@ cstrike/addons/metamod/agentbot.vdf
 启动后控制台出现下面这行即部署成功：
 
 ```
-[AGENTBOT] loaded. gpGlobals=..., IBotManager=..., helpers=...
+[AgPB] loaded. gpGlobals=..., IBotManager=..., helpers=...
 ```
 
 ### 验收
 
 ```
-agentbot_kick all
-agentbot_add 2
+agpb_kick all
+agpb_add 2
 mp_restartgame 1        // 关键：回合重启时才会出生
-agentbot_list
+agpb_list
 ```
 
-期望：控制台出现 `[AGENTBOT] 1 bot(s), IBotManager=ok, helpers=ok`，
+期望：控制台出现 `[AgPB] 1 bot(s), IBotManager=ok, helpers=ok`，
 列表里 `[0]` 为 `team=2 want=2 hp=100`。
 
 然后验证反射层：
 
 ```
-agentbot_netlist 0 m_iHealth
-agentbot_netlist 0 m_iAmmo
-agentbot_netlist 0 m_angEyeAngles      // 负偏移 / VECTORELEM
-agentbot_netlist 0 m_vecVelocity       // 负偏移 / VECTORELEM
-agentbot_netlist 0 m_hViewModel        // 真 DPT_Array
+agpb_netlist 0 m_iHealth
+agpb_netlist 0 m_iAmmo
+agpb_netlist 0 m_angEyeAngles      // 负偏移 / VECTORELEM
+agpb_netlist 0 m_vecVelocity       // 负偏移 / VECTORELEM
+agpb_netlist 0 m_hViewModel        // 真 DPT_Array
 ```
 
 已实测输出（2026-09-19，修复数组展开之后）：
 
 ```
-[AGENTBOT] agent_01 class=CCSPlayer props=268 base=0x... filter=m_iHealth
+[AgPB] AgPB_01 class=CCSPlayer props=268 base=0x... filter=m_iHealth
   m_iHealth                        +364   int    = 100
 
-[AGENTBOT] agent_01 class=CCSPlayer props=268 base=0x... filter=m_iAmmo
+[AgPB] AgPB_01 class=CCSPlayer props=268 base=0x... filter=m_iAmmo
   m_iAmmo                          +2136  array  [32 x 4] elem=int
       [ 8] = 100
       ... 其余为 0
 
-[AGENTBOT] ... filter=m_angEyeAngles          // 负偏移 / VECTORELEM
+[AgPB] ... filter=m_angEyeAngles          // 负偏移 / VECTORELEM
   m_angEyeAngles[0]                +6984  float  = 0.0000
   m_angEyeAngles[1]                +6988  float  = 0.0000
 
-[AGENTBOT] ... filter=m_vecVelocity           // 负偏移 / VECTORELEM
+[AgPB] ... filter=m_vecVelocity           // 负偏移 / VECTORELEM
   m_vecVelocity[0]                 +888   float  = 0.0000
   m_vecVelocity[1]                 +892   float  = 0.0000
   m_vecVelocity[2]                 +896   float  = 0.0000
@@ -856,7 +856,7 @@ bool IsVisible(const Vector& origin, edict_t* ent)
 | `angles` | `m_angRotation` | 实体朝向（不等于玩家视角） |
 | `model` | `m_nModelIndex` | |
 | `frags` | `m_iScore`（CS:S 里的名字待确认） | |
-| `classname` | —— | **不是 netvar**，用 `AgentBot_EntityClassName()` ✅ 已实现 |
+| `classname` | —— | **不是 netvar**，用 `AgPB_EntityClassName()` ✅ 已实现 |
 | `iuser1..4` | —— | **GoldSrc 专用草稿字段**，必须换成 `Entity` 包装类自己的成员 |
 | `absmin`/`absmax`/`size`/`spawnflags`/`targetname`/`netname`/`weapons`/`gravity`/`speed`/`maxspeed`/`impulse`/`dmg*` | 多为非网络或 CS:S 无对应 | 按需 stub |
 
@@ -957,9 +957,9 @@ CS:S 是 66 tick → 每帧 15.15 ms；LLM 往返 300~2000 ms = 20~130 帧。
 | 阶段 | 内容 | 状态 |
 |---|---|---|
 | **M1** | 无 AI 假客户端 + usercmd 注入 + 队伍切换 | ✅ |
-| — | 原型脚手架（`percept.*` / `BotIntent` / `agentbot_drive` 等） | 🗑 已删除 |
+| — | 原型脚手架（`percept.*` / `BotIntent` / `agpb_drive` 等） | 🗑 已删除 |
 | **M2** | netvar 反射层（`Entity` 底座）：标量 / VECTORELEM / 两套数组 / EHANDLE | ✅ 已实测 |
-| **M2.5** | ucmd 注入端到端验证（`agentbot_testmove` → `m_vecVelocity` / `m_angEyeAngles`） | ✅ 已实测通过 |
+| **M2.5** | ucmd 注入端到端验证（`agpb_testmove` → `m_vecVelocity` / `m_angEyeAngles`） | ✅ 已实测通过 |
 | **M3** | EBot 移植：`Engine` → `Client` → `waypoint` → `control`/`navigate`/`combat` | ⬜ |
 | **M4** | UDP 桥 + Python agent | ⬜ |
 | **M5** | LLM 战术层 | ⬜ |
@@ -969,11 +969,11 @@ CS:S 是 66 tick → 每帧 15.15 ms；LLM 往返 300~2000 ms = 20~130 帧。
 | # | 决策 | 理由 |
 |---|---|---|
 | 1 | **不保留** `percept.*` / `BotIntent` 原型脚手架 | EBot 自带 `FindFriendsAndEnemiens` 更完整（无敌/隐藏判定、dark_mode、路径距离、ZP 分支），自带 control/navigate/ssm。留着就是重复实现 + 死代码 |
-| 2 | 插件部署路径用 **`addons/agentbot/bin/win64/`** | 与 MMS 自身 x64 打包布局（`addons/metamod/bin/win64/server.dll`）保持一致 |
+| 2 | 插件部署路径用 **`addons/AgPB/bin/win64/`** | 与 MMS 自身 x64 打包布局（`addons/metamod/bin/win64/server.dll`）保持一致 |
 | 3 | 视野锥/视角读取方式 | 讨论过"用上一条指令的 yaw"（准确但只反映指令）vs"读真正的视角"（需 netvar）。**结论：读 netvar**。CS:S 里视角是 `DT_CCSPlayer` 的两个独立浮点属性 `m_angEyeAngles[0]`（pitch）与 `m_angEyeAngles[1]`（yaw），见 `game/server/cstrike/cs_player.cpp:377-378`（`SendPropAngle` + `SENDINFO_VECTORELEM`）。**不存在 `pl.v_angle` 这个网络字段**。顺带：VECTORELEM 传的是负偏移，正好用来验证 M2 的 `abs()` 防御 |
 | 4 | netvar 走 **SendTable 而不是 datamap** | `GetDataDescMap()` 是虚函数，索引无法在编译期得知（SourceMod 也靠 gamedata）。SendTable 全链路都是编译器解析的，**零硬编码索引、零特征码**。展开规则：`offset += pProp->GetOffset()` 递归；负偏移（`SENDPROP_VECTORELEM`）取绝对值 |
-| 5 | M2 不做完整 `Entity` 类，只做字段表 + 取值封装 | 先把"名字 → 偏移 → 值"跑通再谈抽象；`CAgentBot` 上的 `GetNetVar*()` + `agentbot_netlist` 就是验证器 |
-| 6 | 用 `agentbot_netlist` 而不是把 `agentbot_sense` 加回来 | 后者是已删除的原型脚手架；前者是 M2 自己的工具，同时充当移植 `Client` 类时的字段名字典 |
+| 5 | M2 不做完整 `Entity` 类，只做字段表 + 取值封装 | 先把"名字 → 偏移 → 值"跑通再谈抽象；`CAgPB` 上的 `GetNetVar*()` + `agpb_netlist` 就是验证器 |
+| 6 | 用 `agpb_netlist` 而不是把 `agpb_sense` 加回来 | 后者是已删除的原型脚手架；前者是 M2 自己的工具，同时充当移植 `Client` 类时的字段名字典 |
 
 ### 待定
 
@@ -994,7 +994,7 @@ M1 / M2 / M2.5 全部实测通过。**「不走 CCSBot、自己创建假客户�
 
 | 结论 | 证据 |
 |---|---|
-| `BotManager001` 能创建**无 AI** 假客户端 | `agentbot_add 3` 后正常出生 |
+| `BotManager001` 能创建**无 AI** 假客户端 | `agpb_add 3` 后正常出生 |
 | `IBotController::RunPlayerMove()` **真的驱动玩家** | `forwardmove=400` + `yaw=90` → `m_vecVelocity[1]=250`（= +Y 方向且 = USP 跑速上限） |
 | 假客户端视角**跟随 `CUserCmd`** | `yaw=90` → `m_angEyeAngles[1]=90.0000` |
 | SendTable 反射可用，**零硬编码索引 / 零特征码** | `CCSPlayer` 展开 268 字段，偏移与游戏内数值全部一致 |
@@ -1036,6 +1036,6 @@ m_flNextAttack    +2044
 
 | 东西 | 处理 |
 |---|---|
-| `agentbot_testmove` | 临时验证接口，M3 的 control 接管后**删** |
-| `agentbot_netlist` / `agentbot_nethandle` | **留着** —— M3 移植时的字段字典与句柄调试器 |
+| `agpb_testmove` | 临时验证接口，M3 的 control 接管后**删** |
+| `agpb_netlist` / `agpb_nethandle` | **留着** —— M3 移植时的字段字典与句柄调试器 |
 | `BotEngineContext::pTrace` / `pGameEnts` | 留着，M3 的视线判定要用 |

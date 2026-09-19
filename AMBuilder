@@ -5,7 +5,7 @@ for sdk_target in MMSPlugin.sdk_targets:
   sdk = sdk_target.sdk
   cxx = sdk_target.cxx
 
-  binary = MMSPlugin.HL2Library(builder, cxx, 'agentbot_mm', sdk)
+  binary = MMSPlugin.HL2Library(builder, cxx, 'agpb_mm', sdk)
 
   binary.sources += [
     'src/plugin.cpp',

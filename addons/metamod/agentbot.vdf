@@ -1,5 +1,0 @@
-"Metamod Plugin"
-{
-	"alias"		"agentbot"
-	"file"		"addons/agentbot/bin/win64/agentbot_mm"
-}

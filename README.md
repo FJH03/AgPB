@@ -1,7 +1,7 @@
 # AgPB
 
-Counter-Strike: Source（Source 1 / Win64）的 **agent 控制 bot** 插件
-（插件内部名 / VDF alias：`agentbot`）。
+Counter-Strike: Source（Source 1 / Win64）的 agent 控制 bot 插件
+（插件内部名 / VDF alias：`AgPB`）。
 
 - 不使用 SourceMod
 - 不使用引擎自带的 `CCSBot` / `CCSBotManager`
@@ -50,7 +50,7 @@ m_pParent->PlayerRunCommand( &cmd, MoveHelperServer() );
 
 ```
 引擎事件（GameFrame, 66 Hz）
-  └─ CAgentBot::Think()
+  └─ CAgPB::Think()
        ├─ TryJoinTeam()                     入队 + 出生（ChangeTeam / joinclass）
        └─ IBotController::RunPlayerMove()   驱动引擎命令链
 
@@ -95,17 +95,17 @@ E:\Plugins-Platform\
   hl2sdk-css\            <- CS:S SDK（含 source-engine-czero）
   hl2sdk-manifests\
   metamod-source\
-  agentbot\              <- 本插件
+  AgPB\                    <- 本插件
 ```
 
 ```powershell
-cd E:\Plugins-Platform\agentbot
+cd E:\Plugins-Platform\AgPB
 mkdir build
 cd build
 cmd /c '"E:\vs\VC\Auxiliary\Build\vcvarsall.bat" amd64 && chcp 65001 && set PYTHONIOENCODING=utf-8 && py ../configure.py -s css --targets x86_64 --enable-optimize && ambuild'
 ```
 
-产物：`build\agentbot_mm\windows-x86_64\agentbot_mm.dll`
+产物：`build\agpb_mm\windows-x86_64\agpb_mm.dll`
 
 > 注意：`hl2sdk-css\source-engine-czero\build\{tier0,vstdlib,mathlib,tier1}\*.lib`
 > 必须先存在，否则链接会失败（Metamod:Source 本身也依赖这几个库）。
@@ -113,24 +113,24 @@ cmd /c '"E:\vs\VC\Auxiliary\Build\vcvarsall.bat" amd64 && chcp 65001 && set PYTH
 ## 部署
 
 ```
-cstrike/addons/agentbot/bin/win64/agentbot_mm.dll
-cstrike/addons/metamod/agentbot.vdf
+cstrike/addons/AgPB/bin/win64/agpb_mm.dll
+cstrike/addons/metamod/AgPB.vdf
 ```
 
-`agentbot.vdf`：
+`AgPB.vdf`：
 
 ```
 "Metamod Plugin"
 {
-	"alias"		"agentbot"
-	"file"		"addons/agentbot/bin/win64/agentbot_mm"
+	"alias"		"AgPB"
+	"file"		"addons/AgPB/bin/win64/agpb_mm"
 }
 ```
 
 启动后控制台出现下面这行即部署成功：
 
 ```
-[AGENTBOT] loaded. gpGlobals=..., IBotManager=..., helpers=...
+[AgPB] loaded. gpGlobals=..., IBotManager=..., helpers=...
 ```
 
 另外建议在 `server.cfg` 里把引擎自带 bot 关掉，避免 `bot_quota` 干预：
@@ -144,15 +144,15 @@ bot_quota_mode normal
 
 | 命令 | 说明 |
 |---|---|
-| `agentbot_add [team]` | 创建一个 agent bot（1=观察者 2=T 3=CT） |
-| `agentbot_team <idx> <team>` | 运行时切换队伍：1=观察者 2=T 3=CT |
-| `agentbot_list` | 列出所有 bot（实际队伍 / 目标队伍 / 血量 / 武器 / 坐标） |
-| `agentbot_kick <idx\|all>` | 移除 bot |
-| `agentbot_netlist <idx> [filter]` | 打印该 bot 的 SendTable 字段表（名字 / 偏移 / 当前值） |
-| `agentbot_nethandle <idx> <field>` | 解包 EHANDLE 字段并解析回实体（entry / serial / class） |
-| `agentbot_testmove <idx> <fwd> [yaw]` | **【临时】** 注入 `forwardmove` / `viewangles.y`，验证 ucmd 注入链路 |
+| `agpb_add [team]` | 创建一个 AgPB bot（1=观察者 2=T 3=CT） |
+| `agpb_team <idx> <team>` | 运行时切换队伍：1=观察者 2=T 3=CT |
+| `agpb_list` | 列出所有 bot（实际队伍 / 目标队伍 / 血量 / 武器 / 坐标） |
+| `agpb_kick <idx\|all>` | 移除 bot |
+| `agpb_netlist <idx> [filter]` | 打印该 bot 的 SendTable 字段表（名字 / 偏移 / 当前值） |
+| `agpb_nethandle <idx> <field>` | 解包 EHANDLE 字段并解析回实体（entry / serial / class） |
+| `agpb_testmove <idx> <fwd> [yaw]` | **【临时】** 注入 `forwardmove` / `viewangles.y`，验证 ucmd 注入链路 |
 
-ConVar：`agentbot_enable`（默认 1）、`agentbot_team`（默认 2）。
+ConVar：`agpb_enable`（默认 1）、`agpb_team`（默认 2）。
 
 ## 验收
 
@@ -161,7 +161,7 @@ ConVar：`agentbot_enable`（默认 1）、`agentbot_team`（默认 2）。
 最关键的结论已经实测通过：
 
 ```
-agentbot_testmove 0 400 90
+agpb_testmove 0 400 90
   m_vecVelocity[1] = 250.0000      <-- yaw=90 即 +Y 方向；250 正好是 USP 跑速上限
   m_angEyeAngles[1] = 90.0000      <-- 注入的 yaw 原样出现在视角字段里
 ```

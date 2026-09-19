@@ -1,0 +1,5 @@
+"Metamod Plugin"
+{
+	"alias"		"AgPB"
+	"file"		"addons/AgPB/bin/win64/agpb_mm"
+}

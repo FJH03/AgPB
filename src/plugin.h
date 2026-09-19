@@ -1,13 +1,13 @@
 /**
- * agentbot - agent-controlled bots for Counter-Strike: Source.
+ * AgPB - agent-controlled bots for Counter-Strike: Source.
  *
  * 设计要点：完全不使用引擎自带的 CCSBot / CCSBotManager。
  * 假客户端由 server.dll 暴露的 IBotManager ("BotManager001") 创建，
  * 逐 tick 的 usercmd 由 IBotController::RunPlayerMove() 注入。
  */
 
-#ifndef _INCLUDE_AGENTBOT_PLUGIN_H_
-#define _INCLUDE_AGENTBOT_PLUGIN_H_
+#ifndef _INCLUDE_AGPB_PLUGIN_H_
+#define _INCLUDE_AGPB_PLUGIN_H_
 
 #include <ISmmPlugin.h>
 #include <igameevents.h>
@@ -20,7 +20,7 @@
 
 #include "version_gen.h"
 
-class AgentBotPlugin : public ISmmPlugin, public IMetamodListener
+class AgPBPlugin : public ISmmPlugin, public IMetamodListener
 {
 public:
 	bool Load(PluginId id, ISmmAPI *ismm, char *error, size_t maxlen, bool late);
@@ -47,8 +47,8 @@ public: // plugin metadata
 	const char *GetLogTag() { return PLUGIN_LOGTAG; }
 };
 
-extern AgentBotPlugin g_AgentBotPlugin;
+extern AgPBPlugin g_AgPBPlugin;
 
 PLUGIN_GLOBALVARS();
 
-#endif // _INCLUDE_AGENTBOT_PLUGIN_H_
+#endif // _INCLUDE_AGPB_PLUGIN_H_

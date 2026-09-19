@@ -1,5 +1,5 @@
 /**
- * agentbot - bot 生命周期、队伍切换与底层命令注入。
+ * AgPB - bot 生命周期、队伍切换与底层命令注入。
  */
 
 #include <stdio.h>
@@ -30,7 +30,7 @@ static void RunClientCommand( IServerPluginHelpers *pHelpers, edict_t *pEdict, c
 	pHelpers->ClientCommand( pEdict, pszCmd );
 }
 
-CAgentBot::CAgentBot()
+CAgPB::CAgPB()
 {
 	m_Name[0] = '\0';
 	m_pEdict = NULL;
@@ -46,7 +46,7 @@ CAgentBot::CAgentBot()
 	m_flTestYaw = 0.0f;
 }
 
-bool CAgentBot::Create( const BotEngineContext &ctx,
+bool CAgPB::Create( const BotEngineContext &ctx,
 						const char *name,
 						int team,
 						char *error,
@@ -96,7 +96,7 @@ bool CAgentBot::Create( const BotEngineContext &ctx,
 	return true;
 }
 
-void CAgentBot::Destroy()
+void CAgPB::Destroy()
 {
 	if ( m_Ctx.pEngine != NULL && m_pEdict != NULL )
 	{
@@ -112,13 +112,13 @@ void CAgentBot::Destroy()
 	m_pInfo = NULL;
 }
 
-bool CAgentBot::SetTeam( int team )
+bool CAgPB::SetTeam( int team )
 {
 	switch ( team )
 	{
-		case AGENTBOT_TEAM_SPECTATOR:
-		case AGENTBOT_TEAM_T:
-		case AGENTBOT_TEAM_CT:
+		case AgPB_TEAM_SPECTATOR:
+		case AgPB_TEAM_T:
+		case AgPB_TEAM_CT:
 			break;
 
 		default:
@@ -135,7 +135,7 @@ bool CAgentBot::SetTeam( int team )
 	return true;
 }
 
-void CAgentBot::TryJoinTeam( float flCurTime )
+void CAgPB::TryJoinTeam( float flCurTime )
 {
 	if ( m_pInfo == NULL || m_iTeam <= 0 )
 		return;
@@ -150,7 +150,7 @@ void CAgentBot::TryJoinTeam( float flCurTime )
 		// CCSGameRules::FPlayerCanRespawn() 要求
 		// GetClass() != CS_CLASS_NONE，不发这一步不会出生。
 		// 观察者不需要。
-		if ( ( m_iTeam == AGENTBOT_TEAM_T || m_iTeam == AGENTBOT_TEAM_CT ) && !m_bClassRequested )
+		if ( ( m_iTeam == AgPB_TEAM_T || m_iTeam == AgPB_TEAM_CT ) && !m_bClassRequested )
 		{
 			m_bClassRequested = true;
 			RunClientCommand( m_Ctx.pHelpers, m_pEdict, "joinclass 0" );
@@ -173,7 +173,7 @@ void CAgentBot::TryJoinTeam( float flCurTime )
 	// 这种情况改走客户端命令通道（HandleCommand_JoinTeam 的检查更宽松）。
 	if ( m_pInfo->GetTeamIndex() != m_iTeam )
 	{
-		if ( m_iTeam == AGENTBOT_TEAM_SPECTATOR )
+		if ( m_iTeam == AgPB_TEAM_SPECTATOR )
 		{
 			RunClientCommand( m_Ctx.pHelpers, m_pEdict, "spectate" );
 		}
@@ -188,7 +188,7 @@ void CAgentBot::TryJoinTeam( float flCurTime )
 	m_flNextJoinAttempt = flCurTime + 0.5f;
 }
 
-void CAgentBot::Think( CGlobalVars *pGlobals )
+void CAgPB::Think( CGlobalVars *pGlobals )
 {
 	if ( !IsValid() || pGlobals == NULL )
 		return;
@@ -204,7 +204,7 @@ void CAgentBot::Think( CGlobalVars *pGlobals )
 	CBotCmd cmd;
 	cmd.Reset();
 
-	// 【临时】ucmd 注入验证：agentbot_testmove 设置这两个值。
+	// 【临时】ucmd 注入验证：agpb_testmove 设置这两个值。
 	// 默认为 0，行为与之前完全一致；M3 的 control 模块接管后删掉这一段。
 	if ( m_flTestForward != 0.0f || m_flTestYaw != 0.0f )
 	{
@@ -220,15 +220,15 @@ void CAgentBot::Think( CGlobalVars *pGlobals )
 }
 
 // ---------------------------------------------------------------------------
-// CAgentBotManager
+// CAgPBManager
 // ---------------------------------------------------------------------------
 
-CAgentBotManager::CAgentBotManager()
+CAgPBManager::CAgPBManager()
 {
 	m_iNextSerial = 1;
 }
 
-void CAgentBotManager::Init( const BotEngineContext &ctx, CreateInterfaceFn pServerFactory )
+void CAgPBManager::Init( const BotEngineContext &ctx, CreateInterfaceFn pServerFactory )
 {
 	m_Ctx = ctx;
 
@@ -240,14 +240,14 @@ void CAgentBotManager::Init( const BotEngineContext &ctx, CreateInterfaceFn pSer
 	}
 }
 
-void CAgentBotManager::Shutdown()
+void CAgPBManager::Shutdown()
 {
 	RemoveAll();
 
 	m_Ctx = BotEngineContext();
 }
 
-CAgentBot *CAgentBotManager::Add( int team, char *error, size_t maxlen )
+CAgPB *CAgPBManager::Add( int team, char *error, size_t maxlen )
 {
 	if ( !IsReady() )
 	{
@@ -257,9 +257,9 @@ CAgentBot *CAgentBotManager::Add( int team, char *error, size_t maxlen )
 	}
 
 	char szName[64];
-	snprintf( szName, sizeof( szName ), "agent_%02d", m_iNextSerial );
+	snprintf( szName, sizeof( szName ), "AgPB_%02d", m_iNextSerial );
 
-	CAgentBot *pBot = new CAgentBot();
+	CAgPB *pBot = new CAgPB();
 	if ( !pBot->Create( m_Ctx, szName, team, error, maxlen ) )
 	{
 		delete pBot;
@@ -272,12 +272,12 @@ CAgentBot *CAgentBotManager::Add( int team, char *error, size_t maxlen )
 	return pBot;
 }
 
-bool CAgentBotManager::Remove( int listIndex )
+bool CAgPBManager::Remove( int listIndex )
 {
 	if ( listIndex < 0 || listIndex >= m_Bots.Count() )
 		return false;
 
-	CAgentBot *pBot = m_Bots[listIndex];
+	CAgPB *pBot = m_Bots[listIndex];
 	pBot->Destroy();
 	delete pBot;
 
@@ -285,7 +285,7 @@ bool CAgentBotManager::Remove( int listIndex )
 	return true;
 }
 
-void CAgentBotManager::RemoveAll()
+void CAgPBManager::RemoveAll()
 {
 	for ( int i = 0; i < m_Bots.Count(); ++i )
 	{
@@ -296,7 +296,7 @@ void CAgentBotManager::RemoveAll()
 	m_Bots.RemoveAll();
 }
 
-void CAgentBotManager::RemoveByEdict( edict_t *pEdict )
+void CAgPBManager::RemoveByEdict( edict_t *pEdict )
 {
 	for ( int i = 0; i < m_Bots.Count(); ++i )
 	{
@@ -310,7 +310,7 @@ void CAgentBotManager::RemoveByEdict( edict_t *pEdict )
 	}
 }
 
-void CAgentBotManager::ThinkAll( CGlobalVars *pGlobals )
+void CAgPBManager::ThinkAll( CGlobalVars *pGlobals )
 {
 	for ( int i = 0; i < m_Bots.Count(); ++i )
 	{
@@ -318,7 +318,7 @@ void CAgentBotManager::ThinkAll( CGlobalVars *pGlobals )
 	}
 }
 
-CAgentBot *CAgentBotManager::Get( int listIndex )
+CAgPB *CAgPBManager::Get( int listIndex )
 {
 	if ( listIndex < 0 || listIndex >= m_Bots.Count() )
 		return NULL;
@@ -338,7 +338,7 @@ CNetVarRegistry &BotNetVarRegistry()
 	return s_Registry;
 }
 
-void *CAgentBot::NetVarBase() const
+void *CAgPB::NetVarBase() const
 {
 	if ( m_pEdict == NULL )
 		return NULL;
@@ -351,7 +351,7 @@ void *CAgentBot::NetVarBase() const
 	return (void *)pUnk->GetBaseEntity();
 }
 
-const CNetVarTable *CAgentBot::NetVarTable() const
+const CNetVarTable *CAgPB::NetVarTable() const
 {
 	if ( m_pEdict == NULL )
 		return NULL;
@@ -359,7 +359,7 @@ const CNetVarTable *CAgentBot::NetVarTable() const
 	return BotNetVarRegistry().GetForEdict( m_pEdict );
 }
 
-const BotNetVar *CAgentBot::FindNetVar( const char *name ) const
+const BotNetVar *CAgPB::FindNetVar( const char *name ) const
 {
 	const CNetVarTable *pTable = NetVarTable();
 	if ( pTable == NULL )
@@ -368,7 +368,7 @@ const BotNetVar *CAgentBot::FindNetVar( const char *name ) const
 	return pTable->Find( name );
 }
 
-bool CAgentBot::GetNetVarBool( const char *name, bool defaultValue ) const
+bool CAgPB::GetNetVarBool( const char *name, bool defaultValue ) const
 {
 	const BotNetVar *pVar = FindNetVar( name );
 	void *pBase = NetVarBase();
@@ -379,7 +379,7 @@ bool CAgentBot::GetNetVarBool( const char *name, bool defaultValue ) const
 	return NetVar_GetBool( pBase, *pVar );
 }
 
-int CAgentBot::GetNetVarInt( const char *name, int defaultValue ) const
+int CAgPB::GetNetVarInt( const char *name, int defaultValue ) const
 {
 	const BotNetVar *pVar = FindNetVar( name );
 	void *pBase = NetVarBase();
@@ -390,7 +390,7 @@ int CAgentBot::GetNetVarInt( const char *name, int defaultValue ) const
 	return NetVar_GetInt( pBase, *pVar );
 }
 
-float CAgentBot::GetNetVarFloat( const char *name, float defaultValue ) const
+float CAgPB::GetNetVarFloat( const char *name, float defaultValue ) const
 {
 	const BotNetVar *pVar = FindNetVar( name );
 	void *pBase = NetVarBase();
@@ -401,7 +401,7 @@ float CAgentBot::GetNetVarFloat( const char *name, float defaultValue ) const
 	return NetVar_GetFloat( pBase, *pVar );
 }
 
-Vector CAgentBot::GetNetVarVector( const char *name ) const
+Vector CAgPB::GetNetVarVector( const char *name ) const
 {
 	const BotNetVar *pVar = FindNetVar( name );
 	void *pBase = NetVarBase();
@@ -412,7 +412,7 @@ Vector CAgentBot::GetNetVarVector( const char *name ) const
 	return NetVar_GetVector( pBase, *pVar );
 }
 
-int CAgentBot::GetNetVarArrayInt( const char *name, int index, int defaultValue ) const
+int CAgPB::GetNetVarArrayInt( const char *name, int index, int defaultValue ) const
 {
 	const BotNetVar *pVar = FindNetVar( name );
 	void *pBase = NetVarBase();
@@ -429,7 +429,7 @@ int CAgentBot::GetNetVarArrayInt( const char *name, int index, int defaultValue 
 	return NetVar_GetArrayInt( pBase, *pVar, index );
 }
 
-float CAgentBot::GetNetVarArrayFloat( const char *name, int index, float defaultValue ) const
+float CAgPB::GetNetVarArrayFloat( const char *name, int index, float defaultValue ) const
 {
 	const BotNetVar *pVar = FindNetVar( name );
 	void *pBase = NetVarBase();
@@ -446,7 +446,7 @@ float CAgentBot::GetNetVarArrayFloat( const char *name, int index, float default
 	return NetVar_GetArrayFloat( pBase, *pVar, index );
 }
 
-bool CAgentBot::GetNetVarHandleValue( const char *name, uintp *pHandle ) const
+bool CAgPB::GetNetVarHandleValue( const char *name, uintp *pHandle ) const
 {
 	const BotNetVar *pVar = FindNetVar( name );
 	void *pBase = NetVarBase();
@@ -463,7 +463,7 @@ bool CAgentBot::GetNetVarHandleValue( const char *name, uintp *pHandle ) const
 	return true;
 }
 
-bool CAgentBot::GetNetVarHandle( const char *name, int *pEntry, int *pSerial ) const
+bool CAgPB::GetNetVarHandle( const char *name, int *pEntry, int *pSerial ) const
 {
 	uintp h = 0;
 
@@ -482,7 +482,7 @@ bool CAgentBot::GetNetVarHandle( const char *name, int *pEntry, int *pSerial ) c
 	return true;
 }
 
-edict_t *CAgentBot::HandleToEdict( uintp handle ) const
+edict_t *CAgPB::HandleToEdict( uintp handle ) const
 {
 	if ( m_Ctx.pEngine == NULL || !NetVar_HandleIsValid( handle ) )
 		return NULL;
@@ -512,13 +512,13 @@ edict_t *CAgentBot::HandleToEdict( uintp handle ) const
 	return pEdict;
 }
 
-void CAgentBot::SetTestInput( float forward, float yaw )
+void CAgPB::SetTestInput( float forward, float yaw )
 {
 	m_flTestForward = forward;
 	m_flTestYaw = yaw;
 }
 
-const char *AgentBot_EntityClassName( edict_t *pEdict )
+const char *AgPB_EntityClassName( edict_t *pEdict )
 {
 	if ( pEdict == NULL )
 		return NULL;
@@ -530,7 +530,7 @@ const char *AgentBot_EntityClassName( edict_t *pEdict )
 	return pNet->GetServerClass()->GetName();
 }
 
-uintp AgentBot_RefEHandle( edict_t *pEdict )
+uintp AgPB_RefEHandle( edict_t *pEdict )
 {
 	if ( pEdict == NULL )
 		return (uintp)INVALID_EHANDLE_INDEX;

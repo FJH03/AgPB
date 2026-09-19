@@ -1,11 +1,11 @@
 {
-    "name": "agentbot",
-    "alias": "agentbot",
-    "display_name": "Agent Bot",
-    "description": "Agent-controlled bots for Counter-Strike: Source (bypasses CCSBot AI entirely).",
+    "name": "AgPB",
+    "alias": "AgPB",
+    "display_name": "AgPB",
+    "description": "AgPB: agent-controlled bots for Counter-Strike: Source (bypasses CCSBot AI entirely).",
     "author": "FJH03",
     "url": "",
-    "log_tag": "AGENTBOT",
+    "log_tag": "AgPB",
     "license": "GPL-3.0",
     "version": "0.1.0.{{git-shorthash}}"
 }
