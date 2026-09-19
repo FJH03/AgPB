@@ -36,6 +36,10 @@ mp_restartgame 1
 **★ 这里等 2 秒**。`mp_restartgame 1` 之后回合重启才会把 bot 刷进地图
 （`CCSGameRules::FPlayerCanRespawn()` 的闸门，见 ARCHIVE §3.3）。
 
+> 2026-09-19 实测：这次 `agpb_add 3` 之后**没打** `mp_restartgame`，
+> `agpb_list` 就已经是 `hp=100` 且坐标有效 —— 所以 restart 不是每次都必需，
+> 但只要列表里出现 `hp=0` / 坐标全 0，就补一次 `mp_restartgame 1`
+
 ---
 
 ## 阶段 B —— 反射层全量检查
@@ -52,33 +56,57 @@ agpb_netlist 0 m_iAmmo
 agpb_netlist 0 m_iAccount
 agpb_netlist 0 m_iClass
 agpb_netlist 0 m_iShotsFired
-agpb_netlist 0 m_hActiveWeapon
 agpb_netlist 0 m_flNextAttack
 agpb_nethandle 0 m_hActiveWeapon
 ```
 
 ### 期望值与判读
 
-| 命令 | 已实测的期望输出 | 在验证什么 |
+| 命令 | 已实测输出（2026-09-19 复核） | 在验证什么 |
 |---|---|---|
-| `agpb_list` | `[0] AgPB_xx slot=.. team=3 want=3 hp=100 wpn=usp` | 基线：队伍/血量/武器 |
-| `m_iHealth` | `+364 int = 100` | 标量 + `baseclass` 偏移递归 |
-| `m_iTeamNum` | `+716 int = 3` | 同上 |
-| `m_lifeState` | `int = 0` | `LIFE_ALIVE` |
-| `m_vecOrigin` | `vec3 = x y z` | `DPT_Vector` |
+| `agpb_list` | `[0] AgPB_01 slot=2 team=3 want=3 hp=100 wpn=weapon_usp pos=...` | 基线：队伍 / 血量 / 武器 / 坐标 |
+| `m_iHealth` | `+364 s=-1 int = 100` | 标量 + `baseclass` 偏移递归 |
+| `m_iTeamNum` | `+716 s=-1 int = 3` | 同上 |
+| `m_lifeState` | `+368 s=-1 int = 0`（`LIFE_ALIVE`） | **int 宽度只能从 proxy 得到**，见 ARCHIVE §4 |
+| `m_vecOrigin` | `+1076 s=-1 vec3`，**同名同偏移出现 3 次** | `DPT_Vector`；3 次不是 bug：`cs_player.cpp` 235/322/341 在三个玩家表里各注册一次 |
 | `m_vecVelocity` | `[0] +888` / `[1] +892` / `[2] +896`，静止时全 `0.0000` | **负偏移 / `SENDPROP_VECTORELEM`** |
-| `m_angEyeAngles` | `[0] +6984` / `[1] +6988` | 同上（两项间隔 4 字节） |
-| `m_iAmmo` | `+2136 array [32 x 4] elem=int`，`[8] = 100` | **`SendPropArray3` 合成表折叠** |
-| `m_iAccount` | `int`（实测开局 800） | 经济系统 |
-| `m_flNextAttack` | `float`（实测 11.43，= 可再次攻击的时间点） | **它在网络表里**，不需要 datamap |
-| `m_vecOrigin` | **会出现 3 次**，同名同偏移 | 不是 bug：`cs_player.cpp` 235/322/341 在三个玩家表里各注册一次 |
-| `m_lifeState` | `+368 int = 0`（`LIFE_ALIVE`） | **int 宽度只能从 proxy 得到**，见 ARCHIVE §4 |
-| `agpb_nethandle 0 m_hActiveWeapon` | `stride=-1` → `raw=0x...` → `entry=N` → **`resolved=yes class=CWeaponUSP`**（实测） | **EHANDLE 解包 + 实体解析** |
+| `m_angEyeAngles` | `[0] +6984` / `[1] +6988`，静止时 `0.0000` | 同上（两项间隔 4 字节） |
+| `m_iAmmo` | `+2136 array [32 x 4] elem=int`，`[8] = 100`，其余全 `0` | **`SendPropArray3` 合成表折叠** |
+| `m_iAccount` | `+5384 s=-1 int = 800`（开局） | 经济系统 |
+| `m_iClass` | `+6940 s=-1 int`，值落在 **6..10**（本次实测 `7` = `CS_CLASS_GSG_9`） | 值**每次会变**：`joinclass 0` 是让引擎在 CT 职业里挑一个（`cs_shareddefs.h:196-215`）—— 判据是"落在 6..10"，不是"等于 7" |
+| `m_iShotsFired` | `+6504 s=-1 int = 0` | 标量 |
+| `m_flNextAttack` | `+2044 s=-1 float`（实测 9.18 / 11.43，随对局时间变化） | **它在网络表里**，不需要 datamap |
+| `agpb_nethandle 0 m_hActiveWeapon` | `raw=0x0000000007DF0061` → `entry=97 serial=32240` → `resolved=yes class=CWeaponUSP` | **EHANDLE 解包 + 实体解析**（本地 8 字节：entry 12 位 + serial 20 位） |
 
-`class=` 里的武器名要和 `agpb_list` 的 `wpn=` 对得上（一个是 ServerClass 名，一个是 `IPlayerInfo` 的说法）。
+`class=` 里的武器名要和 `agpb_list` 的 `wpn=` 对得上：实测 `class=CWeaponUSP`（ServerClass 名）
+对应 `wpn=weapon_usp`（`IPlayerInfo::GetWeaponName()` 返回的是类名的小写形式，**不是** `usp`）。
 
 `agpb_nethandle` 会先把字段信息全打出来，所以失败时能立刻看出是
 「字段不存在」还是「句柄为空」还是「serial 校验没过」。
+
+（`entry` 稳定，`serial` **每次开服/换图都会变**（11330 / 32240 都见过）——
+判据看 `entry` 和 `resolved=yes`，不要去对 `serial`。）
+
+#### 为什么清单里没列 `agpb_netlist <EHANDLE 字段>`
+
+`agpb_netlist` 读 EHANDLE 字段会走引擎 proxy，拿到的是**网络传输压缩值**，
+不是本地句柄 —— **没有判据价值**（下面的实测对照就是证据），所以清单里只留 `agpb_nethandle`。
+
+| 读法 | 实测值 | 打包方式 |
+|---|---|---|
+| `agpb_netlist`（走引擎 proxy） | `1015905` = `0x000F8061` | **网络传输用**：entry 低 **11** 位 + serial **9** 位（`SendProxy_EHandleToInt`） |
+| `agpb_nethandle`（直读内存） | `0x0000000007DF0061` | 本地 `CBaseHandle` **8 字节**：entry 低 **12** 位 + serial **20** 位 |
+
+两者可以互相验算（实测值完全吻合）：
+
+```
+本地句柄 0x07DF0061 → entry = 0x061 = 97，serial = 0x07DF0 = 32240
+网络压缩值 = 97 | ((32240 & 0x1FF) << 11) = 97 + 496 × 2048 = 1015905  ✓
+```
+
+所以 **netlist 打印的 EHANDLE 数字不能用来判断句柄对不对** ——
+`entry` / `serial` / 实体解析一律看 `agpb_nethandle`。
+（`m_hOwnerEntity` / `m_hGroundEntity` 等 EHANDLE 字段同理，M3 里一律用 `agpb_nethandle` 查。）
 
 ---
 
@@ -138,7 +166,6 @@ Think() -> IBotController::RunPlayerMove() -> CPlayerMove::RunCommand -> PM_Move
 | `m_angEyeAngles[1] ≈ 90` | ✅ 视角跟随 ucmd | EBot 的 `IsInViewCone` 可以直接用 |
 | `m_angEyeAngles[1]` 仍是 0，但速度非零 | ⚠️ 假客户端的视角**不从 `CUserCmd` 推导** | 得另找设置朝向的途径（直接写角度字段 / 另发消息）；`m_angEyeAngles` 不能作为朝向来源 |
 | `m_vecVelocity` 全 0，bot 不动 | ❌ `RunPlayerMove` 没生效 | **必须优先解决**，否则 M3 的 navigate/control 没有落脚点 |
-| bot 走动但方向不对 / 撞墙 | 正常 | `forwardmove` 是相对 yaw 的，yaw=90 时朝向会变 |
 
 ---
 

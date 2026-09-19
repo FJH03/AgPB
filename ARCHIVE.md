@@ -468,7 +468,13 @@ agpb_nethandle 0 m_hActiveWeapon
   entry=97 serial=11330 resolved=yes class=CWeaponUSP
 ```
 
-（顺带一个命名事实：CS:S 里这把枪的 ServerClass 是 `CWeaponUSP`，不是 `CWeaponUSP45`。）
+（顺带两个事实：CS:S 里这把枪的 ServerClass 是 `CWeaponUSP`，不是 `CWeaponUSP45`；
+`entry` 固定是 97，但 `serial` 每次开服/换图都会变（11330 / 32240 都见过）；
+`agpb_list` 里对应的武器名是 `wpn=weapon_usp`。）
+
+> **别拿 `agpb_netlist` 打印的 `m_hActiveWeapon` 核对句柄。**
+> netlist 走引擎 proxy，得到的是**网络传输压缩值**（entry 11 位 + serial 9 位），
+> 跟本地 8 字节句柄不是同一个数；两者互相验算见 VERIFY「阶段 B」。
 
 > `m_EdictIndex` / `m_NetworkSerialNumber` 依旧是 **`CBaseEdict` 的公开成员**
 > （`edict.h:219-223`），打在诊断里做参照仍然有用。
@@ -661,7 +667,7 @@ cstrike/addons/metamod/AgPB.vdf
 ```
 agpb_kick all
 agpb_add 3              // 3 = CT；不带参数时用 agpb_team 的默认值 2（T）
-mp_restartgame 1        // 关键：回合重启时才会出生
+mp_restartgame 1        // 不是每次都必需：列表里 hp=0 / 坐标全 0 时补一次
 agpb_list
 ```
 
@@ -1001,7 +1007,7 @@ M1 / M2 / M2.5 全部实测通过。**「不走 CCSBot、自己创建假客户�
 | `IBotController::RunPlayerMove()` **真的驱动玩家** | `forwardmove=400` + `yaw=90` → `m_vecVelocity[1]=250`（= +Y 方向且 = USP 跑速上限） |
 | 假客户端视角**跟随 `CUserCmd`** | `yaw=90` → `m_angEyeAngles[1]=90.0000` |
 | SendTable 反射可用，**零硬编码索引 / 零特征码** | `CCSPlayer` 展开 268 字段，偏移与游戏内数值全部一致 |
-| 队列与出生是两件事 | 必须 `ChangeTeam` + `joinclass 0`，并用 `mp_restartgame 1` 触发刷新 |
+| 队列与出生是两件事 | 必须 `ChangeTeam` + `joinclass 0`；列表里 `hp=0` / 坐标全 0 时再补 `mp_restartgame 1` |
 | EHANDLE 是 **8 字节 `uintp`**，解析靠 ref ehandle 整值比对 | `m_hActiveWeapon` → `entry=97` → `class=CWeaponUSP` |
 | int 字段宽度**只存在于 proxy 里** | `m_lifeState` 是 1 字节 `char`，走 proxy 后读出 `0`（`LIFE_ALIVE`） |
 
@@ -1014,7 +1020,7 @@ m_lifeState       +368          m_vecOrigin   +1076
 m_vecVelocity     +888/892/896  m_iAmmo       +2136  array[32 x 4]
  m_hActiveWeapon  +2648          m_iAccount    +5384
 m_iShotsFired     +6504         m_angEyeAngles +6984/6988
-m_flNextAttack    +2044
+m_flNextAttack    +2044         m_iClass       +6940  (CT 职业 6..10，每次不同)
 ```
 
 两个容易误判的点：
