@@ -4,8 +4,7 @@
  * 数组处理的细节见 netvars.h 顶部注释（两套机制 + 引擎源码行号）。
  */
 
-#include <stdio.h>
-#include <string.h>
+#include <tier1/strtools.h>
 
 #include "netvars.h"
 
@@ -32,7 +31,7 @@ bool CNetVarTable::IsSyntheticArrayTable( const SendProp *pProp, SendTable *pTab
 
 	// SendPropArray3 用属性名当子表名（dt_send.cpp:728）。
 	// 真实的 DT_* 表名永远带 "DT_" 前缀，不会和变量名相同。
-	if ( strcmp( pTable->m_pNetTableName, pProp->GetName() ) != 0 )
+	if ( V_strcmp( pTable->m_pNetTableName, pProp->GetName() ) != 0 )
 		return false;
 
 	if ( pTable->GetNumProps() <= 0 || pTable->GetProp( 0 ) == NULL )
@@ -203,7 +202,7 @@ const BotNetVar *CNetVarTable::Find( const char *name ) const
 
 	for ( int i = 0; i < m_Props.Count(); ++i )
 	{
-		if ( strcmp( m_Props[i].name, name ) == 0 )
+		if ( V_strcmp( m_Props[i].name, name ) == 0 )
 			return &m_Props[i];
 	}
 

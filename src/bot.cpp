@@ -2,9 +2,7 @@
  * AgPB - bot 生命周期、队伍切换与底层命令注入。
  */
 
-#include <stdio.h>
-#include <stdlib.h>
-#include <string.h>
+#include <tier1/strtools.h>
 
 #include <iserverunknown.h>
 #include <ihandleentity.h>
@@ -55,7 +53,7 @@ bool CAgPB::Create( const BotEngineContext &ctx,
 	if ( !ctx.IsReady() )
 	{
 		if ( error && maxlen )
-			snprintf( error, maxlen, "IBotManager / IVEngineServer / IPlayerInfoManager unavailable" );
+			Q_snprintf( error, (int)maxlen, "IBotManager / IVEngineServer / IPlayerInfoManager unavailable" );
 		return false;
 	}
 
@@ -68,7 +66,7 @@ bool CAgPB::Create( const BotEngineContext &ctx,
 	if ( pEdict == NULL )
 	{
 		if ( error && maxlen )
-			snprintf( error, maxlen, "CreateBot() failed: no free client slot" );
+			Q_snprintf( error, (int)maxlen, "CreateBot() failed: no free client slot" );
 		return false;
 	}
 
@@ -76,14 +74,14 @@ bool CAgPB::Create( const BotEngineContext &ctx,
 	m_pEdict = pEdict;
 	m_iIndex = ctx.pEngine->IndexOfEdict( pEdict );
 
-	strncpy( m_Name, name, sizeof( m_Name ) - 1 );
+	Q_strncpy( m_Name, name, sizeof( m_Name ) - 1 );
 	m_Name[sizeof( m_Name ) - 1] = '\0';
 
 	m_pController = ctx.pBotManager->GetBotController( pEdict );
 	if ( m_pController == NULL )
 	{
 		if ( error && maxlen )
-			snprintf( error, maxlen, "GetBotController() returned NULL (fake client not recognised as a bot?)" );
+			Q_snprintf( error, (int)maxlen, "GetBotController() returned NULL (fake client not recognised as a bot?)" );
 		return false;
 	}
 
@@ -103,7 +101,7 @@ void CAgPB::Destroy()
 		// Kick the fake client so the engine recycles the slot.
 		// IVEngineServer::ServerCommand() 不是变参函数，必须先格式化。
 		char szCmd[64];
-		snprintf( szCmd, sizeof( szCmd ), "kickid %d\n", m_Ctx.pEngine->GetPlayerUserId( m_pEdict ) );
+		Q_snprintf( szCmd, (int)sizeof( szCmd ), "kickid %d\n", m_Ctx.pEngine->GetPlayerUserId( m_pEdict ) );
 		m_Ctx.pEngine->ServerCommand( szCmd );
 	}
 
@@ -180,7 +178,7 @@ void CAgPB::TryJoinTeam( float flCurTime )
 		else
 		{
 			char szCmd[32];
-			snprintf( szCmd, sizeof( szCmd ), "jointeam %d", m_iTeam );
+			Q_snprintf( szCmd, (int)sizeof( szCmd ), "jointeam %d", m_iTeam );
 			RunClientCommand( m_Ctx.pHelpers, m_pEdict, szCmd );
 		}
 	}
@@ -214,7 +212,8 @@ void CAgPB::Think( CGlobalVars *pGlobals )
 
 	cmd.command_number = ++m_iCommandNumber;
 	cmd.tick_count = pGlobals->tickcount;
-	cmd.random_seed = (int)rand();
+	// 线性同余凑一个每帧不同的种子（武器散布随机流用），省掉 <stdlib.h> 的 rand()
+	cmd.random_seed = (int)( (unsigned int)pGlobals->tickcount * 1103515245u + 12345u );
 
 	m_pController->RunPlayerMove( &cmd );
 }
@@ -252,12 +251,12 @@ CAgPB *CAgPBManager::Add( int team, char *error, size_t maxlen )
 	if ( !IsReady() )
 	{
 		if ( error && maxlen )
-			snprintf( error, maxlen, "IBotManager ('%s') unavailable", INTERFACEVERSION_PLAYERBOTMANAGER );
+			Q_snprintf( error, (int)maxlen, "IBotManager ('%s') unavailable", INTERFACEVERSION_PLAYERBOTMANAGER );
 		return NULL;
 	}
 
 	char szName[64];
-	snprintf( szName, sizeof( szName ), "AgPB_%02d", m_iNextSerial );
+Q_snprintf( szName, (int)sizeof( szName ), "AgPB_%02d", m_iNextSerial );
 
 	CAgPB *pBot = new CAgPB();
 	if ( !pBot->Create( m_Ctx, szName, team, error, maxlen ) )

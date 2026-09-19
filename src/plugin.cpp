@@ -5,19 +5,17 @@
  * 不使用 SourceMod，也不使用引擎自带的 CCSBot。
  */
 
-#include <stdio.h>
-#include <stdlib.h>
-#include <string.h>
-#include <ctype.h>
-
 #include <eiface.h>
 #include <edict.h>
 #include <icvar.h>
 #include <tier1/convar.h>
+#include <tier1/strtools.h>
+#include <filesystem.h>
 #include <engine/IEngineTrace.h>
 
 #include "plugin.h"
 #include "bot.h"
+#include "waypoint.h"
 
 AgPBPlugin g_AgPBPlugin;
 
@@ -33,6 +31,7 @@ IPlayerInfoManager *playerinfomanager = NULL;
 IServerPluginHelpers *helpers = NULL;
 IServerGameEnts *gameents = NULL;
 CGlobalVars *gpGlobals = NULL;
+IFileSystem *filesystem = NULL;
 
 static CAgPBManager g_Bots;
 
@@ -62,7 +61,7 @@ static void Cmd_Add( const CCommand &args )
 {
 	int team = agpb_team.GetInt();
 	if ( args.ArgC() >= 2 )
-		team = atoi( args.Arg( 1 ) );
+		team = V_atoi( args.Arg( 1 ) );
 
 	if ( team != 1 && team != 2 && team != 3 )
 	{
@@ -86,7 +85,7 @@ static void Cmd_Add( const CCommand &args )
 
 static void Cmd_Kick( const CCommand &args )
 {
-	if ( args.ArgC() >= 2 && !stricmp( args.Arg( 1 ), "all" ) )
+	if ( args.ArgC() >= 2 && !V_stricmp( args.Arg( 1 ), "all" ) )
 	{
 		const int n = g_Bots.Count();
 		g_Bots.RemoveAll();
@@ -94,7 +93,7 @@ static void Cmd_Kick( const CCommand &args )
 		return;
 	}
 
-	const int index = ( args.ArgC() >= 2 ) ? atoi( args.Arg( 1 ) ) : -1;
+	const int index = ( args.ArgC() >= 2 ) ? V_atoi( args.Arg( 1 ) ) : -1;
 	if ( !g_Bots.Remove( index ) )
 		META_CONPRINTF( "[AgPB] invalid list index: %d (use agpb_list)\n", index );
 }
@@ -138,14 +137,14 @@ static void Cmd_SetTeam( const CCommand &args )
 		return;
 	}
 
-	CAgPB *pBot = g_Bots.Get( atoi( args.Arg( 1 ) ) );
+	CAgPB *pBot = g_Bots.Get( V_atoi( args.Arg( 1 ) ) );
 	if ( pBot == NULL )
 	{
 		META_CONPRINTF( "[AgPB] invalid list index: %s\n", args.Arg( 1 ) );
 		return;
 	}
 
-	const int team = atoi( args.Arg( 2 ) );
+	const int team = V_atoi( args.Arg( 2 ) );
 	if ( !pBot->SetTeam( team ) )
 	{
 		META_CONPRINTF( "[AgPB] invalid team %d (use 1=spec, 2=T, 3=CT)\n", team );
@@ -181,22 +180,8 @@ static bool ContainsNoCase( const char *haystack, const char *needle )
 	if ( haystack == NULL )
 		return false;
 
-	for ( const char *h = haystack; *h; ++h )
-	{
-		const char *a = h;
-		const char *b = needle;
-
-		while ( *a && *b && tolower( (unsigned char)*a ) == tolower( (unsigned char)*b ) )
-		{
-			++a;
-			++b;
-		}
-
-		if ( *b == '\0' )
-			return true;
-	}
-
-	return false;
+	// V_stristr 就是大小写无关的子串查找，不用自己逐字符 tolower
+	return ( V_stristr( haystack, needle ) != NULL );
 }
 
 /**
@@ -213,7 +198,7 @@ static void Cmd_NetList( const CCommand &args )
 		return;
 	}
 
-	CAgPB *pBot = g_Bots.Get( atoi( args.Arg( 1 ) ) );
+	CAgPB *pBot = g_Bots.Get( V_atoi( args.Arg( 1 ) ) );
 	if ( pBot == NULL )
 	{
 		META_CONPRINTF( "[AgPB] invalid list index: %s\n", args.Arg( 1 ) );
@@ -273,7 +258,7 @@ static void Cmd_NetList( const CCommand &args )
 				// 运行时无法可靠区分，所以绝不按指针解引用（垃圾指针会崩服务端），
 				// 只把该偏移处的字节当定长缓冲按文本打印。
 				char buf[48];
-				memcpy( buf, (const char *)pBase + nv.offset, sizeof( buf ) - 1 );
+				Q_memcpy( buf, (const char *)pBase + nv.offset, sizeof( buf ) - 1 );
 				buf[sizeof( buf ) - 1] = '\0';
 
 				META_CONPRINTF( "  %-32s +%-5d s=%-3d string = \"%s\"\n",
@@ -333,7 +318,7 @@ static void Cmd_NetHandle( const CCommand &args )
 		return;
 	}
 
-	CAgPB *pBot = g_Bots.Get( atoi( args.Arg( 1 ) ) );
+	CAgPB *pBot = g_Bots.Get( V_atoi( args.Arg( 1 ) ) );
 	if ( pBot == NULL )
 	{
 		META_CONPRINTF( "[AgPB] invalid list index: %s\n", args.Arg( 1 ) );
@@ -447,20 +432,382 @@ static void Cmd_TestMove( const CCommand &args )
 		return;
 	}
 
-	CAgPB *pBot = g_Bots.Get( atoi( args.Arg( 1 ) ) );
+	CAgPB *pBot = g_Bots.Get( V_atoi( args.Arg( 1 ) ) );
 	if ( pBot == NULL )
 	{
 		META_CONPRINTF( "[AgPB] invalid list index: %s\n", args.Arg( 1 ) );
 		return;
 	}
 
-	const float forward = (float)atof( args.Arg( 2 ) );
-	const float yaw = ( args.ArgC() >= 4 ) ? (float)atof( args.Arg( 3 ) ) : 0.0f;
+	const float forward = (float)V_atof( args.Arg( 2 ) );
+	const float yaw = ( args.ArgC() >= 4 ) ? (float)V_atof( args.Arg( 3 ) ) : 0.0f;
 
 	pBot->SetTestInput( forward, yaw );
 
 	META_CONPRINTF( "[AgPB] %s test input set: forward=%.1f yaw=%.1f\n",
 	                pBot->Name(), forward, yaw );
+}
+
+// ---------------------------------------------------------------------------
+// 路点编辑器（agpb_wp_*）
+//
+// 为什么自己打点：.nav 只描述"哪块地面能站"，"怎么从 A 到 B"要靠几何去推，
+// 推错了就是那条"nav 说连通、物理上过不去"的连接。
+// 路点图的每条连边是人验证过的动作，不存在推导。
+// ---------------------------------------------------------------------------
+
+/**
+ * 取"你"的位置 —— 打点命令不带坐标时用这个。
+ *
+ * MMS 的 ConCommand 回调不带 client 信息，但在 listen server 上
+ * "第一个非假客户端玩家"就是你自己，够用了。
+ */
+static bool FindHumanOrigin( Vector &vOut )
+{
+	if ( engine == NULL || playerinfomanager == NULL || gpGlobals == NULL )
+		return false;
+
+	for ( int i = 1; i <= gpGlobals->maxClients; ++i )
+	{
+		edict_t *pEdict = engine->PEntityOfEntIndex( i );
+
+		if ( pEdict == NULL || pEdict->IsFree() )
+			continue;
+
+		IPlayerInfo *pInfo = playerinfomanager->GetPlayerInfo( pEdict );
+
+		if ( pInfo == NULL || pInfo->IsFakeClient() )
+			continue;
+
+		vOut = pInfo->GetAbsOrigin();
+		return true;
+	}
+
+	return false;
+}
+
+/** agpb_wp_add [x y z] —— 加一个路点；不给坐标就用你当前位置。 */
+static void Cmd_WpAdd( const CCommand &args )
+{
+	CAgPBWaypoints &wp = BotWaypoints();
+
+	Vector vOrigin( 0.0f, 0.0f, 0.0f );
+
+	if ( args.ArgC() >= 4 )
+	{
+		vOrigin.x = (float)V_atof( args.Arg( 1 ) );
+		vOrigin.y = (float)V_atof( args.Arg( 2 ) );
+		vOrigin.z = (float)V_atof( args.Arg( 3 ) );
+	}
+	else if ( !FindHumanOrigin( vOrigin ) )
+	{
+		META_CONPRINTF( "[AgPB] no human player to take a position from; pass x y z\n" );
+		return;
+	}
+
+	const int iIndex = wp.Add( vOrigin );
+
+	if ( iIndex < 0 )
+	{
+		META_CONPRINTF( "[AgPB] wp_add failed: %s\n", wp.Status() );
+		return;
+	}
+
+	META_CONPRINTF( "[AgPB] waypoint %d added at %.0f %.0f %.0f (%d total, %d links)\n",
+	                iIndex, vOrigin.x, vOrigin.y, vOrigin.z, wp.Count(), wp.LinkCount() );
+}
+
+/** agpb_wp_del <idx> */
+static void Cmd_WpDel( const CCommand &args )
+{
+	if ( args.ArgC() < 2 )
+	{
+		META_CONPRINTF( "[AgPB] usage: agpb_wp_del <idx>\n" );
+		return;
+	}
+
+	CAgPBWaypoints &wp = BotWaypoints();
+	const int iIndex = V_atoi( args.Arg( 1 ) );
+
+	if ( !wp.IsValid( iIndex ) )
+	{
+		META_CONPRINTF( "[AgPB] invalid waypoint index %d (%d total)\n", iIndex, wp.Count() );
+		return;
+	}
+
+	wp.Delete( iIndex );
+
+	META_CONPRINTF( "[AgPB] waypoint %d deleted (%d left, %d links)\n",
+	                iIndex, wp.Count(), wp.LinkCount() );
+}
+
+/** agpb_wp_link <from> <to> [flags] —— flags 是 PATHFLAG_* 组合（1=跳 2=连跳 4=仅通视） */
+static void Cmd_WpLink( const CCommand &args )
+{
+	if ( args.ArgC() < 3 )
+	{
+		META_CONPRINTF( "[AgPB] usage: agpb_wp_link <from> <to> [flags]\n" );
+		return;
+	}
+
+	const int iFrom = V_atoi( args.Arg( 1 ) );
+	const int iTo   = V_atoi( args.Arg( 2 ) );
+	const unsigned int iFlags = ( args.ArgC() >= 4 ) ? (unsigned int)V_atoi( args.Arg( 3 ) ) : 0u;
+
+	CAgPBWaypoints &wp = BotWaypoints();
+
+	if ( !wp.IsValid( iFrom ) || !wp.IsValid( iTo ) )
+	{
+		META_CONPRINTF( "[AgPB] invalid index (%d/%d of %d)\n", iFrom, iTo, wp.Count() );
+		return;
+	}
+
+	const bool bAdded = wp.AddLink( iFrom, iTo, iFlags );
+
+	META_CONPRINTF( "[AgPB] link %d <-> %d flags=0x%X (%s); %d links total\n",
+	                iFrom, iTo, iFlags, bAdded ? "added" : "updated", wp.LinkCount() );
+}
+
+/** agpb_wp_unlink <from> <to> */
+static void Cmd_WpUnlink( const CCommand &args )
+{
+	if ( args.ArgC() < 3 )
+	{
+		META_CONPRINTF( "[AgPB] usage: agpb_wp_unlink <from> <to>\n" );
+		return;
+	}
+
+	CAgPBWaypoints &wp = BotWaypoints();
+
+	const bool bRemoved = wp.RemoveLink( V_atoi( args.Arg( 1 ) ), V_atoi( args.Arg( 2 ) ) );
+
+	META_CONPRINTF( "[AgPB] unlink %s; %d links left\n",
+	                bRemoved ? "ok" : "not connected", wp.LinkCount() );
+}
+
+/** agpb_wp_list [max] */
+static void Cmd_WpList( const CCommand &args )
+{
+	CAgPBWaypoints &wp = BotWaypoints();
+
+	META_CONPRINTF( "[AgPB] map=%s file=%s\n", wp.MapName(), wp.FileName() );
+	META_CONPRINTF( "[AgPB] %d waypoint(s), %d link(s) | %s\n",
+	                wp.Count(), wp.LinkCount(), wp.Status() );
+
+	int nMax = ( args.ArgC() >= 2 ) ? V_atoi( args.Arg( 1 ) ) : 32;
+
+	if ( nMax <= 0 || nMax > wp.Count() )
+		nMax = wp.Count();
+
+	for ( int i = 0; i < nMax; ++i )
+	{
+		const AgPBPath *p = wp.Get( i );
+
+		if ( p == NULL )
+			continue;
+
+		META_CONPRINTF( "  [%3d] %.0f %.0f %.0f  flags=0x%X  r=%d  ",
+		                i, p->origin.x, p->origin.y, p->origin.z,
+		                p->flags, (int)p->radius );
+
+		int nLink = 0;
+
+		for ( int s = 0; s < AgPB_WP_MAX_PATH_INDEX; ++s )
+		{
+			if ( p->index[s] < 0 )
+				continue;
+
+			META_CONPRINTF( "%s%d/0x%X", ( nLink > 0 ) ? "," : "->",
+			                (int)p->index[s], (unsigned int)p->connectionFlags[s] );
+			++nLink;
+		}
+
+		META_CONPRINTF( ( nLink > 0 ) ? "\n" : "(no links)\n" );
+	}
+}
+
+/** agpb_wp_nearest —— 报告离你最近/最远的路点，方便手工连线时找下标。 */
+static void Cmd_WpNearest( const CCommand &args )
+{
+	CAgPBWaypoints &wp = BotWaypoints();
+
+	Vector vOrigin( 0.0f, 0.0f, 0.0f );
+
+	if ( !FindHumanOrigin( vOrigin ) )
+	{
+		META_CONPRINTF( "[AgPB] no human player\n" );
+		return;
+	}
+
+	const int iNear = wp.FindNearest( vOrigin );
+	const int iFar  = wp.FindFarthest( vOrigin );
+
+	META_CONPRINTF( "[AgPB] you at %.0f %.0f %.0f\n", vOrigin.x, vOrigin.y, vOrigin.z );
+
+	if ( iNear >= 0 )
+	{
+		const AgPBPath *p = wp.Get( iNear );
+		META_CONPRINTF( "[AgPB] nearest = %d at %.0f %.0f %.0f\n",
+		                iNear, p->origin.x, p->origin.y, p->origin.z );
+	}
+	else
+	{
+		META_CONPRINTF( "[AgPB] nearest = none (no waypoints yet)\n" );
+	}
+
+	if ( iFar >= 0 && iFar != iNear )
+	{
+		const AgPBPath *p = wp.Get( iFar );
+		META_CONPRINTF( "[AgPB] farthest = %d at %.0f %.0f %.0f\n",
+		                iFar, p->origin.x, p->origin.y, p->origin.z );
+	}
+}
+
+static void Cmd_WpSave( const CCommand &args )
+{
+	CAgPBWaypoints &wp = BotWaypoints();
+
+	const bool bOk = wp.Save();
+
+	META_CONPRINTF( "[AgPB] wp_save %s: %s\n", bOk ? "ok" : "FAILED", wp.Status() );
+}
+
+static void Cmd_WpLoad( const CCommand &args )
+{
+	CAgPBWaypoints &wp = BotWaypoints();
+
+	wp.Load();
+
+	META_CONPRINTF( "[AgPB] wp_load: %s\n", wp.Status() );
+}
+
+static void Cmd_WpClear( const CCommand &args )
+{
+	CAgPBWaypoints &wp = BotWaypoints();
+	const int nWas = wp.Count();
+
+	wp.Clear();
+
+	META_CONPRINTF( "[AgPB] cleared %d waypoint(s) from memory (file untouched)\n", nWas );
+}
+
+/**
+ * agpb_wp_path <to> | agpb_wp_path <from> <to>
+ * 跑一遍 A* 把路径打出来。单参数时起点取"离你最近的路点"。
+ * 这是 S3 的验收命令 —— 不用起 bot 就能验证路点图连通性和寻路。
+ */
+static void Cmd_WpPath( const CCommand &args )
+{
+	if ( args.ArgC() < 2 )
+	{
+		META_CONPRINTF( "[AgPB] usage: agpb_wp_path <to> | agpb_wp_path <from> <to>\n" );
+		return;
+	}
+
+	CAgPBWaypoints &wp = BotWaypoints();
+
+	int iFrom = -1;
+	int iTo   = -1;
+
+	if ( args.ArgC() >= 3 )
+	{
+		iFrom = V_atoi( args.Arg( 1 ) );
+		iTo   = V_atoi( args.Arg( 2 ) );
+	}
+	else
+	{
+		iTo = V_atoi( args.Arg( 1 ) );
+
+		Vector vOrigin( 0.0f, 0.0f, 0.0f );
+
+		if ( !FindHumanOrigin( vOrigin ) )
+		{
+			META_CONPRINTF( "[AgPB] no human player; pass <from> <to>\n" );
+			return;
+		}
+
+		iFrom = wp.FindNearest( vOrigin );
+	}
+
+	if ( !wp.IsValid( iFrom ) || !wp.IsValid( iTo ) )
+	{
+		META_CONPRINTF( "[AgPB] invalid index (%d -> %d of %d)\n", iFrom, iTo, wp.Count() );
+		return;
+	}
+
+	CUtlVector< int > vecPath;
+
+	if ( !wp.FindPath( iFrom, iTo, vecPath ) )
+	{
+		META_CONPRINTF( "[AgPB] no path %d -> %d (%d point(s), %d link(s) in graph)\n",
+		                iFrom, iTo, wp.Count(), wp.LinkCount() );
+		return;
+	}
+
+	META_CONPRINTF( "[AgPB] path %d -> %d: %d hop(s)\n", iFrom, iTo, vecPath.Count() );
+
+	for ( int i = 0; i < vecPath.Count(); ++i )
+	{
+		const AgPBPath *p = wp.Get( vecPath[i] );
+		const AgPBPath *pPrev = ( i > 0 ) ? wp.Get( vecPath[i - 1] ) : NULL;
+
+		if ( p == NULL )
+			continue;
+
+		float flLeg = 0.0f;
+
+		if ( pPrev != NULL )
+		{
+			const Vector vDelta = p->origin - pPrev->origin;
+			flLeg = vDelta.Length();
+		}
+
+		unsigned int uLinkFlags = 0;
+
+		if ( pPrev != NULL )
+			wp.IsConnected( vecPath[i - 1], vecPath[i], &uLinkFlags );
+
+		META_CONPRINTF( "  %2d. [%3d] %.0f %.0f %.0f  flags=0x%X  leg=%.0f link=0x%X\n",
+		                i, vecPath[i], p->origin.x, p->origin.y, p->origin.z,
+		                p->flags, flLeg, uLinkFlags );
+	}
+
+	META_CONPRINTF( "[AgPB] path distance = %.0f (straight line = %.0f)\n",
+	                wp.PathDistance( iFrom, iTo ),
+	                ( wp.Get( iTo )->origin - wp.Get( iFrom )->origin ).Length() );
+}
+
+/** agpb_wp_dist <from> <to> —— 沿路点图的代价（LADDER/CROUCH 点位带 ×2 权重）。 */
+static void Cmd_WpDist( const CCommand &args )
+{
+	if ( args.ArgC() < 3 )
+	{
+		META_CONPRINTF( "[AgPB] usage: agpb_wp_dist <from> <to>\n" );
+		return;
+	}
+
+	CAgPBWaypoints &wp = BotWaypoints();
+
+	const int iFrom = V_atoi( args.Arg( 1 ) );
+	const int iTo   = V_atoi( args.Arg( 2 ) );
+
+	if ( !wp.IsValid( iFrom ) || !wp.IsValid( iTo ) )
+	{
+		META_CONPRINTF( "[AgPB] invalid index (%d/%d of %d)\n", iFrom, iTo, wp.Count() );
+		return;
+	}
+
+	const float flDist = wp.PathDistance( iFrom, iTo );
+
+	if ( flDist >= AgPB_WP_DIST_INF )
+	{
+		META_CONPRINTF( "[AgPB] %d -> %d: unreachable\n", iFrom, iTo );
+		return;
+	}
+
+	META_CONPRINTF( "[AgPB] %d -> %d: path %.0f, straight line %.0f\n",
+	                iFrom, iTo, flDist,
+	                ( wp.Get( iTo )->origin - wp.Get( iFrom )->origin ).Length() );
 }
 
 static ConCommand agpb_add_cmd( "agpb_add", Cmd_Add,
@@ -478,6 +825,29 @@ static ConCommand agpb_nethandle_cmd( "agpb_nethandle", Cmd_NetHandle,
 static ConCommand agpb_testmove_cmd( "agpb_testmove", Cmd_TestMove,
                                  "TEMPORARY ucmd injection check: agpb_testmove <idx> <forward> [yaw]", FCVAR_GAMEDLL );
 
+static ConCommand agpb_wp_add_cmd( "agpb_wp_add", Cmd_WpAdd,
+                                 "Add a waypoint: agpb_wp_add [x y z]  (default: your position)", FCVAR_GAMEDLL );
+static ConCommand agpb_wp_del_cmd( "agpb_wp_del", Cmd_WpDel,
+                                 "Delete a waypoint: agpb_wp_del <idx>", FCVAR_GAMEDLL );
+static ConCommand agpb_wp_link_cmd( "agpb_wp_link", Cmd_WpLink,
+                                 "Link two waypoints: agpb_wp_link <from> <to> [flags]", FCVAR_GAMEDLL );
+static ConCommand agpb_wp_unlink_cmd( "agpb_wp_unlink", Cmd_WpUnlink,
+                                 "Unlink two waypoints: agpb_wp_unlink <from> <to>", FCVAR_GAMEDLL );
+static ConCommand agpb_wp_list_cmd( "agpb_wp_list", Cmd_WpList,
+                                 "List waypoints: agpb_wp_list [max]", FCVAR_GAMEDLL );
+static ConCommand agpb_wp_nearest_cmd( "agpb_wp_nearest", Cmd_WpNearest,
+                                 "Show nearest/farthest waypoint to you.", FCVAR_GAMEDLL );
+static ConCommand agpb_wp_save_cmd( "agpb_wp_save", Cmd_WpSave,
+                                 "Save waypoints for this map.", FCVAR_GAMEDLL );
+static ConCommand agpb_wp_load_cmd( "agpb_wp_load", Cmd_WpLoad,
+                                 "Reload waypoints for this map.", FCVAR_GAMEDLL );
+static ConCommand agpb_wp_clear_cmd( "agpb_wp_clear", Cmd_WpClear,
+                                 "Drop all in-memory waypoints (file untouched).", FCVAR_GAMEDLL );
+static ConCommand agpb_wp_path_cmd( "agpb_wp_path", Cmd_WpPath,
+                                 "A* over the waypoint graph: agpb_wp_path <to> | <from> <to>", FCVAR_GAMEDLL );
+static ConCommand agpb_wp_dist_cmd( "agpb_wp_dist", Cmd_WpDist,
+                                 "Path distance between two waypoints: agpb_wp_dist <from> <to>", FCVAR_GAMEDLL );
+
 // ---------------------------------------------------------------------------
 // Plugin
 // ---------------------------------------------------------------------------
@@ -492,6 +862,7 @@ bool AgPBPlugin::Load( PluginId id, ISmmAPI *ismm, char *error, size_t maxlen, b
 	GET_V_IFACE_CURRENT( GetEngineFactory, icvar, ICvar, CVAR_INTERFACE_VERSION );
 	GET_V_IFACE_CURRENT( GetEngineFactory, enginetrace, IEngineTrace, INTERFACEVERSION_ENGINETRACE_SERVER );
 	GET_V_IFACE_CURRENT( GetEngineFactory, helpers, IServerPluginHelpers, INTERFACEVERSION_ISERVERPLUGINHELPERS );
+	GET_V_IFACE_CURRENT( GetEngineFactory, filesystem, IFileSystem, FILESYSTEM_INTERFACE_VERSION );
 
 	GET_V_IFACE_ANY( GetServerFactory, server, IServerGameDLL, INTERFACEVERSION_SERVERGAMEDLL );
 	GET_V_IFACE_ANY( GetServerFactory, gameclients, IServerGameClients, INTERFACEVERSION_SERVERGAMECLIENTS );
@@ -525,6 +896,10 @@ bool AgPBPlugin::Load( PluginId id, ISmmAPI *ismm, char *error, size_t maxlen, b
 	ctx.pGameEnts = gameents;
 
 	g_Bots.Init( ctx, ismm->GetServerFactory( false ) );
+
+	// 路点要读写 addons/AgPB/waypoints/*.agpw；插件链接不到 game DLL 里的
+	// filesystem 全局，自己拿一份交给它。
+	BotWaypoints().SetFileSystem( filesystem );
 
 	META_CONPRINTF( "[AgPB] loaded. gpGlobals=%p, IBotManager=%p, helpers=%p\n",
 	                gpGlobals, g_Bots.BotManager(), helpers );
@@ -579,6 +954,18 @@ void AgPBPlugin::Hook_GameFrame( bool simulating )
 
 	if ( !agpb_enable.GetBool() )
 		return;
+
+	// 让路点模块跟着当前地图走。SetMapName 内部只做一次字符串比较，
+	// 只有换图（或第一次进图）才真的去读盘。
+	//
+	// 注意 gpGlobals->mapname 是 string_t，不能拿 0/NULL 去比
+	// （string_t.h:34 里它是"指针式"的），STRING() 对空表返回 ""。
+	{
+		const char *pszMap = STRING( gpGlobals->mapname );
+
+		if ( pszMap != NULL && pszMap[0] != '\0' )
+			BotWaypoints().SetMapName( pszMap );
+	}
 
 	g_Bots.ThinkAll( gpGlobals );
 }

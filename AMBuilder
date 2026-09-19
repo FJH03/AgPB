@@ -11,6 +11,7 @@ for sdk_target in MMSPlugin.sdk_targets:
     'src/plugin.cpp',
     'src/bot.cpp',
     'src/netvars.cpp',
+    'src/waypoint.cpp',
   ]
 
   nodes = builder.Add(binary)
