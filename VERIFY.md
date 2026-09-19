@@ -39,7 +39,22 @@ mp_restartgame 1
 > 2026-09-19 实测：这次 `agpb_add 3` 之后**没打** `mp_restartgame`，
 > `agpb_list` 就已经是 `hp=100` 且坐标有效 —— 所以 restart 不是每次都必需，
 > 但只要列表里出现 `hp=0` / 坐标全 0，就补一次 `mp_restartgame 1`
-
+> **⚠️ 同队测试的安全边界**（崩溃根因见 [`CRASH_REPORT.md`](CRASH_REPORT.md)）
+>
+> freezetime 结束时 `CCSGameRules::CheckFreezePeriodExpired()` 会让**每队第一个
+> `STATE_ACTIVE` 玩家**喊一次无线电（`radio.go` 之类）；若那个玩家是假客户端，
+> `CCSPlayer::Radio()` 里的 `dynamic_cast<CCSBot*>` 会得到 NULL 并崩溃。
+>
+> 所以测试期间必须保证：**bot 所在队伍里有一个 slot 更小、且处于 `STATE_ACTIVE` 的玩家**
+> （通常是先连进来的人类玩家）。
+>
+> 会踩雷的操作（都会让 bot 变成"该队第一个活跃玩家"）：
+> - 人类玩家**断线**
+> - 人类切**观察者** / **换队**（`spectate`、`agpb_team` 之类）
+> - 人类还没**进入游戏**就先让 bot 占住另一支队
+>
+> 安全做法：换场景前先 `agpb_kick all`，或者干脆让 bot 与人类始终同队。
+> 崩溃本身目前**未修复**，属已知问题。
 ---
 
 ## 阶段 B —— 反射层全量检查
