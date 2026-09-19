@@ -1,0 +1,17 @@
+# vim: set sts=2 ts=8 sw=2 tw=99 et ft=python:
+import os
+
+for sdk_target in MMSPlugin.sdk_targets:
+  sdk = sdk_target.sdk
+  cxx = sdk_target.cxx
+
+  binary = MMSPlugin.HL2Library(builder, cxx, 'agentbot_mm', sdk)
+
+  binary.sources += [
+    'src/plugin.cpp',
+    'src/bot.cpp',
+    'src/netvars.cpp',
+  ]
+
+  nodes = builder.Add(binary)
+  MMSPlugin.binaries += [nodes]
