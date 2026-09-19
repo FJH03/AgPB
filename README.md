@@ -7,10 +7,11 @@ Counter-Strike: Source（Source 1 / Win64）的 agent 控制 bot 插件
 - 不使用引擎自带的 `CCSBot` / `CCSBotManager`
 - 由外部 agent（LLM）下发高层意图，插件内的反射层逐 tick 生成 `CUserCmd`
 
-> **状态**：M1 / M2 / M2.5 已实测通过
-> （无 AI 假客户端 + ucmd 注入驱动玩家 + SendTable 零索引反射层 + EHANDLE 解析）
+> **状态**：M1 / M2 / M2.5 已实测通过；M3 第一步「路点系统」已落地
+> （无 AI 假客户端 + ucmd 注入驱动玩家 + SendTable 零索引反射层 + EHANDLE 解析
+> + 手工路点图 / A* 寻路）
 >
-> 文档：[`ARCHIVE.md`](ARCHIVE.md) 完整设计与踩坑 ｜ [`VERIFY.md`](VERIFY.md) 三阶段验证清单
+> 文档：[`ARCHIVE.md`](ARCHIVE.md) 完整设计与踩坑 ｜ [`VERIFY.md`](VERIFY.md) 四阶段验证清单
 > ｜ 收工交接见 ARCHIVE **§10**（已实测结论 / 数字基线 / 明天从哪开始）
 
 ## 为什么能绕开 CCSBot
@@ -46,13 +47,19 @@ m_pParent->PlayerRunCommand( &cmd, MoveHelperServer() );
 
 ## 当前阶段
 
-只保留"引擎适配层" + netvar 反射层：
+只保留"引擎适配层" + netvar 反射层 + 路点层：
 
 ```
 引擎事件（GameFrame, 66 Hz）
   └─ CAgPB::Think()
        ├─ TryJoinTeam()                     入队 + 出生（ChangeTeam / joinclass）
        └─ IBotController::RunPlayerMove()   驱动引擎命令链
+
+路点层（M3 第一步，见下）
+  └─ CAgPBWaypoints（全局单例 BotWaypoints()）
+       ├─ SetMapName()        换图时读 addons/AgPB/waypoints/<map>.agpw
+       ├─ FindPath()          A*（沿连边，跳过 AVOID / 阵营不符的点）
+       └─ PathDistance()      单源 Dijkstra（按路点图算距离）
 
 反射层（任意时刻可读）
   └─ CNetVarRegistry::GetForEdict(edict)
@@ -62,6 +69,24 @@ m_pParent->PlayerRunCommand( &cmd, MoveHelperServer() );
 `Think()` 目前**不生成任何有意义的输入**（只有 `agpb_testmove` 这个临时开关会写
 `forwardmove` / `viewangles.y`）——移动 / 瞄准 / 战斗将由移植过来的
 EBot `control` / `navigate` / `combat` 模块填充。
+
+### 路点系统（M3 第一步）
+
+`.nav` 只描述「哪块地面能站」，「A 到 B 怎么走」要靠几何去推；推错了就会出现
+「nav 说连通、物理上过不去」的连接（cs_office 上实测有相邻 area 中心差 85~108 单位、
+却没标 `NAV_MESH_JUMP` 的）。所以改用**手工路点图**：每条连边都是人验证过的动作，
+不存在推导这一步。
+
+```
+addons/AgPB/waypoints/<map>.agpw        # 每张图一个文件（按地图名自动读盘）
+```
+
+- 数据模型 1:1 照搬 EBot：每个路点 **定长 8 条连边**（`Const_MaxPathIndex`）、
+  位标志 `AgPB_WP_*`（蹲 / 梯子 / 跳 / 连跳 / 阵营专用…）、连边标志 `AgPB_PATH_*`
+- 连边**双向**存储（`AddLink` 同时写两端）；**没有自动连线** —— 自动连的边没人验证过
+- 寻路照搬 EBot `RunAsyncAStar`，去掉线程 / 异步壳：点只有几百个，帧内同步跑完
+- **不建 N×N 距离矩阵**：EBot 那张 `8192² × 2B = 128MB` 的表只是给 A* 当启发式，
+  这里用单源 Dijkstra（`ComputeDistances` / `PathDistance`），最短路结果一样
 
 ### netvar 反射（M2）
 
@@ -153,11 +178,29 @@ bot_quota_mode normal
 | `agpb_nethandle <idx> <field>` | 解包 EHANDLE 字段并解析回实体（entry / serial / class） |
 | `agpb_testmove <idx> <fwd> [yaw]` | **【临时】** 注入 `forwardmove` / `viewangles.y`，验证 ucmd 注入链路 |
 
+路点编辑器 / 寻路（`agpb_wp_*`，详见 [ARCHIVE §4](ARCHIVE.md)）：
+
+| 命令 | 说明 |
+|---|---|
+| `agpb_wp_add [x y z]` | 加一个路点；不给坐标就用**你**当前的位置 |
+| `agpb_wp_del <idx>` | 删一个路点（其它点的下标会跟着修正） |
+| `agpb_wp_link <from> <to> [flags]` | 连边（双向）；flags 是 `AgPB_PATH_*` 组合：1=跳 2=连跳 4=仅通视 |
+| `agpb_wp_unlink <from> <to>` | 断开一条连边 |
+| `agpb_wp_list [max]` | 打印路点与连边（`->邻居/连边标志`） |
+| `agpb_wp_nearest` | 报告离你最近 / 最远的路点下标 |
+| `agpb_wp_save` / `agpb_wp_load` | 存盘 / 重读 `addons/AgPB/waypoints/<map>.agpw` |
+| `agpb_wp_clear` | 只清内存（不动文件） |
+| `agpb_wp_path <to>` ｜ `<from> <to>` | 跑一遍 A* 并打印每一跳；单参数时起点取「离你最近的路点」 |
+| `agpb_wp_dist <from> <to>` | 沿路点图的代价（梯子 / 蹲点位 ×2 权重） |
+
+> 打点命令不带坐标时取「第一个非假客户端玩家」的位置 ——
+> MMS 的 ConCommand 回调**不带 client**，listen server 上这就是你自己。
+
 ConVar：`agpb_enable`（默认 1）、`agpb_team`（默认 2）。
 
 ## 验收
 
-完整的三阶段验证清单（含期望输出与判读表）见 [`VERIFY.md`](VERIFY.md)。
+完整的四阶段验证清单（含期望输出与判读表）见 [`VERIFY.md`](VERIFY.md)。
 
 最关键的结论已经实测通过：
 
@@ -177,7 +220,10 @@ agpb_testmove 0 400 90
 | **M1** | 假客户端 + usercmd 注入 + 队伍切换 | ✅ |
 | **M2** | netvar 反射层（`Entity` 底座） | ✅ |
 | **M2.5** | ucmd 注入端到端验证（`RunPlayerMove` 真的驱动玩家） | ✅ 已实测 |
-| **M3** | EBot 移植：替身层（`entvars_t` / `Entity` / `Client` / `Engine`）→ `waypoint` → `control` / `navigate` / `combat`（实施顺序：`Engine` 最先，见 [ARCHIVE §7](ARCHIVE.md)） | ⬜ |
+| **M3** | EBot 移植 | 🟡 |
+| ↳ 路点系统 | 数据模型 + 编辑器命令 + A* 寻路 / 路径距离（`waypoint.h` / `waypoint.cpp`） | ✅ 已落地（自研，非照抄） |
+| ↳ 替身层 | `entvars_t` / `Entity` / `Client` / `Engine`（实施顺序：`Engine` 最先，见 [ARCHIVE §7](ARCHIVE.md)） | ⬜ |
+| ↳ `control` / `navigate` / `combat` | 跟随路点走、脱困、战斗（EBot 的弹道跳要改写，见 ARCHIVE §4「还没做」） | ⬜ |
 | **M4** | UDP 桥 + Python agent | ⬜ |
 | **M5** | LLM 战术层 | ⬜ |
 

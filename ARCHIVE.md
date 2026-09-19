@@ -221,16 +221,19 @@ AgPB/
 ├─ plugin-metadata.json
 ├─ ARCHIVE.md             # 本文档（设计与踩坑）
 ├─ README.md              # 快速上手
-├─ VERIFY.md              # 三阶段验证清单
+├─ VERIFY.md              # 四阶段验证清单
 ├─ LICENSE                # GPL-3.0
 ├─ addons/metamod/AgPB.vdf
 └─ src/
-   ├─ plugin.h / plugin.cpp     # MMS 入口、GameFrame 钩子、控制台命令
+   ├─ plugin.h / plugin.cpp     # MMS 入口、GameFrame 钩子、控制台命令（含路点编辑器）
    ├─ bot.h    / bot.cpp        # 假客户端生命周期、队伍切换、命令链驱动、netvar 取值
-   └─ netvars.h / netvars.cpp   # M2：SendTable 反射层（字段名 → 偏移 → 读值）
+   ├─ netvars.h / netvars.cpp   # M2：SendTable 反射层（字段名 → 偏移 → 读值）
+   └─ waypoint.h / waypoint.cpp # M3 第一步：手工路点图（数据模型 / 文件 IO / A* 寻路）
 ```
 
-规模：**6 个文件 / 1973 行 / 约 59.5 KB**，产物 `agpb_mm.dll` ≈ **388 KB**（397,312 字节）。
+规模：**8 个文件 / 3433 行**（`plugin.cpp` 976、`bot.cpp` 546、`waypoint.cpp` 894、`netvars.cpp` 262，
+以及 `netvars.h` 313、`bot.h` 207、`waypoint.h` 181、`plugin.h` 54），
+产物 `agpb_mm.dll` = **429,568 字节**。
 
 > 编译告警：`/W3` 下插件代码自身 **0 warning**；但 `cl` 命令行会多报一条
 > `warning D9025: 正在重写 "/Zi"(用 "/Z7")`，来自 manifest 的默认 flags，无害。
@@ -618,8 +621,78 @@ class CAgPB {
 | `agpb_netlist <idx> [filter]` | 展开该 bot 的 SendTable 字段表（字段名 / 偏移 / 当前值），M2 的验证工具 |
 | `agpb_nethandle <idx> <field>` | 把 EHANDLE 字段解包并解析回实体（打印 entry / serial / class） |
 | `agpb_testmove <idx> <fwd> [yaw]` | **【临时】** 把 `forwardmove` / `viewangles.y` 写进下一条 `CUserCmd`，验证 ucmd 注入链路 |
+| `agpb_wp_add` / `_del` / `_link` / `_unlink` / `_list` / `_nearest` / `_save` / `_load` / `_clear` | 路点编辑器（详见下节「M3 第一步：路点系统」） |
+| `agpb_wp_path <to>` ｜ `agpb_wp_path <from> <to>` | 跑一遗 A* 并打印每一跳（单参数时起点取「离你最近的路点」） |
+| `agpb_wp_dist <from> <to>` | 沿路点图的路径代价（梯子 / 蹲点位 ×2 权重） |
 
 ConVar：`agpb_enable`（默认 1）、`agpb_team`（默认 2）。
+
+### M3 第一步：路点系统（`waypoint.h` / `waypoint.cpp`）
+
+**为什么不用 `.nav`。** 引擎的导航网格只描述「哪块地面能站」，「从 A 到 B 怎么走」要靠几何去推；
+推错了就会出现「nav 说连通、物理上过不去」的连接（实测 cs_office 上有相邻 area 中心差 85~108 单位、
+却没标 `NAV_MESH_JUMP` 的，多半是梯子）。路点图的每条连边是**人验证过的动作**，不存在推导这一步。
+
+**数据模型 1:1 照搬 EBot**（`refs/CS-EBOT/include/core.h`）：
+
+| EBot | 对应 | 说明 |
+|---|---|---|
+| `core.h:267 Const_MaxPathIndex = 8` | `AgPB_WP_MAX_PATH_INDEX` | 每个路点**定长 8 条连边**（`short index[8]` + `u16 connectionFlags[8]`），不用动态容器 |
+| `core.h:502 struct Path` | `AgPBPath` | `origin` + `flags`(u32) + `radius`(u8) + `mesh`(u8) + `index[8]` + `connectionFlags[8]` + `gravity` |
+| `core.h:183 enum WaypointFlag` | `AgPB_WP_*` | `CROUCH(1<<2)` `LADDER(1<<5)` `JUMP(1<<27)` `FALLCHECK(1<<26)` `FALLRISK(1<<17)` `DJUMP(1<<9)` `AVOID(1<<11)` `GOAL(1<<4)` `TERRORIST(1<<29)` `COUNTER(1<<30)` … |
+| `core.h:213 enum PathFlag` | `AgPB_PATH_*` | `JUMP(1<<0)` `DOUBLE(1<<1)` `VISIBLE(1<<2)` |
+| `Const_MaxWaypoints = 8192` | `AgPB_WP_MAX` | 每张图路点上限 |
+
+**文件格式**（`addons/AgPB/waypoints/<map>.agpw`，全部小端、逐字段读写）：
+
+```
+u32 magic 'AGPB' | u32 version(1) | u32 count | char[32] mapname | char[32] author
+count x { float x,y,z | u32 flags | u8 radius | u8 mesh
+          8 x i16 index | 8 x u16 connectionFlags | float gravity }
+```
+
+- 写盘：`CUtlBuffer` 逐字段 `Put*` + `IFileSystem::WriteFile`（先 `CreateDirHierarchy`，pathID 用 `"GAME"`）。
+  **不直接落结构体** —— 以后改结构不会把老文件全读坏；`TellPut()` 返回实际写入量，所以 `WriteFile` 拿到的是对的长度。
+- 读盘：`Open` + `Size` + `Read` 整块读进来，再 `CUtlBuffer(pData, nSize, READ_ONLY)` 解析。
+  不走 `ReadFile(CUtlBuffer&)` 那条「最优 IO」路径 —— 它会对齐搬动读写下标，不如整块读确定。
+- mapname / author 用定长数组 + `Put` / `Get`，**不用 `PutString`**（那会写长度前缀，手改文件难看）。
+- 失败原因全部写进 `Status()`（`agpb_wp_*` 回显的就是它）：没地图名 / 文件不存在 / magic 不对 / 版本不符 / 截断 / 短读。
+- 加载时机：`plugin.cpp` 的 `Hook_GameFrame` 每帧调 `SetMapName(STRING(gpGlobals->mapname))`，
+  内部用 `s_szLoadAttempted` 做幂等 —— 只有换图（或首次进图）才真的去读盘。
+  **`gpGlobals->mapname` 是 `string_t`，不能跟 `0` / `NULL` 比**（`string_t.h:34` 是指针式），先 `STRING()` 再判空串。
+
+**寻路（照搬 EBot `navigate.cpp`）**
+
+- `FindPath( src, dst, outPath, team, avoidWp )` ← `navigate.cpp:1534 RunAsyncAStar`，
+  **去掉线程 / 异步壳**：EBot 在 GoldSrc 上是「界面线程 RequestPath → 工作线程跑 A* → 主线程 IsPathReady 取结果」，
+  我们点只有几百个，一次 A* 是微秒级，直接在 `GameFrame` 里同步跑完。
+  * open list = 二叉最小堆 `CAgPBWaypointHeap`（照抄 `navigate.cpp:1462 LocalPriorityQueue`），
+    `Setup(n * 9 + 1)`；**不做 decrease-key**，同一个点重复入堆靠弹出时 `isClosed` 过滤。
+  * 启发式 = **欧氏距离**（EBot 没算矩阵时用的 `HF_Distance`）。**不搬 N×N 距离矩阵**：
+    `Const_MaxWaypoints = 8192` → `8192² x 2B = 128MB`，还得开线程慢慢算；
+    矩阵只是让 A* 少展开点，结果是同一条最短路。
+  * 代价 `GetLinkCost` = 边长，`LADDER` / `CROUCH` 的目标点 **x2**
+    （EBot 分了 Normal / Careful / Rusher 三套人格，这里只留「稳妥版」）。
+  * 过滤 `IsWaypointPassable`：`AVOID` / `DJUMP` 当不通；`TERRORIST` / `COUNTER` 按 `team` 过滤（`team = 0` 不过滤）。
+    `PATH_DOUBLE` 边不通（要队友叠罗汉，我们没配合逻辑）；`PATH_JUMP` / `PATH_VISIBLE` 暂不处理。
+  * `f == 0.0f` 是「没来过」的哨兵 —— EBot 原样，别改成 -1。
+- `ComputeDistances( src, dist, parent, team, avoid )` = EBot `MatrixWorker`（`waypoint.cpp:2000`）的**单源版**
+  （懒插入 Dijkstra，`O(E log V)`）；`PathDistance(a,b)` 包一层。
+  代价与 A* 同一套（`LADDER` / `CROUCH` x2），「路径距离」和「实际要走的路」才一致。
+  **这就是「按路径距离挑最近目标」的原语**（`Bot::FindFriendsAndEnemiens` 用它选最近敌人），别为它去建 N×N 矩阵。
+- 连接**双向**存储：`AddLink(a,b)` 同时写 a 和 b 的槽位（EBot 编辑器也是成对 AddPath）。
+- **不做自动连线**：自动连的边没人验证过，等于把 nav 那个毛病搬回来。
+
+**编辑器命令**（`agpb_wp_*`）
+
+- 定义在 `plugin.cpp`，状态在全局单例 `BotWaypoints()`。
+  `IFileSystem` 由 `plugin.cpp` 在 `Load()` 里注入（`CAgPBWaypoints::SetFileSystem`）——
+  插件链接不到 game DLL 里的 filesystem 全局。
+- `agpb_wp_add [x y z]` 不带坐标时取「第一个**非**假客户端玩家」的位置（`FindHumanOrigin`）：
+  MMS 的 `ConCommand` 回调不带 client，listen server 上这就是你自己。
+- `agpb_wp_del` 会让下标整体前移，所以 `Delete()` 里要**修所有还在的连边**
+  （指向被删点的清掉，大于它的减一）。
+- `agpb_wp_path` 是验收命令 —— 不用起 bot 就能验证路点图连通性与寻路（见 VERIFY「阶段 D」）。
 
 ---
 
@@ -726,6 +799,11 @@ USP（12/100）完全对得上，就说明 `baseclass` 递归累加偏移这条�
 | `s2_sample_mm/AMBuildScript` | `Only Source2 games are supported` 断言 | 删掉该断言 |
 | `chcp` 没设 + `PYTHONIOENCODING` 没设 | `ambuild` 打印 `cl` 输出时 `UnicodeEncodeError` 崩溃 | 都设上 |
 | SDK 静态库不存在 | `LNK1181: 无法打开输入文件 tier0.lib` | 先用 `waf` 构建 `source-engine-czero` |
+| 新增 `src/*.cpp` 忘了加进 `AMBuilder` | `LNK2019: 无法解析的外部符号` | 新源文件必须同时加进 `AMBuilder` 的 `builder.Add()` 列表 |
+| 块注释里出现 `*/` | 注释提前结束，后面文字变成非法标识符（报 `C3873` 之类的怪错） | 注释里别写 `*/`（例如 `Put*/Get*` 这种简写） |
+| 直接用 C 运行时函数（`atoi` / `atof` / `memcpy` / 手写 `tolower` 子串查找） | 与 SDK 约定不一致 | 一律用 `V_atoi` / `V_atof` / `Q_memcpy` / `V_stristr`（`tier1/strtools.h`） |
+| `string_t` 跟 `0` / `NULL` 比 | 语义错（它是指针式，`public/string_t.h:34`） | 先 `STRING()`，再判空串 |
+| `ambuild` 不在 `build\` 目录里跑 | `folder was not configured for AMBuild` | 必须 `cd build` 再跑 |
 | **编辑工具写坏文件** | 多行替换含中文注释 / `%` / `(` / `\"` 时，文件被截断或函数被塞进别的函数体里 | **改这几个文件一律整文件重建**（`Remove-Item` + `create_file`） |
 
 ---
@@ -970,7 +1048,7 @@ CS:S 是 66 tick → 每帧 15.15 ms；LLM 往返 300~2000 ms = 20~130 帧。
 | — | 原型脚手架（`percept.*` / `BotIntent` / `agpb_drive` 等） | 🗑 已删除 |
 | **M2** | netvar 反射层（`Entity` 底座）：标量 / VECTORELEM / 两套数组 / EHANDLE | ✅ 已实测 |
 | **M2.5** | ucmd 注入端到端验证（`agpb_testmove` → `m_vecVelocity` / `m_angEyeAngles`） | ✅ 已实测通过 |
-| **M3** | EBot 移植：替身层（`entvars_t` / `Entity` / `Client` / `Engine`）→ `waypoint` → `control` / `navigate` / `combat`（实施顺序：`Engine` 最先，见 §7） | ⬜ |
+| **M3** | EBot 移植：替身层（`entvars_t` / `Entity` / `Client` / `Engine`）→ `waypoint` → `control` / `navigate` / `combat`（实施顺序：`Engine` 最先，见 §7） | 🟡 **路点系统已落地**（`src/waypoint.*`：数据模型照搬 EBot，文件 IO / 编辑器命令 / A* 寻路自研）；替身层与其余模块待做 |
 | **M4** | UDP 桥 + Python agent | ⬜ |
 | **M5** | LLM 战术层 | ⬜ |
 
@@ -984,6 +1062,9 @@ CS:S 是 66 tick → 每帧 15.15 ms；LLM 往返 300~2000 ms = 20~130 帧。
 | 4 | netvar 走 **SendTable 而不是 datamap** | `GetDataDescMap()` 是虚函数，索引无法在编译期得知（SourceMod 也靠 gamedata）。SendTable 全链路都是编译器解析的，**零硬编码索引、零特征码**。展开规则：`offset += pProp->GetOffset()` 递归；负偏移（`SENDPROP_VECTORELEM`）取绝对值 |
 | 5 | M2 不做完整 `Entity` 类，只做字段表 + 取值封装 | 先把"名字 → 偏移 → 值"跑通再谈抽象；`CAgPB` 上的 `GetNetVar*()` + `agpb_netlist` 就是验证器 |
 | 6 | 用 `agpb_netlist` 而不是把 `agpb_sense` 加回来 | 后者是已删除的原型脚手架；前者是 M2 自己的工具，同时充当移植 `Client` 类时的字段名字典 |
+| 7 | **放弃 `.nav`，改手工路点图** | nav 的连通性是几何推出来的，推错了就是「说连通、实际过不去」；路点图的连边是人验证过的动作（详见 §4「M3 第一步」） |
+| 8 | **不建 N×N 路径距离矩阵**，用单源 Dijkstra | EBot 那张 `8192² x 2B = 128MB` 的矩阵只是为了省 A* 的展开量；`ComputeDistances` 单源版 `O(E log V)` 按需算，最短路结果一样 |
+| 9 | **不做自动连线** | 自动连的边没人验证过，等于把 nav 的毛病搬回来；要连就手工连（`agpb_wp_link`） |
 
 ### 待定
 
@@ -996,8 +1077,10 @@ CS:S 是 66 tick → 每帧 15.15 ms；LLM 往返 300~2000 ms = 20~130 帧。
 
 ### 一句话状态
 
-M1 / M2 / M2.5 全部实测通过。**「不走 CCSBot、自己创建假客户端并注入 ucmd」这条技术路线已经跑通**，
-剩下的是把 EBot 移植上去、再把 LLM 接进来。
+M1 / M2 / M2.5 全部实测通过，M3 第一步（路点系统）已落地。
+**「不走 CCSBot、自己创建假客户端并注入 ucmd」这条技术路线已经跑通**，
+导航也有了落脚点（`src/waypoint.*`：手工路点图 + A* 寻路 + `agpb_wp_*` 编辑器）。
+剩下的是把 EBot 替身层 / control / navigate / combat 移植上去、再把 LLM 接进来。
 
 ### 已实测的结论（可直接当事实用，不需要重验）
 
@@ -1029,7 +1112,18 @@ m_flNextAttack    +2044         m_iClass       +6940  (CT 职业 6..10，每次�
 - `m_vecOrigin` 在表里**出现 3 次**（同名同偏移）是正常的 —— `cs_player.cpp` 235/322/341
   在三个玩家表里各注册一次。
 
+路点系统（本次提交，M3 第一步）：
+
+```
+src/waypoint.cpp   894 行        src/waypoint.h 181 行
+产物 agpb_mm.dll   429,568 字节（含 A* 寻路与 agpb_wp_* 编辑器命令）
+```
+
 ### 明天从哪开始
+
+**已落地**：M3 第一步「路点系统」——数据模型 / 文件 IO / 编辑器命令 / A* 寻路 / 路径距离
+全在 `src/waypoint.*`，验收步骤见 [`VERIFY.md`](VERIFY.md)「阶段 D」。
+下一步是真正把 bot 开起来走路：**替身层 → `navigate` → `control` → `combat`**。
 
 **需你定**：`entvars_t` 的建模方案（§7 的 A / B / C）。推荐 **A 影子结构**。
 
@@ -1038,7 +1132,7 @@ m_flNextAttack    +2044         m_iClass       +6940  (CT 职业 6..10，每次�
 1. 写替身文件：`entvars_t` / `Entity` / `Client` / `Engine` 的最小子集
    （约 20 个字段映射 + 调试字段 stub；**不移植 `include/engine.h`**）
 2. 把 EBot 的 `source/*.cpp` 拉进来编译，缺什么补什么
-3. `waypoint` 文件 IO
+3. ~~`waypoint` 文件 IO~~ —— ✅ 已自研（`src/waypoint.*`，不需要从 EBot 移植）
 4. `control` / `navigate` / `combat`
 
 ### 可以删 / 建议留
@@ -1047,4 +1141,5 @@ m_flNextAttack    +2044         m_iClass       +6940  (CT 职业 6..10，每次�
 |---|---|
 | `agpb_testmove` | 临时验证接口，M3 的 control 接管后**删** |
 | `agpb_netlist` / `agpb_nethandle` | **留着** —— M3 移植时的字段字典与句柄调试器 |
+| `agpb_wp_*` | **留着** —— 路点编辑器是长期工具（每张新图都要打点），不是临时接口 |
 | `BotEngineContext::pTrace` / `pGameEnts` | 留着，M3 的视线判定要用 |

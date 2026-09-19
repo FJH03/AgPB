@@ -2,7 +2,7 @@
 
 > 所有验证都是**控制台命令**，仓库里不放任何测试脚本
 > （唯一例外是 `agpb_testmove` 这个临时 ConCommand，M3 的 `control` 接管后删除）。
-> 状态：M1 ✅ / M2 ✅ / **M2.5 ✅ 已实测通过**
+> 状态：M1 ✅ / M2 ✅ / **M2.5 ✅ 已实测通过** / **M3 路点系统 ✅ 已落地**
 > 详细背景见 [`ARCHIVE.md`](ARCHIVE.md)。
 >
 > 输出里的 `s=` 是该字段的 `m_ElementStride`。标量恒为 **-1**（`SIZEOF_IGNORE`），
@@ -184,6 +184,82 @@ Think() -> IBotController::RunPlayerMove() -> CPlayerMove::RunCommand -> PM_Move
 
 ---
 
+## 阶段 D —— 路点编辑器与寻路（M3 第一步）
+
+路点系统是**自包含**的：不依赖 bot，也不依赖 `.nav`。整张图存在
+`cstrike/addons/AgPB/waypoints/<map>.agpw`，换图时按地图名自动读盘。
+
+### D.1 打点 / 连线 / 存盘
+
+```
+agpb_wp_add                     // 在「你」的位置加一个点（listen server 上第一个真人就是你）
+agpb_wp_add 1024 -512 0         // 也可以显式给坐标
+agpb_wp_nearest                 // 报告最近 / 最远路点下标，方便拿 idx
+agpb_wp_link 0 1                // 连边（双向）；flags：1=跳 2=连跳 4=仅通视
+agpb_wp_list 10                 // 核对（->邻居/连边标志）
+agpb_wp_save                    // 落盘
+```
+
+判读：
+
+| 命令 | 期望输出 |
+|---|---|
+| `agpb_wp_add` | `[AgPB] waypoint N added at x y z (M total, K links)` |
+| `agpb_wp_nearest` | `nearest = N at ...`；一个点都没有时是 `nearest = none (no waypoints yet)` |
+| `agpb_wp_link 0 1` | `[AgPB] link 0 <-> 1 flags=0x0 (added); K links total` |
+| `agpb_wp_list N` | 每行 `[  i] x y z flags=0x.. r=.. ->邻居/0x..` |
+| `agpb_wp_save` | `[AgPB] wp_save ok: saved M point(s), K link(s) -> addons/AgPB/waypoints/<map>.agpw` |
+
+`agpb_wp_save` 失败时 `Status()` 会说明原因：`no IFileSystem` / `no map name` /
+`WriteFile failed (see console for FS errors)`。写不进去先看服务端控制台里
+`IFileSystem` 自己的报错。
+
+⚠️ `agpb_wp_del <idx>` 会让**它后面的下标整体前移**，删完记得 `agpb_wp_list` 重新确认；
+已存的连边会自动修正（指向被删点的被清掉）。
+
+### D.2 换图后自动重载
+
+```
+changelevel cs_office
+agpb_wp_list
+```
+
+期望：`[AgPB] map=cs_office file=addons/AgPB/waypoints/cs_office.agpw`，
+然后是 `loaded M point(s), K link(s) from ...`。
+
+没打过点的图会是 `no waypoint file for this map yet (use agpb_wp_save to create one)` ——
+这是**正常**的，不是错误。
+
+### D.3 寻路（不需要起 bot）
+
+```
+agpb_wp_path 5                  // 从「离你最近的路点」走到 5
+agpb_wp_path 0 5                // 显式指定起点
+agpb_wp_dist 0 5                // 沿图的代价（梯子 / 蹲点位 x2 权重）
+```
+
+期望输出：
+
+```
+[AgPB] path 0 -> 5: 4 hop(s)
+   0. [  0] ...  flags=0x0  leg=0    link=0x0
+   1. [  3] ...  flags=0x0  leg=210  link=0x0
+   ...
+[AgPB] path distance = 634 (straight line = 402)
+```
+
+| 现象 | 结论 |
+|---|---|
+| 列出完整路径，且 `path distance` 明显大于 `straight line` | ✅ 图连通，且代价确实沿连边走（不是直线距离） |
+| `no path 0 -> 5 (M point(s), K link(s) in graph)` | 图不连通 —— 用 `agpb_wp_list` 检查是不是漏了 `agpb_wp_link` |
+| `agpb_wp_dist` 回 `unreachable` | 同上 |
+| 路径绕开了某个点 | 那点带了 `AVOID`（或阵营不符）—— 设计如此 |
+
+> `PATH_DOUBLE`（需要队友叠罗汉）的边一律当不通；`PATH_JUMP` / `PATH_VISIBLE`
+> 目前不影响寻路（要 M3 的动作层才会用到）。
+
+---
+
 ## 相关命令一览
 
 | 命令 | 说明 |
@@ -195,5 +271,15 @@ Think() -> IBotController::RunPlayerMove() -> CPlayerMove::RunCommand -> PM_Move
 | `agpb_netlist <idx> [filter]` | 展开 SendTable 字段表（字段名 / 偏移 / 当前值） |
 | `agpb_nethandle <idx> <field>` | 解包 EHANDLE 并解析回实体 |
 | `agpb_testmove <idx> <fwd> [yaw]` | **【临时】** 注入 `forwardmove` / `viewangles.y`；M3 的 `control` 模块接管后删除。值存在 bot 对象里，**持续生效**直到被改掉 |
+| `agpb_wp_add [x y z]` | 加路点（不给坐标就用你的位置） |
+| `agpb_wp_del <idx>` | 删路点（后续下标前移，连边自动修正） |
+| `agpb_wp_link <from> <to> [flags]` | 连边（双向）；flags：1=跳 2=连跳 4=仅通视 |
+| `agpb_wp_unlink <from> <to>` | 断开连边 |
+| `agpb_wp_list [max]` | 打印路点与连边 |
+| `agpb_wp_nearest` | 最近 / 最远路点 |
+| `agpb_wp_save` / `agpb_wp_load` | 存盘 / 重读 `<map>.agpw` |
+| `agpb_wp_clear` | 只清内存（不动文件） |
+| `agpb_wp_path <to>` ｜ `<from> <to>` | A* 寻路，打印每一跳 |
+| `agpb_wp_dist <from> <to>` | 沿路点图的路径代价 |
 
 ConVar：`agpb_enable`（默认 1）、`agpb_team`（默认 2）。
