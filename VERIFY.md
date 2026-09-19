@@ -1,6 +1,7 @@
 # AgPB 验证清单
 
-> 所有验证都是**控制台命令**，源码里不放任何测试脚本。
+> 所有验证都是**控制台命令**，仓库里不放任何测试脚本
+> （唯一例外是 `agpb_testmove` 这个临时 ConCommand，M3 的 `control` 接管后删除）。
 > 状态：M1 ✅ / M2 ✅ / **M2.5 ✅ 已实测通过**
 > 详细背景见 [`ARCHIVE.md`](ARCHIVE.md)。
 >
@@ -28,7 +29,7 @@ cstrike/addons/metamod/AgPB.vdf
 
 ```
 agpb_kick all
-agpb_add 3
+agpb_add 3              // 3 = CT；不带参数时用 agpb_team 的默认值 2（T）
 mp_restartgame 1
 ```
 
@@ -83,9 +84,9 @@ agpb_nethandle 0 m_hActiveWeapon
 
 ## 阶段 C —— ucmd 注入（**最关键的一步**）
 
-到目前为止，M1/M2 只验证了「能创建 bot、能读它的数据」。
-**「`IBotController::RunPlayerMove()` 真的驱动了玩家」这件事一次都没验证过** ——
-而整个架构（不走 CCSBot、自己注入 usercmd）的前提就是它。
+M1/M2 只验证了「能创建 bot、能读它的数据」，而**「`IBotController::RunPlayerMove()`
+真的驱动了玩家」才是整个架构（不走 CCSBot、自己注入 usercmd）的前提** ——
+所以这一步单独拉出来打，已于 2026-09-19 实测通过（记录见本节末尾）。
 
 ```
 agpb_testmove 0 400 90

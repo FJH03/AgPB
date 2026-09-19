@@ -59,7 +59,8 @@ m_pParent->PlayerRunCommand( &cmd, MoveHelperServer() );
        └─ ServerClass -> SendTable -> “名字 → 偏移 → 类型”
 ```
 
-`Think()` 目前**不下发任何输入**——移动 / 瞄准 / 战斗将由移植过来的
+`Think()` 目前**不生成任何有意义的输入**（只有 `agpb_testmove` 这个临时开关会写
+`forwardmove` / `viewangles.y`）——移动 / 瞄准 / 战斗将由移植过来的
 EBot `control` / `navigate` / `combat` 模块填充。
 
 ### netvar 反射（M2）
@@ -176,7 +177,7 @@ agpb_testmove 0 400 90
 | **M1** | 假客户端 + usercmd 注入 + 队伍切换 | ✅ |
 | **M2** | netvar 反射层（`Entity` 底座） | ✅ |
 | **M2.5** | ucmd 注入端到端验证（`RunPlayerMove` 真的驱动玩家） | ✅ 已实测 |
-| **M3** | EBot 移植：替身 `entvars_t`/`Entity`/`Client`/`Engine` → `waypoint` → `control`/`navigate`/`combat` | ⬜ |
+| **M3** | EBot 移植：替身层（`entvars_t` / `Entity` / `Client` / `Engine`）→ `waypoint` → `control` / `navigate` / `combat`（实施顺序：`Engine` 最先，见 [ARCHIVE §7](ARCHIVE.md)） | ⬜ |
 | **M4** | UDP 桥 + Python agent | ⬜ |
 | **M5** | LLM 战术层 | ⬜ |
 

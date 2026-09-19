@@ -219,8 +219,10 @@ AgPB/
 ├─ configure.py
 ├─ AMBuilder              # 产出 agpb_mm.dll
 ├─ plugin-metadata.json
-├─ ARCHIVE.md             # 本文档
-├─ README.md
+├─ ARCHIVE.md             # 本文档（设计与踩坑）
+├─ README.md              # 快速上手
+├─ VERIFY.md              # 三阶段验证清单
+├─ LICENSE                # GPL-3.0
 ├─ addons/metamod/AgPB.vdf
 └─ src/
    ├─ plugin.h / plugin.cpp     # MMS 入口、GameFrame 钩子、控制台命令
@@ -228,7 +230,7 @@ AgPB/
    └─ netvars.h / netvars.cpp   # M2：SendTable 反射层（字段名 → 偏移 → 读值）
 ```
 
-规模：**6 个文件 / 1973 行 / 60.2 KB**，产物 `agpb_mm.dll` ≈ 398 KB。
+规模：**6 个文件 / 1973 行 / 约 59.5 KB**，产物 `agpb_mm.dll` ≈ **388 KB**（397,312 字节）。
 
 > 编译告警：`/W3` 下插件代码自身 **0 warning**；但 `cl` 命令行会多报一条
 > `warning D9025: 正在重写 "/Zi"(用 "/Z7")`，来自 manifest 的默认 flags，无害。
@@ -523,8 +525,8 @@ int    GetNetVarArrayInt( const char *name, int index, int def = 0 ) const;
 
 #### 限制
 
-SendTable 只覆盖**网络字段**。CS:S 里绝大多数需要的量（`m_iHealth`、`m_iTeamNum`、`m_vecVelocity`、`m_lifeState`、`m_iAmmo`、`m_iAccount` …）都是网络字段，够用；
-少数纯服务端的（如 `m_flNextAttack` 之类不在 SendTable 里的）以后若需要，再补 datamap 路径。
+SendTable 只覆盖**网络字段**。CS:S 里绝大多数需要的量（`m_iHealth`、`m_iTeamNum`、`m_vecVelocity`、`m_lifeState`、`m_iAmmo`、`m_iAccount`、`m_flNextAttack` …）都是网络字段，够用；
+少数纯服务端的非网络字段以后若需要，再补 datamap 路径。（`m_flNextAttack` **在网络表里**，实测 +2044，见 §10 数字基线 —— 不要拿它当反例。）
 
 ### 分层
 
@@ -545,7 +547,8 @@ flowchart TB
   ENG --> NET --> READ
 ```
 
-`Think()` **刻意不下发任何输入**：移动 / 瞄准 / 战斗将由移植过来的
+`Think()` **刻意不生成任何有意义的输入**（只有 `agpb_testmove` 这个临时开关会写
+`forwardmove` / `viewangles.y`）：移动 / 瞄准 / 战斗将由移植过来的
 EBot `control` / `navigate` / `combat` 模块填充。这里只保证引擎需要的调用链被驱动
 （即使 bot 死亡/未出生也必须每 tick 调一次 `RunPlayerMove`，否则武器逻辑、动画与
 `PostThink` 都不会跑）。
@@ -586,8 +589,9 @@ class CAgPB {
     float  GetNetVarArrayFloat( const char *name, int index, float def = 0.0f ) const;
 
     // EHANDLE（8 字节 CBaseHandle）
+    bool GetNetVarHandleValue( const char *name, uintp *pHandle ) const;   // 原始整值
     bool GetNetVarHandle( const char *name, int *pEntry, int *pSerial ) const;
-    edict_t *HandleToEdict( int entry, int serial ) const;
+    edict_t *HandleToEdict( uintp handle ) const;                          // 传整值，不是 entry/serial
 
     // 【临时】ucmd 注入验证；M3 移植的 control 模块会取代
     void SetTestInput( float forward, float yaw );
@@ -656,13 +660,13 @@ cstrike/addons/metamod/AgPB.vdf
 
 ```
 agpb_kick all
-agpb_add 2
+agpb_add 3              // 3 = CT；不带参数时用 agpb_team 的默认值 2（T）
 mp_restartgame 1        // 关键：回合重启时才会出生
 agpb_list
 ```
 
 期望：控制台出现 `[AgPB] 1 bot(s), IBotManager=ok, helpers=ok`，
-列表里 `[0]` 为 `team=2 want=2 hp=100`。
+列表里 `[0]` 为 `team=3 want=3 hp=100`。
 
 然后验证反射层：
 
@@ -960,7 +964,7 @@ CS:S 是 66 tick → 每帧 15.15 ms；LLM 往返 300~2000 ms = 20~130 帧。
 | — | 原型脚手架（`percept.*` / `BotIntent` / `agpb_drive` 等） | 🗑 已删除 |
 | **M2** | netvar 反射层（`Entity` 底座）：标量 / VECTORELEM / 两套数组 / EHANDLE | ✅ 已实测 |
 | **M2.5** | ucmd 注入端到端验证（`agpb_testmove` → `m_vecVelocity` / `m_angEyeAngles`） | ✅ 已实测通过 |
-| **M3** | EBot 移植：`Engine` → `Client` → `waypoint` → `control`/`navigate`/`combat` | ⬜ |
+| **M3** | EBot 移植：替身层（`entvars_t` / `Entity` / `Client` / `Engine`）→ `waypoint` → `control` / `navigate` / `combat`（实施顺序：`Engine` 最先，见 §7） | ⬜ |
 | **M4** | UDP 桥 + Python agent | ⬜ |
 | **M5** | LLM 战术层 | ⬜ |
 
@@ -979,7 +983,6 @@ CS:S 是 66 tick → 每帧 15.15 ms；LLM 往返 300~2000 ms = 20~130 帧。
 
 - **`entvars_t` 的建模方案**（A 影子结构 / B 访存属性 / C 全改写）—— 见 §7「M3 起步调研」
   的「`entvars_t` 怎么建模」。**推荐 A**（读点零改动）。
-- EBot 移植的许可证处理（自用 or 开源发布）
 
 ---
 
