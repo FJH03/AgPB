@@ -35,6 +35,7 @@ public: // IMetamodListener
 public: // hooks
 	void Hook_GameFrame(bool simulating);
 	void Hook_ClientDisconnect(edict_t *pEntity);
+	void Hook_ClientCommand(edict_t *pEntity, const CCommand &args);
 
 public: // plugin metadata
 	const char *GetAuthor() { return PLUGIN_AUTHOR; }

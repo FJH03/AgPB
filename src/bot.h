@@ -139,8 +139,35 @@ public:
 	 */
 	void SetTestInput( float forward, float yaw );
 
+	// -----------------------------------------------------------------------
+	// 最小导航（M3 验证用"会不会走路"）
+	//
+	// 不是 EBot 的 navigate/control 移植版，只做四件事：
+	//   朝着路线上的下一个点转 yaw、forwardmove 前进、
+	//   边带 PATH_JUMP 就按跳、点带 CROUCH 就按蹲，另外加一个卡住检测。
+	// 目的是先用真实数据把"路点图 + ucmd 注入"这条链验证透。
+	// -----------------------------------------------------------------------
+
+	/** A* 出路线并开始走。失败时把原因写进 error。 */
+	bool StartRoute( int iGoalWaypoint, char *error, size_t maxlen );
+
+	/** 停止行走（清路线与输入）。 */
+	void StopRoute();
+
+	bool HasRoute() const { return m_vecRoute.Count() > 0; }
+	int  RouteCount() const { return m_vecRoute.Count(); }
+	int  RouteGoal() const { return m_iGoalWaypoint; }
+	int  RouteIndex() const { return m_iRouteIndex; }
+	int  RouteNode( int i ) const;
+
+	/** 行走过程的状态回显（服务器控制台）。 */
+	void RouteReport( const char *pszFormat, ... ) const;
+
 private:
 	void TryJoinTeam( float flCurTime );
+
+	/** 每 tick 的"走路"部分：把路线翻译成 CUserCmd。 */
+	void UpdateRoute( CGlobalVars *pGlobals, CBotCmd &cmd );
 
 	char                 m_Name[64];
 	edict_t             *m_pEdict;
@@ -159,6 +186,13 @@ private:
 	// 【临时】ucmd 注入验证用，默认 0 即行为与之前完全一致
 	float m_flTestForward;
 	float m_flTestYaw;
+
+	// 最小导航的路線
+	CUtlVector<int> m_vecRoute;
+	int    m_iRouteIndex;
+	int    m_iGoalWaypoint;
+	Vector m_vStuckAnchor;
+	float  m_flStuckCheckTime;
 };
 
 class CAgPBManager
@@ -191,6 +225,9 @@ private:
 
 /** netvar 字段表注册表（按 ServerClass 缓存，进程内单例）。 */
 CNetVarRegistry &BotNetVarRegistry();
+
+/** 插件里唯一的 bot 管理器（plugin.cpp 里那个单例的访问器，菜单要用）。 */
+CAgPBManager &AgPB_Bots();
 
 /**
  * edict -> ServerClass 名（如 "CCSPlayer" / "CWeaponUSP45"）。

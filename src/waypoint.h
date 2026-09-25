@@ -27,6 +27,7 @@
 #include <utlvector.h>
 
 class IFileSystem;
+struct edict_t;
 
 // 照 EBot core.h:265-272
 #define AgPB_WP_MAGIC            0x50424741u   // 'AGPB'，小端写入
@@ -52,6 +53,7 @@ class IFileSystem;
 #define AgPB_WP_FALLRISK      ( 1u << 17 )   // 在这个点上不要侧移
 #define AgPB_WP_FALLCHECK     ( 1u << 26 )   // 需要检查脚下
 #define AgPB_WP_JUMP          ( 1u << 27 )   // 跳跃点
+#define AgPB_WP_SNIPER        ( 1u << 28 )   // 狙击点
 #define AgPB_WP_TERRORIST     ( 1u << 29 )   // T 专用
 #define AgPB_WP_COUNTER       ( 1u << 30 )   // CT 专用
 
@@ -108,8 +110,30 @@ public:
 	int  FindNearest( const Vector &vOrigin, float flMaxDist = 99999.0f ) const;
 	int  FindFarthest( const Vector &vOrigin, float flMinDist = 0.0f ) const;
 
+	/**
+	 * 自动算"到达半径"（wayzone）—— 移植 EBot Waypoint::CalculateWayzone。
+	 *
+	 * 32/48/…/112 逐级往外扫，每一级绕点转 18 个方向检查
+	 * （头高体积放得下吗、前方和后方往下 scan+60 有没有地面、头顶 +34 有没有空间），
+	 * 撞到东西就把这一级减 16 收工，最后再减 16 并 clamp。
+	 * 点自己有 LADDER/GOAL/CAMP/RESCUE/CROUCH、或任一邻点带 LADDER/JUMP → 直接 0。
+	 *
+	 * pIgnore 通常是编辑器本人（别让他自己把扫描挡住）。
+	 */
+	void CalculateWayzone( int iIndex, edict_t *pIgnore = NULL );
+
 	/** 连边。flags 是 PATHFLAG_* 的组合。已存在则返回 false。 */
 	bool AddLink( int iFrom, int iTo, unsigned int flags = 0 );
+
+	/**
+	 * 单向连线：只写 from -> to 一个槽位（EBot 的 out / in / jump / boost /
+	 * visible 都是这么写的，只有 bothways 才成对写）。
+	 *
+	 * FindPath 只沿本点的槽位走，所以单向边天然可用；画线时"能回来"和
+	 * "回不来"是两种颜色（见 wpdraw.cpp 的连线配色）。
+	 */
+	bool AddLinkDirected( int iFrom, int iTo, unsigned int flags = 0 );
+
 	bool RemoveLink( int iFrom, int iTo );
 	bool IsConnected( int iFrom, int iTo, unsigned int *pFlags = NULL ) const;
 	int  LinkCount() const;
@@ -178,4 +202,25 @@ private:
 /** 全局单例：按当前地图缓存一份。 */
 CAgPBWaypoints &BotWaypoints();
 
+/** 单个标志的短名；不是已知的单个标志返回 NULL。 */
+const char *AgPB_WaypointFlagName( unsigned int uFlag );
+
+/** 按名字（大小写不敏感）查标志位；查不到返回 0。 */
+unsigned int AgPB_WaypointFlagByName( const char *pszName );
+
+/** 把一组标志拼成 "CAMP|T|JUMP"；没有标志时写 "none"。 */
+void AgPB_WaypointFlagsString( unsigned int uFlags, char *pszOut, int iMaxLen );
+
+// ---------------------------------------------------------------------------
+// 视线 / hull trace（编辑器、wayzone、绘制共用；实现见 waypoint.cpp）
+// ---------------------------------------------------------------------------
+
+/** 两点之间点 trace 是否畅通（忽略 pIgnore）。enginetrace 不可用时一律 true。 */
+bool AgPB_TraceClear( const Vector &vStart, const Vector &vEnd, edict_t *pIgnore );
+
+/** 同上，但按"头高体积"（≈ 蹲姿 ±16/±18）扫过去 —— EBot 的 head_hull。 */
+bool AgPB_TraceHullClear( const Vector &vStart, const Vector &vEnd, edict_t *pIgnore );
+
+/** 这条线撞到的实体是不是门（func_door / func_door_rotating）。 */
+bool AgPB_TraceHitsDoor( const Vector &vStart, const Vector &vEnd, edict_t *pIgnore );
 #endif // _INCLUDE_AGPB_WAYPOINT_H_

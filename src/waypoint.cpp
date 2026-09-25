@@ -11,9 +11,17 @@
 #include <tier1/utlbuffer.h>
 #include <tier1/strtools.h>
 #include <filesystem.h>
+#include <trace.h>
+#include <engine/IEngineTrace.h>
+#include <ihandleentity.h>
+#include <iserverunknown.h>
+#include <mathlib/mathlib.h>
 
 #include "bot.h"
 #include "waypoint.h"
+
+extern IEngineTrace *enginetrace;
+extern IServerGameEnts *gameents;
 
 // 插件链接不到 game DLL 里的 filesystem 全局，由 plugin.cpp 在 Load 时注入。
 static IFileSystem *s_pFileSystem = NULL;
@@ -269,6 +277,36 @@ bool CAgPBWaypoints::AddLink( int iFrom, int iTo, unsigned int flags )
 	return true;
 }
 
+bool CAgPBWaypoints::AddLinkDirected( int iFrom, int iTo, unsigned int flags )
+{
+	if ( !IsValid( iFrom ) || !IsValid( iTo ) || iFrom == iTo )
+		return false;
+
+	AgPBPath &a = m_Paths[iFrom];
+
+	// 已经连过 → 只更新标志（和 AddLink 一致）
+	const int iExisting = FindLinkSlot( a, iTo );
+
+	if ( iExisting >= 0 )
+	{
+		a.connectionFlags[iExisting] = (unsigned short)flags;
+		return false;
+	}
+
+	const int iSlot = FindFreeSlot( a );
+
+	if ( iSlot < 0 )
+	{
+		SetStatus( "no free link slot (8 max per waypoint)" );
+		return false;
+	}
+
+	a.index[iSlot] = (short)iTo;
+	a.connectionFlags[iSlot] = (unsigned short)flags;
+
+	return true;
+}
+
 bool CAgPBWaypoints::RemoveLink( int iFrom, int iTo )
 {
 	if ( !IsValid( iFrom ) || !IsValid( iTo ) )
@@ -321,13 +359,18 @@ int CAgPBWaypoints::LinkCount() const
 	{
 		for ( int s = 0; s < AgPB_WP_MAX_PATH_INDEX; ++s )
 		{
-			if ( m_Paths[i].index[s] >= 0 )
+			const int iTo = m_Paths[i].index[s];
+
+			if ( iTo < 0 )
+				continue;
+
+			// 只数一次：i -> iTo 且 iTo > i，或者 iTo 没有回边（单向）
+			if ( iTo > i || !IsConnected( iTo, i ) )
 				++nTotal;
 		}
 	}
 
-	// 双向存储，除以 2
-	return nTotal / 2;
+	return nTotal;
 }
 
 // ---------------------------------------------------------------------------
@@ -891,4 +934,289 @@ bool CAgPBWaypoints::Load()
 	SetStatus( szMsg );
 
 	return true;
+}
+
+// ---------------------------------------------------------------------------
+// 显示 / 菜单用的名字表（对应 EBot 的 GetWaypointInfo）
+// ---------------------------------------------------------------------------
+
+struct AgPBWaypointFlagNameEntry
+{
+	unsigned int uFlag;
+	const char  *pszName;
+};
+
+// 顺序 = 菜单里的显示顺序，也是状态串的拼接顺序
+static const AgPBWaypointFlagNameEntry s_WaypointFlagNames[] =
+{
+	{ AgPB_WP_CAMP,      "CAMP" },
+	{ AgPB_WP_GOAL,      "GOAL" },
+	{ AgPB_WP_RESCUE,    "RESCUE" },
+	{ AgPB_WP_AVOID,     "AVOID" },
+	{ AgPB_WP_USEBUTTON, "USEBUTTON" },
+	{ AgPB_WP_LADDER,    "LADDER" },
+	{ AgPB_WP_CROUCH,    "CROUCH" },
+	{ AgPB_WP_JUMP,      "JUMP" },
+	{ AgPB_WP_LIFT,      "LIFT" },
+	{ AgPB_WP_FALLCHECK, "FALLCHECK" },
+	{ AgPB_WP_FALLRISK,  "FALLRISK" },
+	{ AgPB_WP_SNIPER,    "SNIPER" },
+	{ AgPB_WP_TERRORIST, "T" },
+	{ AgPB_WP_COUNTER,   "CT" },
+	{ AgPB_WP_DJUMP,     "DJUMP" },
+	{ AgPB_WP_CROSSING,  "CROSSING" },
+};
+
+const char *AgPB_WaypointFlagName( unsigned int uFlag )
+{
+	for ( int i = 0; i < (int)ARRAYSIZE( s_WaypointFlagNames ); ++i )
+	{
+		if ( s_WaypointFlagNames[i].uFlag == uFlag )
+			return s_WaypointFlagNames[i].pszName;
+	}
+
+	return NULL;
+}
+
+unsigned int AgPB_WaypointFlagByName( const char *pszName )
+{
+	if ( pszName == NULL || pszName[0] == '\0' )
+		return 0;
+
+	for ( int i = 0; i < (int)ARRAYSIZE( s_WaypointFlagNames ); ++i )
+	{
+		if ( V_stricmp( s_WaypointFlagNames[i].pszName, pszName ) == 0 )
+			return s_WaypointFlagNames[i].uFlag;
+	}
+
+	return 0;
+}
+
+void AgPB_WaypointFlagsString( unsigned int uFlags, char *pszOut, int iMaxLen )
+{
+	if ( pszOut == NULL || iMaxLen <= 0 )
+		return;
+
+	pszOut[0] = '\0';
+
+	bool bAny = false;
+
+	for ( int i = 0; i < (int)ARRAYSIZE( s_WaypointFlagNames ); ++i )
+	{
+		if ( ( uFlags & s_WaypointFlagNames[i].uFlag ) == 0 )
+			continue;
+
+		if ( bAny )
+			Q_strncat( pszOut, "|", iMaxLen );
+
+		Q_strncat( pszOut, s_WaypointFlagNames[i].pszName, iMaxLen );
+
+		bAny = true;
+	}
+
+  if ( !bAny )
+    Q_strncpy( pszOut, "none", iMaxLen );
+}
+
+// ---------------------------------------------------------------------------
+// 视线 / hull trace（编辑器、wayzone、绘制共用）
+// ---------------------------------------------------------------------------
+
+// GoldSrc 的 head_hull ≈ 蹲姿体积；Source 这边用同一套 extents
+static const Vector s_vHeadHullMin( -16.0f, -16.0f, -18.0f );
+static const Vector s_vHeadHullMax(  16.0f,  16.0f,  18.0f );
+
+class CAgPBWaypointTraceFilter : public CTraceFilter
+{
+public:
+	CAgPBWaypointTraceFilter( IHandleEntity *pIgnore ) : m_pIgnore( pIgnore ) {}
+
+	virtual bool ShouldHitEntity( IHandleEntity *pEntity, int contentsMask )
+	{
+		return ( pEntity != m_pIgnore );
+	}
+
+private:
+	IHandleEntity *m_pIgnore;
+};
+
+static IHandleEntity *AgPB_EdictHandleEntity( edict_t *pEdict )
+{
+	if ( pEdict == NULL )
+		return NULL;
+
+	IServerNetworkable *pNet = pEdict->GetNetworkable();
+
+	if ( pNet == NULL )
+		return NULL;
+
+	return pNet->GetEntityHandle();
+}
+
+static void AgPB_Trace( const Vector &vStart, const Vector &vEnd, bool bHull,
+                        edict_t *pIgnore, trace_t &tr )
+{
+	Ray_t ray;
+
+	if ( bHull )
+		ray.Init( vStart, vEnd, s_vHeadHullMin, s_vHeadHullMax );
+	else
+		ray.Init( vStart, vEnd );
+
+	CAgPBWaypointTraceFilter filter( AgPB_EdictHandleEntity( pIgnore ) );
+
+	enginetrace->TraceRay( ray, MASK_PLAYERSOLID, &filter, &tr );
+}
+
+bool AgPB_TraceClear( const Vector &vStart, const Vector &vEnd, edict_t *pIgnore )
+{
+	if ( enginetrace == NULL )
+		return true;
+
+	trace_t tr;
+	AgPB_Trace( vStart, vEnd, false, pIgnore, tr );
+
+	return ( tr.fraction >= 1.0f );
+}
+
+bool AgPB_TraceHullClear( const Vector &vStart, const Vector &vEnd, edict_t *pIgnore )
+{
+	if ( enginetrace == NULL )
+		return true;
+
+	trace_t tr;
+	AgPB_Trace( vStart, vEnd, true, pIgnore, tr );
+
+	return ( tr.fraction >= 1.0f );
+}
+
+bool AgPB_TraceHitsDoor( const Vector &vStart, const Vector &vEnd, edict_t *pIgnore )
+{
+	if ( enginetrace == NULL || gameents == NULL )
+		return false;
+
+	trace_t tr;
+	AgPB_Trace( vStart, vEnd, false, pIgnore, tr );
+
+	if ( tr.m_pEnt == NULL )
+		return false;
+
+	edict_t *pEdict = gameents->BaseEntityToEdict( tr.m_pEnt );
+
+	if ( pEdict == NULL )
+		return false;
+
+	const char *pszClass = AgPB_EntityClassName( pEdict );
+
+	if ( pszClass == NULL )
+		return false;
+
+	return ( V_stricmp( pszClass, "func_door" ) == 0 ||
+	         V_stricmp( pszClass, "func_door_rotating" ) == 0 );
+}
+
+/**
+ * 自动算 wayzone 半径（移植 EBot Waypoint::CalculateWayzone，waypoint.cpp:1733）。
+ */
+void CAgPBWaypoints::CalculateWayzone( int iIndex, edict_t *pIgnore )
+{
+	AgPBPath *pPath = GetMutable( iIndex );
+
+	if ( pPath == NULL )
+		return;
+
+	// EBot：这些点不让半径散开
+	if ( pPath->flags & ( AgPB_WP_LADDER | AgPB_WP_GOAL | AgPB_WP_CAMP |
+	                      AgPB_WP_RESCUE | AgPB_WP_CROUCH ) )
+	{
+		pPath->radius = 0;
+		return;
+	}
+
+	// 邻点带 LADDER / JUMP → 也不散开
+	for ( int s = 0; s < AgPB_WP_MAX_PATH_INDEX; ++s )
+	{
+		const AgPBPath *pLink = Get( pPath->index[s] );
+
+		if ( pLink == NULL )
+			continue;
+
+		if ( pLink->flags & ( AgPB_WP_LADDER | AgPB_WP_JUMP ) )
+		{
+			pPath->radius = 0;
+			return;
+		}
+	}
+
+	bool bBlocked = false;
+	int  iFinalRadius = 0;
+
+	for ( int iScan = 32; iScan < 128; iScan += 16 )
+	{
+		const float flScan = (float)iScan;
+
+		iFinalRadius = iScan;
+
+		for ( int iYaw = 0; iYaw < 360; iYaw += 20 )
+		{
+			const QAngle angDir( 0.0f, (float)iYaw, 0.0f );
+			Vector vDir;
+			AngleVectors( angDir, &vDir );
+
+			const Vector vSide = pPath->origin + vDir * flScan;
+			const Vector vBack = pPath->origin - vDir * flScan;
+
+			// 1) 这个位置站得下吗（零长度 hull = 把体积放进去试）
+			if ( !AgPB_TraceHullClear( vSide, vSide, pIgnore ) )
+			{
+				// EBot 撞到门就直接给 0（门会动，半径算不准）。它那边用的是
+				// 零长度 trace，Source 下拿不到命中实体，所以这里顺着
+				// "原点到采样点"的实际连线找是谁挡的。
+				if ( AgPB_TraceHitsDoor( pPath->origin, vSide, pIgnore ) )
+					iFinalRadius = 0;
+				else
+					iFinalRadius -= 16;
+
+				bBlocked = true;
+				break;
+			}
+
+			// 2) 前方采样点往下探（scan + 60）得有地面
+			if ( !AgPB_TraceClear( vSide, vSide - Vector( 0.0f, 0.0f, flScan + 60.0f ), pIgnore ) )
+			{
+				iFinalRadius -= 16;
+				bBlocked = true;
+				break;
+			}
+
+			// 3) 反方向也一样
+			if ( !AgPB_TraceClear( vBack, vBack - Vector( 0.0f, 0.0f, flScan + 60.0f ), pIgnore ) )
+			{
+				iFinalRadius -= 16;
+				bBlocked = true;
+				break;
+			}
+
+			// 4) 头顶 +34 得有空间（矮天花板/管道会挡）
+			if ( !AgPB_TraceHullClear( vSide, vSide + Vector( 0.0f, 0.0f, 34.0f ), pIgnore ) )
+			{
+				iFinalRadius -= 16;
+				bBlocked = true;
+				break;
+			}
+		}
+
+		if ( bBlocked )
+			break;
+	}
+
+	iFinalRadius -= 16;
+
+	if ( iFinalRadius < 0 )
+		iFinalRadius = 0;
+
+	if ( iFinalRadius > 255 )
+		iFinalRadius = 255;
+
+	pPath->radius = (unsigned char)iFinalRadius;
 }

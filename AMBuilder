@@ -12,6 +12,9 @@ for sdk_target in MMSPlugin.sdk_targets:
     'src/bot.cpp',
     'src/netvars.cpp',
     'src/waypoint.cpp',
+    'src/menu.cpp',
+    'src/wpdraw.cpp',
+    'src/wpedit.cpp',
   ]
 
   nodes = builder.Add(binary)

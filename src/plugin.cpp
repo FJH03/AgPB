@@ -12,15 +12,20 @@
 #include <tier1/strtools.h>
 #include <filesystem.h>
 #include <engine/IEngineTrace.h>
+#include <engine/ivdebugoverlay.h>
 
 #include "plugin.h"
 #include "bot.h"
 #include "waypoint.h"
+#include "menu.h"
+#include "wpdraw.h"
+#include "wpedit.h"
 
 AgPBPlugin g_AgPBPlugin;
 
 SH_DECL_HOOK1_void(IServerGameDLL, GameFrame, SH_NOATTRIB, 0, bool);
 SH_DECL_HOOK1_void(IServerGameClients, ClientDisconnect, SH_NOATTRIB, 0, edict_t *);
+SH_DECL_HOOK2_void(IServerGameClients, ClientCommand, SH_NOATTRIB, 0, edict_t *, const CCommand &);
 
 IServerGameDLL *server = NULL;
 IServerGameClients *gameclients = NULL;
@@ -32,8 +37,14 @@ IServerPluginHelpers *helpers = NULL;
 IServerGameEnts *gameents = NULL;
 CGlobalVars *gpGlobals = NULL;
 IFileSystem *filesystem = NULL;
+IVDebugOverlay *debugoverlay = NULL;
 
 static CAgPBManager g_Bots;
+
+CAgPBManager &AgPB_Bots()
+{
+	return g_Bots;
+}
 
 // ---------------------------------------------------------------------------
 // ConVars / ConCommands
@@ -513,6 +524,9 @@ static void Cmd_WpAdd( const CCommand &args )
 		return;
 	}
 
+	// 半径：默认用 EBot 的 wayzone 算法（agpb_wp_autowayzone 0 时跳过）
+	AgPB_EditAutoRadius( iIndex, NULL );
+
 	META_CONPRINTF( "[AgPB] waypoint %d added at %.0f %.0f %.0f (%d total, %d links)\n",
 	                iIndex, vOrigin.x, vOrigin.y, vOrigin.z, wp.Count(), wp.LinkCount() );
 }
@@ -810,6 +824,96 @@ static void Cmd_WpDist( const CCommand &args )
 	                ( wp.Get( iTo )->origin - wp.Get( iFrom )->origin ).Length() );
 }
 
+/**
+ * agpb_bot_goto <idx> [waypoint]
+ *
+ * 最小导航验证：让 bot 沿路点图走到目标点。不给 waypoint 就用"编辑器当前目标点"
+ * （准星指向的点，没有就用缓存点）—— 打两个点、把 bot 派过去，就是这么用。
+ */
+static void Cmd_BotGoto( const CCommand &args )
+{
+	if ( args.ArgC() < 2 )
+	{
+		META_CONPRINTF( "[AgPB] usage: agpb_bot_goto <idx> [waypoint]  (default: the waypoint you aim at)\n" );
+		return;
+	}
+
+	CAgPB *pBot = g_Bots.Get( V_atoi( args.Arg( 1 ) ) );
+
+	if ( pBot == NULL )
+	{
+		META_CONPRINTF( "[AgPB] invalid list index '%s' (see agpb_list)\n", args.Arg( 1 ) );
+		return;
+	}
+
+	int iGoal = -1;
+
+	if ( args.ArgC() >= 3 )
+	{
+		iGoal = V_atoi( args.Arg( 2 ) );
+	}
+	else
+	{
+		AgPB_RefreshHost();
+		iGoal = AgPB_EditTargetWaypoint();
+
+		if ( !BotWaypoints().IsValid( iGoal ) )
+		{
+			META_CONPRINTF( "[AgPB] no target waypoint: aim at one, or agpb_wp_cache it first\n" );
+			return;
+		}
+	}
+
+	char szError[256];
+	szError[0] = '\0';
+
+	if ( !pBot->StartRoute( iGoal, szError, sizeof( szError ) ) )
+	{
+		META_CONPRINTF( "[AgPB] %s: %s\n", pBot->Name(), szError );
+		return;
+	}
+
+	META_CONPRINTF( "[AgPB] %s: walking to #%d, %d hop(s):", pBot->Name(), iGoal, pBot->RouteCount() );
+
+	for ( int i = 0; i < pBot->RouteCount(); ++i )
+		META_CONPRINTF( " %d", pBot->RouteNode( i ) );
+
+	META_CONPRINTF( "\n" );
+}
+
+/** agpb_bot_stop <idx|all> —— 停止行走（清掉路线与输入）。 */
+static void Cmd_BotStop( const CCommand &args )
+{
+	if ( args.ArgC() < 2 )
+	{
+		META_CONPRINTF( "[AgPB] usage: agpb_bot_stop <idx|all>\n" );
+		return;
+	}
+
+	if ( V_stricmp( args.Arg( 1 ), "all" ) == 0 )
+	{
+		for ( int i = 0; i < g_Bots.Count(); ++i )
+		{
+			if ( CAgPB *pBot = g_Bots.Get( i ) )
+				pBot->StopRoute();
+		}
+
+		META_CONPRINTF( "[AgPB] all routes stopped\n" );
+		return;
+	}
+
+	CAgPB *pBot = g_Bots.Get( V_atoi( args.Arg( 1 ) ) );
+
+	if ( pBot == NULL )
+	{
+		META_CONPRINTF( "[AgPB] invalid list index '%s'\n", args.Arg( 1 ) );
+		return;
+	}
+
+	pBot->StopRoute();
+	META_CONPRINTF( "[AgPB] %s: route stopped\n", pBot->Name() );
+}
+
 static ConCommand agpb_add_cmd( "agpb_add", Cmd_Add,
                                 "Create an AgPB bot. [team]", FCVAR_GAMEDLL );
 static ConCommand agpb_kick_cmd( "agpb_kick", Cmd_Kick,
@@ -849,6 +953,49 @@ static ConCommand agpb_wp_dist_cmd( "agpb_wp_dist", Cmd_WpDist,
                                  "Path distance between two waypoints: agpb_wp_dist <from> <to>", FCVAR_GAMEDLL );
 
 // ---------------------------------------------------------------------------
+// 路点编辑器 / 菜单（实现在 wpedit.cpp，这里只注册）
+// ---------------------------------------------------------------------------
+
+static ConCommand agpb_menu_cmd( "agpb_menu", AgPB_Cmd_Menu,
+                                 "Open the AgPB menu, or pick an item: agpb_menu [n]", FCVAR_GAMEDLL );
+static ConCommand agpb_wp_show_cmd( "agpb_wp_show", AgPB_Cmd_Show,
+                                 "Draw/hide the waypoint graph: agpb_wp_show [0|1]", FCVAR_GAMEDLL );
+static ConCommand agpb_wp_labels_cmd( "agpb_wp_labels", AgPB_Cmd_Labels,
+                                 "Draw the index above every waypoint: agpb_wp_labels [0|1]", FCVAR_GAMEDLL );
+static ConCommand agpb_wp_alllinks_cmd( "agpb_wp_alllinks", AgPB_Cmd_AllLinks,
+                                 "Draw all links or only the nearest one's: agpb_wp_alllinks [0|1]", FCVAR_GAMEDLL );
+static ConCommand agpb_wp_cache_cmd( "agpb_wp_cache", AgPB_Cmd_Cache,
+                                 "Cache the nearest waypoint (link target).", FCVAR_GAMEDLL );
+static ConCommand agpb_wp_type_cmd( "agpb_wp_type", AgPB_Cmd_Type,
+                                 "Add a waypoint of a type at your position: agpb_wp_type <type>", FCVAR_GAMEDLL );
+static ConCommand agpb_wp_flag_cmd( "agpb_wp_flag", AgPB_Cmd_Flag,
+                                 "Toggle a flag on the nearest waypoint: agpb_wp_flag <flag|clear>", FCVAR_GAMEDLL );
+static ConCommand agpb_wp_radius_cmd( "agpb_wp_radius", AgPB_Cmd_Radius,
+                                 "Set the nearest waypoint's radius: agpb_wp_radius <0..255>", FCVAR_GAMEDLL );
+static ConCommand agpb_wp_connect_cmd( "agpb_wp_connect", AgPB_Cmd_Connect,
+                                 "Link nearest -> target: agpb_wp_connect <out|in|both|jump|boost|visible>", FCVAR_GAMEDLL );
+static ConCommand agpb_wp_cut_cmd( "agpb_wp_cut", AgPB_Cmd_Cut,
+                                 "Remove the link between nearest and target.", FCVAR_GAMEDLL );
+static ConCommand agpb_wp_teleport_cmd( "agpb_wp_teleport", AgPB_Cmd_Teleport,
+                                 "Teleport you to a waypoint: agpb_wp_teleport [idx]", FCVAR_GAMEDLL );
+static ConCommand agpb_wp_noclip_cmd( "agpb_wp_noclip", AgPB_Cmd_Noclip,
+                                 "Toggle noclip on you (needs sv_cheats 1).", FCVAR_GAMEDLL );
+static ConCommand agpb_wp_check_cmd( "agpb_wp_check", AgPB_Cmd_Check,
+                                 "Check the waypoint graph for structural errors.", FCVAR_GAMEDLL );
+static ConCommand agpb_wp_stats_cmd( "agpb_wp_stats", AgPB_Cmd_Stats,
+                                 "Print waypoint/link statistics for this map.", FCVAR_GAMEDLL );
+static ConCommand agpb_wp_legend_cmd( "agpb_wp_legend", AgPB_Cmd_Legend,
+                                 "Print the waypoint color legend to your console.", FCVAR_GAMEDLL );
+static ConCommand agpb_wp_wayzone_cmd( "agpb_wp_wayzone", AgPB_Cmd_Wayzone,
+                                 "Recompute the arrival radius (wayzone): agpb_wp_wayzone [idx|all]", FCVAR_GAMEDLL );
+
+// 最小导航（M3 验证：让 bot 真的沿路点图走起来）
+static ConCommand agpb_bot_goto_cmd( "agpb_bot_goto", Cmd_BotGoto,
+                                 "Walk a bot to a waypoint: agpb_bot_goto <idx> [waypoint]", FCVAR_GAMEDLL );
+static ConCommand agpb_bot_stop_cmd( "agpb_bot_stop", Cmd_BotStop,
+                                 "Stop a bot's route: agpb_bot_stop <idx|all>", FCVAR_GAMEDLL );
+
+// ---------------------------------------------------------------------------
 // Plugin
 // ---------------------------------------------------------------------------
 
@@ -863,6 +1010,7 @@ bool AgPBPlugin::Load( PluginId id, ISmmAPI *ismm, char *error, size_t maxlen, b
 	GET_V_IFACE_CURRENT( GetEngineFactory, enginetrace, IEngineTrace, INTERFACEVERSION_ENGINETRACE_SERVER );
 	GET_V_IFACE_CURRENT( GetEngineFactory, helpers, IServerPluginHelpers, INTERFACEVERSION_ISERVERPLUGINHELPERS );
 	GET_V_IFACE_CURRENT( GetEngineFactory, filesystem, IFileSystem, FILESYSTEM_INTERFACE_VERSION );
+	GET_V_IFACE_CURRENT( GetEngineFactory, debugoverlay, IVDebugOverlay, VDEBUG_OVERLAY_INTERFACE_VERSION );
 
 	GET_V_IFACE_ANY( GetServerFactory, server, IServerGameDLL, INTERFACEVERSION_SERVERGAMEDLL );
 	GET_V_IFACE_ANY( GetServerFactory, gameclients, IServerGameClients, INTERFACEVERSION_SERVERGAMECLIENTS );
@@ -883,6 +1031,7 @@ bool AgPBPlugin::Load( PluginId id, ISmmAPI *ismm, char *error, size_t maxlen, b
 
 	SH_ADD_HOOK_MEMFUNC( IServerGameDLL, GameFrame, server, this, &AgPBPlugin::Hook_GameFrame, true );
 	SH_ADD_HOOK_MEMFUNC( IServerGameClients, ClientDisconnect, gameclients, this, &AgPBPlugin::Hook_ClientDisconnect, true );
+	SH_ADD_HOOK_MEMFUNC( IServerGameClients, ClientCommand, gameclients, this, &AgPBPlugin::Hook_ClientCommand, false );
 
 	g_pCVar = icvar;
 	ConVar_Register( 0, &s_BaseAccessor );
@@ -901,8 +1050,13 @@ bool AgPBPlugin::Load( PluginId id, ISmmAPI *ismm, char *error, size_t maxlen, b
 	// filesystem 全局，自己拿一份交给它。
 	BotWaypoints().SetFileSystem( filesystem );
 
-	META_CONPRINTF( "[AgPB] loaded. gpGlobals=%p, IBotManager=%p, helpers=%p\n",
-	                gpGlobals, g_Bots.BotManager(), helpers );
+	// 绘制要 IVDebugOverlay；拿不到就自动不画（菜单那条路不依赖它）。
+	AgPB_DrawSetOverlay( debugoverlay );
+
+	META_CONPRINTF( "[AgPB] loaded. gpGlobals=%p, IBotManager=%p, helpers=%p, overlay=%s, showmenu=%s\n",
+	                gpGlobals, g_Bots.BotManager(), helpers,
+	                ( debugoverlay != NULL ) ? "ok" : "MISSING",
+	                ( g_SMAPI->FindUserMessage( "ShowMenu", NULL ) >= 0 ) ? "ok" : "MISSING" );
 
 	if ( !g_Bots.IsReady() )
 	{
@@ -917,6 +1071,7 @@ bool AgPBPlugin::Unload( char *error, size_t maxlen )
 {
 	SH_REMOVE_HOOK_MEMFUNC( IServerGameDLL, GameFrame, server, this, &AgPBPlugin::Hook_GameFrame, true );
 	SH_REMOVE_HOOK_MEMFUNC( IServerGameClients, ClientDisconnect, gameclients, this, &AgPBPlugin::Hook_ClientDisconnect, true );
+	SH_REMOVE_HOOK_MEMFUNC( IServerGameClients, ClientCommand, gameclients, this, &AgPBPlugin::Hook_ClientCommand, false );
 
 	g_Bots.RemoveAll();
 	g_Bots.Shutdown();
@@ -952,9 +1107,6 @@ void AgPBPlugin::Hook_GameFrame( bool simulating )
 	if ( !simulating || gpGlobals == NULL )
 		return;
 
-	if ( !agpb_enable.GetBool() )
-		return;
-
 	// 让路点模块跟着当前地图走。SetMapName 内部只做一次字符串比较，
 	// 只有换图（或第一次进图）才真的去读盘。
 	//
@@ -967,10 +1119,63 @@ void AgPBPlugin::Hook_GameFrame( bool simulating )
 			BotWaypoints().SetMapName( pszMap );
 	}
 
+	// 路点编辑器与 bot 驱动无关：agpb_enable=0 时也要能画图 / 打点
+	AgPB_EditorFrame();
+
+	// 菜单续命（客户端 5 秒没输入会自己收，靠重发顶着）
+	AgPB_MenuTick();
+
+	if ( !agpb_enable.GetBool() )
+		return;
+
 	g_Bots.ThinkAll( gpGlobals );
 }
 
 void AgPBPlugin::Hook_ClientDisconnect( edict_t *pEntity )
 {
+	AgPB_MenuForget( pEntity );
 	g_Bots.RemoveByEdict( pEntity );
+}
+
+/**
+ * 客户端命令钩子。
+ *
+ * 菜单点选回到服务器有两条路：
+ *   1. HUD 菜单（CreateMessage）里每个选项的 command = "agpb_menu <n>"
+ *   2. EBot 风格的 menuselect <n>（数字键）
+ * 两者都在这里分发；menuselect 只有在本插件的菜单开着时才吞掉，
+ * 免得把 CS 自己的买枪 / 选队菜单弄坏。
+ */
+void AgPBPlugin::Hook_ClientCommand( edict_t *pEntity, const CCommand &args )
+{
+	if ( pEntity == NULL || pEntity->IsFree() || args.ArgC() <= 0 )
+		RETURN_META( MRES_IGNORED );
+
+	const char *pszCmd = args.Arg( 0 );
+
+	if ( V_stricmp( pszCmd, "agpb_menu" ) == 0 )
+	{
+		if ( args.ArgC() >= 2 )
+		{
+			if ( AgPB_MenuSelect( pEntity, V_atoi( args.Arg( 1 ) ) ) )
+				RETURN_META( MRES_SUPERCEDE );
+		}
+		else
+		{
+			AgPB_OpenMenu( pEntity, AgPB_MENU_MAIN );
+			RETURN_META( MRES_SUPERCEDE );
+		}
+
+		RETURN_META( MRES_IGNORED );
+	}
+
+	if ( V_stricmp( pszCmd, "menuselect" ) == 0 &&
+	     args.ArgC() >= 2 &&
+	     AgPB_MenuCurrent( pEntity ) != AgPB_MENU_NONE )
+	{
+		if ( AgPB_MenuSelect( pEntity, V_atoi( args.Arg( 1 ) ) ) )
+			RETURN_META( MRES_SUPERCEDE );
+	}
+
+	RETURN_META( MRES_IGNORED );
 }

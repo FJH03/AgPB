@@ -694,6 +694,52 @@ count x { float x,y,z | u32 flags | u8 radius | u8 mesh
   （指向被删点的清掉，大于它的减一）。
 - `agpb_wp_path` 是验收命令 —— 不用起 bot 就能验证路点图连通性与寻路（见 VERIFY「阶段 D」）。
 
+### M3 第二步：菜单 / 路点编辑器 / 绘制 / 最小导航（2026-09-25）
+
+新增三个模块（都已在 `AMBuilder` 里）：
+
+| 文件 | 职责 |
+|---|---|
+| `src/menu.h` / `menu.cpp` | HUD 菜单框架（"ShowMenu" usermessage + 控制台回落 + `menuselect` 兼容） |
+| `src/wpdraw.h` / `wpdraw.cpp` | `IVDebugOverlay` 逐帧画路点/连线，配色照抄 EBot |
+| `src/wpedit.h` / `wpedit.cpp` | 编辑器状态（最近点 / 准星指向点 / 缓存点）、动作、整套菜单与 `agpb_wp_*` 命令 |
+
+**菜单**：走 `IVEngineServer::UserMessageBegin("ShowMenu")`（客户端 `CHudMenu` 渲染的
+左上角数字菜单，**不是** `IServerPluginHelpers::CreateMessage` 那个 VGUI 对话框）。
+消息 id 用 `g_SMAPI->FindUserMessage("ShowMenu")` 按名字取（id 由注册顺序决定，不能硬编码）。
+文本约定 `->N. 标题`（N 既是槽位号也是屏幕上的编号）；单条消息上限 255 字节，
+超了按行分段发（`needMore`，客户端 `m_fWaitingForMore` 会拼）。
+客户端 5 秒无输入会自己收（`MENU_SELECTION_TIMEOUT`），所以服务端每 3 秒重发一份续命，
+退出/过期时主动发 `bits=0` 让客户端收起来。数字键 `0` 在客户端是 slot10，
+发的是 `menuselect 10` → 服务端统一按"退出"处理。菜单文字是**中文（UTF-8 直发）**，
+控制台输出仍保持英文（见 §6「HUD 文本编码」）。
+
+**编辑器选点约定**（照 EBot）：起点 = 离你最近的路点（75 单位内），
+终点 = **准星指向的点**（水平角差 + 通视），准星没指就用**缓存点**（`agpb_wp_cache`）。
+连线有 6 种模式：out / in / both / jump / boost / visible；其中 jump/boost/visible
+是**单向**写的（`AddLinkDirected`，数据模型为此新增），只有 both 成对写。
+`agpb_wp_connect jump` 顺手给**起点**打 `JUMP` 并把半径压到 4（= EBot `AddPath(type=1)`）。
+
+**绘制**：`IVDebugOverlay::AddLineOverlayAlpha`，duration 0（活到下一帧）。
+配色照 EBot：点=基础色（CAMP 青/GOAL 紫/LADDER 棕/RESCUE 白/AVOID 红/FALLCHECK 灰/
+USEBUTTON 蓝；扩展 JUMP 黄、CROUCH 紫罗兰、LIFT 墨绿）+ 附加色（SNIPER 暗金/T 红/CT 蓝/
+FALLRISK 粉）；连线 = JUMP 红 / BOOST 蓝 / VISIBLE 通视绿被挡橙 / 双向黄 / 单向白 /
+单向入边墨绿 / 其它点压暗蓝。Source 没有线宽参数，所以按观察者视角 right/up 做世界空间
+偏移叠画 N 遍（`agpb_wp_thick`），并可穿墙（`agpb_wp_xray`）。
+
+**数据模型新增**：`AddLinkDirected`（单向边）、`LinkCount` 支持单向统计、
+`AgPB_WP_SNIPER`、标志名表（`AgPB_WaypointFlagName/ByName/String`）、
+`CAgPBWaypoints::CalculateWayzone`（**移植 EBot**，加点时自动算到达半径）、
+`AgPB_TraceClear / AgPB_TraceHullClear / AgPB_TraceHitsDoor`（点/hull/门判定，编辑器共用）。
+
+**最小导航**（`agpb_bot_goto` / `agpb_bot_stop`，`bot.cpp`）：不是 EBot 的 control/navigate，
+只做"朝路线上下一个点转 yaw + `forwardmove` 前进 + 边带 `PATH_JUMP` 就按跳 +
+点带 `CROUCH` 就按蹲 + 卡住就停"，目的是先把**路点数据 + ucmd 注入**这条链验证透。
+到达判定照 EBot（`navigate.cpp:643-690`）：`radius >= 50` 且非跳边 → 进圈就算到；
+否则必须进 `max(radius, 4)`，并用速度外推避免高速擦过被判"没到"。
+
+命令与 convar 见 `README.md`「路点编辑器」小节；验收见 `VERIFY.md` 阶段 E / F。
+
 ---
 
 ## 5. 构建与部署
@@ -708,6 +754,12 @@ cmd /c '"E:\vs\VC\Auxiliary\Build\vcvarsall.bat" amd64 && chcp 65001 && set PYTH
 ```
 
 产物：`build\agpb_mm\windows-x86_64\agpb_mm.dll`
+
+> `ambuild2` 从 `https://github.com/FJH03/ambuild` 装：
+> `git clone <repo> E:\Plugins-Platform\ambuild` 然后 `py -m pip install E:\Plugins-Platform\ambuild`
+> （装完 `ambuild` 落在 `E:\py 3.12\Scripts\ambuild.exe`）。
+> **受限/沙箱环境里 MSVC 探测会失败**（报 `Could not find cl.exe for ...vcvars64.bat`，
+> 但同一个 shell 里 `where cl.exe` 明明能找到）—— 那种环境请在普通 shell 里构建。
 
 ### 部署（x64 子目录约定）
 
@@ -728,6 +780,9 @@ cstrike/addons/metamod/AgPB.vdf
 
 > 这个 `win64` 子目录约定与 MMS 自身的打包布局一致
 > （MMS 的 x64 包就是 `addons/metamod/bin/win64/server.dll`）。
+
+> 换 DLL 前先按时间戳备份旧文件：`agpb_mm.dll.<yyyyMMdd-HHmmss>.bak`
+> （别覆盖历史版本）；**服务器在跑时 DLL 被占用，必须先停服**再替换。
 
 启动后控制台出现下面这行即部署成功：
 
@@ -805,6 +860,16 @@ USP（12/100）完全对得上，就说明 `baseclass` 递归累加偏移这条�
 | `string_t` 跟 `0` / `NULL` 比 | 语义错（它是指针式，`public/string_t.h:34`） | 先 `STRING()`，再判空串 |
 | `ambuild` 不在 `build\` 目录里跑 | `folder was not configured for AMBuild` | 必须 `cd build` 再跑 |
 | **编辑工具写坏文件** | 多行替换含中文注释 / `%` / `(` / `\"` 时，文件被截断或函数被塞进别的函数体里 | **改这几个文件一律整文件重建**（`Remove-Item` + `create_file`） |
+| `CreateMessage(DIALOG_MENU)` 在 CS:S 里是 **VGUI 对话框** | 想要 EBot 那种左上角数字菜单，结果弹出个窗口 | 要发 **"ShowMenu" usermessage**；id 用 `g_SMAPI->FindUserMessage("ShowMenu")` 取，**不能硬编码** |
+| `ShowMenu` 单条消息上限 **255 字节** | `DLL_MessageEnd: Refusing to send user message ShowMenu of 256 bytes`，整条菜单不显示 | 按行分段发（`needMore=1` 续段、末段 0），客户端 `m_fWaitingForMore` 会拼；每段字符串 ≤ 240 字节 |
+| 菜单文本里 `->N` 的 N 既是槽位号又是**显示文本** | 写 `->1 1. 标题` 屏幕上显示成 `11. 标题` | 写 `->N. 标题`（N 就是屏幕上那个编号，别再写一遍） |
+| 客户端 `CHudMenu` **5 秒无输入自己收**（`MENU_SELECTION_TIMEOUT`） | 菜单刚打开就没了，来不及看 | 服务端每 3 秒重发同一份续命；退出/过期主动发 `bits=0` 让客户端 `HideMenu()` |
+| 服务端菜单状态留太久 | 数字键漏给 CS 自己的菜单（无线电/武器），像"bot 突然说了一句话" | 状态与菜单同寿；另外客户端 `menuselect` 只在**它自己没菜单**时才转发服务器（`game/client/cstrike/radio_status.cpp`），所以只要状态对得上就不会串 |
+| HUD 文本的编码 | 中文乱码 / 显示不出来 | 客户端 `ILocalize::ConvertANSIToUnicode` 走 **CP_UTF8**（`tier1/ilocalize.cpp:23`）→ 菜单直接发 UTF-8 中文；**控制台仍是 GBK**，控制台输出继续保持英文 |
+| `IVDebugOverlay` **没有线宽参数** | 线只有 1 像素，太细看不清 | 按观察者视角 right/up 做世界空间小偏移叠画 N 遍（`agpb_wp_thick` 1..5），主次用 `AddLineOverlayAlpha` 的 alpha 区分 |
+| 用"兜底大半径"做到达判定 | 蹲点/跳点（wayzone 算出 radius 0）会在 48 单位外就被判"到了"，根本走不进去 | 照 EBot：`radius >= 50` 进圈即到；否则必须进 `max(radius, 4)`（移动中用速度外推一次） |
+| GoldSrc 的 `head_hull` | Source 里没有这个 hull 索引 | 用 ≈ 蹲姿体积 `±16/±18` 的 extents 顶替（wayzone 扫描与视线检查用） |
+| `setpos` / `noclip` 的执行路径 | `setpos` 是**客户端**命令，服务端本地执行会"未知命令" | `setpos` 走 `IVEngineServer::ClientCommand`（stuffcmd，发给真人客户端）；`noclip` 是服务端命令，走 `IServerPluginHelpers::ClientCommand` |
 
 ---
 
@@ -988,6 +1053,17 @@ bool IsVisible(const Vector& origin, edict_t* ent)
 4. **`waypoint` 文件 IO** —— 纯数据，几乎不用改
 5. `control` / `navigate` / `combat` —— 基本原样，改到哪修哪
 
+> **2026-09-25 进度**：`waypoint` 那边又移植了两块 —— `CalculateWayzone`（自动到达半径，
+> 加点时自动算 + `agpb_wp_wayzone` 手动/批量重算）和 trace 三件套（点 / 头高 hull / 撞门）。
+> `control` / `navigate` 暂时用一个**最小导航**顶着（`agpb_bot_goto`：转向 + 前进 + 跳/蹲 +
+> 卡住停），专门用来验证"路点数据 + ucmd 注入"这条链，**不是** EBot 那套的替代品。
+>
+> 仍然**没移植**（按优先级）：`IsNodeReachable` / `MustJump`（自动判定连边要不要跳、
+> 顺带做打点时的几何校验）、`CreateBasic`（从实体自动铺基础点）、Analyze 自动打点 +
+> `AnalyzeDeleteUselessWaypoints`、`AddToBucket` 空间桶（FindNearest 加速）、
+> `SavePathMatrix`（已用单源 Dijkstra 替代，不打算做）、`GetFacingIndex` 的完整版
+> （现在是水平角差 + 通视的简化版）。多人协作类（`DJUMP`/boost）与僵尸相关分支：不做。
+
 ### 两个提醒
 
 - **许可证**：EBot 基于 SyPB（GPL-3.0），SyPB 基于 YaPB（GPL）。若要**公开发布**移植版，修改过的文件必须开源。
@@ -1065,6 +1141,10 @@ CS:S 是 66 tick → 每帧 15.15 ms；LLM 往返 300~2000 ms = 20~130 帧。
 | 7 | **放弃 `.nav`，改手工路点图** | nav 的连通性是几何推出来的，推错了就是「说连通、实际过不去」；路点图的连边是人验证过的动作（详见 §4「M3 第一步」） |
 | 8 | **不建 N×N 路径距离矩阵**，用单源 Dijkstra | EBot 那张 `8192² x 2B = 128MB` 的矩阵只是为了省 A* 的展开量；`ComputeDistances` 单源版 `O(E log V)` 按需算，最短路结果一样 |
 | 9 | **不做自动连线** | 自动连的边没人验证过，等于把 nav 的毛病搬回来；要连就手工连（`agpb_wp_link`） |
+| 10 | 菜单用 **"ShowMenu" usermessage**（HUD 数字菜单），**不用** `CreateMessage` | 后者在 CS:S 里弹 VGUI 对话框，观感与 EBot 完全不同；usermessage 那条路才是左上角数字菜单，而且 `menuselect` 天然兼容 |
+| 11 | 菜单文字**中文**、控制台输出**英文** | 客户端 `ConvertANSIToUnicode` 走 CP_UTF8（菜单可以直发 UTF-8 中文）；控制台是 GBK，中文会乱码 |
+| 12 | 到达半径默认**自动算**（`agpb_wp_autowayzone 1` = EBot `CalculateWayzone`） | EBot 的加点菜单其实会 `SetRadius(64)` 盖掉算出来的值；我们要的是"少手动调参"，所以默认让自动值生效，想要 EBot 原味就设 0 |
+| 13 | 跳跃/叠罗汉/仅通视三种边**单向写**，点属性只标**起点** | EBot `AddPath(type)` 就是这么写的：边打 `PATHFLAG_*`，起点打 `WAYPOINT_JUMP`/`DJUMP`，跳跃起点半径压到 4 |
 
 ### 待定
 
@@ -1143,3 +1223,59 @@ src/waypoint.cpp   894 行        src/waypoint.h 181 行
 | `agpb_netlist` / `agpb_nethandle` | **留着** —— M3 移植时的字段字典与句柄调试器 |
 | `agpb_wp_*` | **留着** —— 路点编辑器是长期工具（每张新图都要打点），不是临时接口 |
 | `BotEngineContext::pTrace` / `pGameEnts` | 留着，M3 的视线判定要用 |
+
+---
+
+## 11. 交接笔记（2026-09-25 收工）
+
+### 一句话状态
+
+M3 的「编辑器 + 可视化 + 最小导航」三件套已落地并部署上服：路点**自己就能打、能看、能走**。
+下一步是把 EBot 的 `navigate` / `control` 真正搬进来（或继续用最小导航把数据跑透），
+顺便补 `IsNodeReachable` / `MustJump` 让打点自带几何校验。
+
+### 今天做完的（可直接当事实用）
+
+| 结论 | 证据 / 位置 |
+|---|---|
+| HUD 菜单走 `ShowMenu` usermessage，**中文可正常显示** | 用户实测截图（2026-09-25）菜单以中文渲染在屏幕左上角 |
+| `ShowMenu` 单条上限 255 字节，超了整条被拒 | 引擎日志 `DLL_MessageEnd: Refusing to send user message ShowMenu of 256 bytes`；分段实现在 `menu.cpp:SendMenuText` |
+| 菜单续命有效（不再 5 秒自关） | `AgPB_MenuTick` 每 3 秒重发；用户实测确认 |
+| 绘制可见、颜色能区分属性 | 用户实测（反馈"线偏细/偏浅"→ 已加 `agpb_wp_thick` / `agpb_wp_xray` / alpha 分级） |
+| 跳跃边 = **单向** + 起点打 `JUMP` + 起点半径压 4 | `wpedit.cpp` `AgPB_EditConnect` case 3，与 EBot `AddPath(type=1)` 对齐 |
+| wayzone 自动半径 = EBot 移植 | `waypoint.cpp:CalculateWayzone`；命令 `agpb_wp_wayzone [idx\|all]`；加点默认自动算（`agpb_wp_autowayzone 1`） |
+| 最小导航能驱动 bot 走路 | `bot.cpp:StartRoute / UpdateRoute`；命令 `agpb_bot_goto <idx> [wp]` / `agpb_bot_stop` |
+| 蹲点"不下蹲"的真因 | 到达判定原用 48 兜底 → 已在 48 单位外判定"到了"；改为 EBot 规则（`max(radius,4)` + 速度外推）后才真正走进矮区 |
+
+### 数字基线（回归时对照）
+
+```
+agpb_mm.dll（2026-09-25 收工版）  490,496 字节
+obj：src_plugin / src_bot / src_netvars / src_waypoint / src_menu / src_wpdraw / src_wpedit
+启动自检：[AgPB] loaded. ... overlay=ok, showmenu=ok
+```
+
+新增命令：`agpb_menu`、`agpb_wp_show|labels|alllinks|cache|type|flag|radius|connect|cut|teleport|noclip|check|stats|legend|wayzone`、`agpb_bot_goto|stop`
+
+新增 ConVar：`agpb_wp_show(0)`、`agpb_wp_labels(0)`、`agpb_wp_alllinks(1)`、
+`agpb_wp_thick(3)`、`agpb_wp_xray(1)`、`agpb_wp_autowayzone(1)`
+
+### 明天从哪开始
+
+1. 按 `VERIFY.md`「阶段 F」测走路：`agpb_bot_goto 0` 走通/卡住都记下坐标 —— 卡住通常就是
+   数据问题（缺边、半径不合适）或真障碍
+2. 三选一定优先级：
+   - **a. 补 `IsNodeReachable` + `MustJump`** —— 打点时就能判定"这条边到底能不能走、要不要跳"，
+     EBot 的 analyze 模式也依赖它们（推荐）
+   - **b. 移植 `CreateBasic` + Analyze 自动打点** —— 省手工铺点
+   - **c. 直接上 EBot 的 `navigate` / `control`** —— 需要先定 `entvars_t` 方案（§7 的 A/B/C）
+3. `CRASH_REPORT.md` 的 freezetime Radio 崩溃**仍未修**（决定用 SourceMod 内存补丁处理；
+   所有测试继续**同队**进行）
+
+### 可以删 / 建议留
+
+| 东西 | 处理 |
+|---|---|
+| `agpb_testmove` | 仍留 —— 最小导航已能替代它的验证作用，等 `control` 上来后再删 |
+| `agpb_wp_wayzone` / `agpb_wp_legend` / `agpb_wp_check` | 留：长期工具 |
+| 部署目录里的 `agpb_mm.dll.<时间戳>.bak` | 留最近 2~3 个就够 |

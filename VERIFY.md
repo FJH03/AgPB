@@ -260,6 +260,118 @@ agpb_wp_dist 0 5                // 沿图的代价（梯子 / 蹲点位 x2 权�
 
 ---
 
+## 阶段 E —— 菜单 / 绘制 / 编辑器（M3 第一步补完）
+
+### E.1 界面
+
+```
+agpb_menu
+```
+
+判读：
+
+- 屏幕左上角出现**中文**数字菜单（`->N` 标记的行是高亮色）= "ShowMenu" usermessage 这条路通
+  （抬头那行会写 `N wp(s) | nearest #x r=y flags=... | facing #a | cache #b | target #c`）
+- 按数字键选择 → 服务器收到 `menuselect <n>`；按 `0` 退出（发的是 `menuselect 10`）
+- 菜单**不会自己消失**（插件每 3 秒重发续命）：可以慢慢看；选完一项后要么停在同一级菜单
+  继续操作，要么自动收掉；只有 `0` 是退出项
+- 没弹但控制台打出同样的文本菜单 = 回落生效，功能照旧（选项用 `agpb_menu <n>` 选）
+- 点选一项后打印一行英文回显（例如 `waypoint drawing ON`）
+
+### E.2 绘制与配色
+
+```
+agpb_wp_show 1
+agpb_wp_legend
+```
+
+判读：看得见点（绿 / 按标志变色）与连线（双向=黄、单向=白）；最近的那个点
+多出信息文字（`#idx r=... links=...` + flags）。带上 `agpb_wp_flag t` 后，
+该点上半截应变成红色。
+
+嫌线细/淡就调这两个（立即生效，不用重载插件）：
+
+```
+agpb_wp_thick 4      // 叠画遍数 1..5，越大越粗（默认 3）
+agpb_wp_xray 0       // 0 = 只在没被墙挡住时画（默认 1 = 穿墙可见）
+```
+
+### E.3 打点流程（EBot 的用法）
+
+```
+agpb_wp_type normal      // 在你脚下打第一个点
+// 走到下一处
+agpb_wp_type normal
+agpb_wp_cache            // 把"上一个点"存成目标（或直接用准星指着它）
+agpb_wp_connect both     // 最近点 <-> 目标点，双向
+agpb_wp_path <idx>       // A* 应该能走通
+agpb_wp_check
+agpb_wp_save
+```
+
+判读：`agpb_wp_connect` 回显 `bothways link a <-> b (added...)`；
+`agpb_wp_path` 打出每一跳；`agpb_wp_check` 报 `0 error(s), 0 isolated`。
+
+### E.4 属性 / 统计
+
+```
+agpb_wp_flag jump
+agpb_wp_radius 64        // 蓝框放大
+agpb_wp_wayzone          // 用 EBot 的算法自动算半径（看蓝框变成地形算出来的大小）
+agpb_wp_wayzone all      // 全部重算（老图想换成自动半径时用这个）
+agpb_wp_stats
+```
+
+> 崩溃提醒：bot 独占一队时 freezetime 结束会崩（见 [`CRASH_REPORT.md`](CRASH_REPORT.md)），
+> 打点与测试请让 bot 与人类**同队**。
+
+---
+
+## 阶段 F —— bot 走路（最小导航，M3 验证）
+
+准备（同队，避开 `CRASH_REPORT.md` 那个 freezetime Radio 崩溃）：
+
+```
+agpb_add 2
+agpb_list          // 记下 [0] 的 hp / 坐标正常
+agpb_wp_show 1
+```
+
+打两个点（相距 10~30 米，中间别有墙）：
+
+```
+// 站在 A 点
+agpb_wp_type normal
+// 走到 B 点
+agpb_wp_type normal
+agpb_wp_cache      // 把 B 记成目标点（或者用准星指着 B）
+// 人站回 A 点附近
+agpb_bot_goto 0    // 不给下标 = 走到"准星指向 / 缓存"的那个点
+```
+
+判读：
+
+- 控制台先打印路线：`[AgPB] AgPB_01: walking to #1, 2 hop(s): 0 1`
+- bot 转身朝 B、以 ~250 的速度直线走过去（视角跟随 `CUserCmd`）
+- 到达后打印 `arrived at waypoint #1 (1 hop(s) walked)`，然后停住
+- 撞墙/被卡住会打印 `stuck at x y z: no progress towards waypoint #N ...` 并停下
+
+其它：
+
+- `agpb_bot_goto <idx> <wp>` —— 直接指定目标点下标
+- `agpb_bot_stop <idx|all>` —— 中途停下
+- 跳跃：把 B 点打到需要跳的位置，在起跳点用 `agpb_wp_connect jump` 建边，
+  再 `agpb_bot_goto 0`，观察它是否在起跳点起跳并落到 B
+- 蹲行（CROUCH）：把 B 点打在矮通道里，站上去 `agpb_wp_flag crouch`，
+  `agpb_wp_wayzone`（蹲点应该算出半径 0 = 精确到达），再 `agpb_bot_goto 0`：
+  观察 bot 是否蹲着走进去（速度掉到 ~85）、离开矮区前是否保持蹲姿
+
+> 这层只做"朝下一个点转 + 前进 + 该跳就跳 + 该蹲就蹲 + 卡住就停"，
+> 没有避障、没有贴墙滑动、没有重规划 —— 走不通就是数据（或障碍）问题，
+> 正好用来检查路点打得对不对。
+
+---
+
 ## 相关命令一览
 
 | 命令 | 说明 |
@@ -282,4 +394,32 @@ agpb_wp_dist 0 5                // 沿图的代价（梯子 / 蹲点位 x2 权�
 | `agpb_wp_path <to>` ｜ `<from> <to>` | A* 寻路，打印每一跳 |
 | `agpb_wp_dist <from> <to>` | 沿路点图的路径代价 |
 
-ConVar：`agpb_enable`（默认 1）、`agpb_team`（默认 2）。
+菜单 / 编辑器（阶段 E）：
+
+| 命令 | 说明 |
+|---|---|
+| `agpb_menu [n]` | 打开菜单 / 选第 n 项（`menuselect n` 也吃） |
+| `agpb_wp_show [0\|1]` | 开关路点绘制 |
+| `agpb_wp_labels [0\|1]` | 画下标 |
+| `agpb_wp_alllinks [0\|1]` | 画所有连线 / 只画最近点的 |
+| `agpb_wp_cache` | 缓存最近点（当连线目标） |
+| `agpb_wp_type <type>` | 在脚下加路点（normal/t/ct/avoid/rescue/camp/goal/jump/crouch/ladder/usebutton/sniper/lift/fallcheck/fallrisk） |
+| `agpb_wp_flag <flag\|clear>` | 切换最近点上的标志 |
+| `agpb_wp_radius <0..255>` | 设最近点半径 |
+| `agpb_wp_connect <out\|in\|both\|jump\|boost\|visible>` | 连边（终点 = 准星指向 / 缓存点） |
+| `agpb_wp_cut` | 断开「最近点 ↔ 目标点」 |
+| `agpb_wp_teleport [idx]` | 传到路点（需要 `sv_cheats 1`） |
+| `agpb_wp_noclip` | 开关 noclip（需要 `sv_cheats 1`） |
+| `agpb_wp_check` | 结构校验（越界 / 自连 / 孤立点） |
+| `agpb_wp_stats` | 路点与连线统计 |
+| `agpb_wp_legend` | 打印配色说明 |
+
+最小导航（阶段 F）：
+
+| 命令 | 说明 |
+|---|---|
+| `agpb_bot_goto <idx> [wp]` | 让 bot 沿 A* 路线走过去（不给 wp = 准星指向 / 缓存的那个点） |
+| `agpb_bot_stop <idx\|all>` | 停止行走 |
+
+ConVar：`agpb_enable`（默认 1）、`agpb_team`（默认 2）、
+`agpb_wp_show`（默认 0）、`agpb_wp_labels`（默认 0）、`agpb_wp_alllinks`（默认 1）。

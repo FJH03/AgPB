@@ -6,8 +6,36 @@
 
 #include <iserverunknown.h>
 #include <ihandleentity.h>
+#include <in_buttons.h>
+#include <const.h>
+#include <mathlib/mathlib.h>
 
+#include <ISmmPlugin.h>
+
+#include "plugin.h"
 #include "bot.h"
+#include "waypoint.h"
+
+extern CGlobalVars *gpGlobals;
+
+// ---------------------------------------------------------------------------
+// 最小导航的参数
+// ---------------------------------------------------------------------------
+
+// USP 跑速上限（ARCHIVE §10 实测：forwardmove=400 时 m_vecVelocity[1] 顶到 250）
+#define AgPB_WALK_SPEED      250.0f
+
+// 到达判定的两根时间轴（EBot navigate.cpp:643-690 的简化版）：
+// 高速掠过时用"沿当前速度走一小段后的最近距离"来判断，而不是只看当前距离
+#define AgPB_ARRIVE_MIN_T     0.10f
+#define AgPB_ARRIVE_LOOKAHEAD 0.20f
+
+// 卡住判定：每 AgPB_STUCK_WINDOW 秒看一次，位移小于 AgPB_STUCK_MOVE 就算卡住
+#define AgPB_STUCK_WINDOW    2.0f
+#define AgPB_STUCK_MOVE      24.0f
+
+// 找起点时允许的最大吸附距离
+#define AgPB_ROUTE_PICK      512.0f
 
 /**
  * 在"服务端本地"执行一条客户端命令。
@@ -42,6 +70,10 @@ CAgPB::CAgPB()
 	m_flJoinDeadline = -1.0f;
 	m_flTestForward = 0.0f;
 	m_flTestYaw = 0.0f;
+	m_iRouteIndex = 0;
+	m_iGoalWaypoint = -1;
+	m_vStuckAnchor = Vector( 0.0f, 0.0f, 0.0f );
+	m_flStuckCheckTime = 0.0f;
 }
 
 bool CAgPB::Create( const BotEngineContext &ctx,
@@ -202,9 +234,14 @@ void CAgPB::Think( CGlobalVars *pGlobals )
 	CBotCmd cmd;
 	cmd.Reset();
 
+	// 有路线就走路线（最小导航）；否则还是原来那套"临时注入"。
+	if ( HasRoute() )
+	{
+		UpdateRoute( pGlobals, cmd );
+	}
 	// 【临时】ucmd 注入验证：agpb_testmove 设置这两个值。
 	// 默认为 0，行为与之前完全一致；M3 的 control 模块接管后删掉这一段。
-	if ( m_flTestForward != 0.0f || m_flTestYaw != 0.0f )
+	else if ( m_flTestForward != 0.0f || m_flTestYaw != 0.0f )
 	{
 		cmd.viewangles.y = m_flTestYaw;
 		cmd.forwardmove = m_flTestForward;
@@ -216,6 +253,236 @@ void CAgPB::Think( CGlobalVars *pGlobals )
 	cmd.random_seed = (int)( (unsigned int)pGlobals->tickcount * 1103515245u + 12345u );
 
 	m_pController->RunPlayerMove( &cmd );
+}
+
+// ---------------------------------------------------------------------------
+// 最小导航（验证用）
+// ---------------------------------------------------------------------------
+
+int CAgPB::RouteNode( int i ) const
+{
+	if ( i < 0 || i >= m_vecRoute.Count() )
+		return -1;
+
+	return m_vecRoute[i];
+}
+
+void CAgPB::RouteReport( const char *pszFormat, ... ) const
+{
+	char szText[512];
+	va_list args;
+
+	va_start( args, pszFormat );
+	V_vsnprintf( szText, sizeof( szText ), pszFormat, args );
+	va_end( args );
+
+	META_CONPRINTF( "[AgPB] %s: %s\n", m_Name, szText );
+}
+
+void CAgPB::StopRoute()
+{
+	m_vecRoute.RemoveAll();
+	m_iRouteIndex = 0;
+	m_iGoalWaypoint = -1;
+}
+
+bool CAgPB::StartRoute( int iGoalWaypoint, char *error, size_t maxlen )
+{
+	CAgPBWaypoints &wp = BotWaypoints();
+
+	StopRoute();
+
+	if ( !IsValid() )
+	{
+		Q_strncpy( error, "bot is not valid (spawned yet?)", (int)maxlen );
+		return false;
+	}
+
+	if ( m_pInfo == NULL )
+	{
+		Q_strncpy( error, "no player info", (int)maxlen );
+		return false;
+	}
+
+	if ( !wp.IsValid( iGoalWaypoint ) )
+	{
+		Q_snprintf( error, (int)maxlen, "invalid waypoint index %d (%d total)", iGoalWaypoint, wp.Count() );
+		return false;
+	}
+
+	const Vector vPos = m_pInfo->GetAbsOrigin();
+	const int iStart = wp.FindNearest( vPos, AgPB_ROUTE_PICK );
+
+	if ( !wp.IsValid( iStart ) )
+	{
+		Q_snprintf( error, (int)maxlen, "no waypoint within %.0f units of the bot", AgPB_ROUTE_PICK );
+		return false;
+	}
+
+	CUtlVector<int> vecPath;
+
+	if ( !wp.FindPath( iStart, iGoalWaypoint, vecPath, m_iTeam ) )
+	{
+		Q_snprintf( error, (int)maxlen, "no path %d -> %d (graph disconnected?)", iStart, iGoalWaypoint );
+		return false;
+	}
+
+	if ( vecPath.Count() < 2 )
+	{
+		Q_snprintf( error, (int)maxlen, "already standing on waypoint #%d", iGoalWaypoint );
+		return false;
+	}
+
+	m_vecRoute = vecPath;
+	m_iRouteIndex = 1;              // [0] 是脚下这个点，从第 1 段开始走
+	m_iGoalWaypoint = iGoalWaypoint;
+	m_vStuckAnchor = vPos;
+	m_flStuckCheckTime = ( gpGlobals != NULL ) ? ( gpGlobals->curtime + AgPB_STUCK_WINDOW ) : 0.0f;
+
+	return true;
+}
+
+void CAgPB::UpdateRoute( CGlobalVars *pGlobals, CBotCmd &cmd )
+{
+	if ( !HasRoute() || m_pInfo == NULL )
+		return;
+
+	CAgPBWaypoints &wp = BotWaypoints();
+
+	const int iNode = m_vecRoute[m_iRouteIndex];
+	const AgPBPath *pNode = wp.Get( iNode );
+
+	if ( pNode == NULL )
+	{
+		RouteReport( "route aborted: waypoint #%d no longer exists", iNode );
+		StopRoute();
+		return;
+	}
+
+	// 这一段要不要跳 —— 看"上一点 -> 这一点"那条边的标志
+	unsigned int uLegFlags = 0;
+
+	if ( m_iRouteIndex > 0 )
+		wp.IsConnected( m_vecRoute[m_iRouteIndex - 1], m_vecRoute[m_iRouteIndex], &uLegFlags );
+
+	const Vector vPos = m_pInfo->GetAbsOrigin();
+	const Vector vDelta = pNode->origin - vPos;
+	const float flDist2D = vDelta.Length2D();
+
+	// 到达判定照 EBot（navigate.cpp:643-690）：
+	//   radius >= 50 且不是跳跃边 → 进半径就算到（给"大范围的点"用）
+	//   否则（小半径 / 蹲点 / 跳点）→ 要走到 max(radius, 4) 以内才算到，
+	//   而且移动中要用速度外推一次，免得高速从点旁边擦过去被判成"没到"然后绕圈
+	const bool bJumpLeg = ( uLegFlags & AgPB_PATH_JUMP ) != 0;
+	const float flRadius = (float)pNode->radius;
+
+	bool bArrived = false;
+
+	if ( flRadius >= 50.0f && !bJumpLeg )
+	{
+		bArrived = ( flDist2D < flRadius );
+	}
+	else
+	{
+		const float flCheck = ( flRadius > 4.0f ) ? flRadius : 4.0f;
+
+		if ( flDist2D < flCheck )
+		{
+			bArrived = true;
+		}
+		else
+		{
+			const Vector vVel = GetNetVarVector( "m_vecVelocity" );
+			const float flSpeed2 = vVel.x * vVel.x + vVel.y * vVel.y;
+
+			if ( flSpeed2 > 1.0f )
+			{
+				float flT = ( vDelta.x * vVel.x + vDelta.y * vVel.y ) / flSpeed2;
+
+				if ( flT < AgPB_ARRIVE_MIN_T )
+					flT = AgPB_ARRIVE_MIN_T;
+				else
+				{
+					float flLookahead = AgPB_ARRIVE_LOOKAHEAD;
+
+					if ( flRadius < 5.0f || bJumpLeg )
+						flLookahead *= 1.5f;
+
+					if ( flT > flLookahead )
+						flT = flLookahead;
+				}
+
+				const Vector vClosest = vPos + Vector( vVel.x * flT, vVel.y * flT, 0.0f );
+
+				if ( ( vClosest - pNode->origin ).Length2D() < flCheck )
+					bArrived = true;
+			}
+		}
+	}
+
+	if ( bArrived )
+	{
+		++m_iRouteIndex;
+
+		if ( m_iRouteIndex >= m_vecRoute.Count() )
+		{
+			RouteReport( "arrived at waypoint #%d (%d hop(s) walked)", m_iGoalWaypoint, m_vecRoute.Count() - 1 );
+			StopRoute();
+		}
+
+		return;
+	}
+
+	// 朝下一个点转（视角会跟随 CUserCmd，ARCHIVE §10 已实测）
+	QAngle angTo;
+	VectorAngles( vDelta, angTo );
+	cmd.viewangles.y = angTo.y;
+
+	// 前进（USP 跑速上限 250）
+	cmd.forwardmove = AgPB_WALK_SPEED;
+
+	// 蹲：EBot 的 WAYPOINT_CROUCH 意思是"必须蹲着才能到达这个点"
+	//   - 正要走向的点带 CROUCH → 一路按着蹲
+	//   - 刚离开的点带 CROUCH 而且离得还近（人还在矮区里）→ 继续蹲，别站起来顶天花板
+	bool bCrouch = ( ( pNode->flags & AgPB_WP_CROUCH ) != 0 );
+
+	if ( !bCrouch && m_iRouteIndex > 0 )
+	{
+		const AgPBPath *pPrev = wp.Get( m_vecRoute[m_iRouteIndex - 1] );
+
+		if ( pPrev != NULL && ( pPrev->flags & AgPB_WP_CROUCH ) != 0 )
+		{
+			if ( ( pPrev->origin - vPos ).Length2D() < 64.0f )
+				bCrouch = true;
+		}
+	}
+
+	if ( bCrouch )
+		cmd.buttons |= IN_DUCK;
+
+	// 跳跃边：站地上就按跳（空中按没用）。起点半径被压到 4，
+	// 所以会一路按到起跳、跳起来、落到下一个点为止。
+	if ( ( uLegFlags & AgPB_PATH_JUMP ) != 0 )
+	{
+		if ( ( GetNetVarInt( "m_fFlags", 0 ) & FL_ONGROUND ) != 0 )
+			cmd.buttons |= IN_JUMP;
+	}
+
+	// 卡住检测：每 AgPB_STUCK_WINDOW 秒看一次位移，没动就放弃并报坐标
+	if ( pGlobals != NULL && pGlobals->curtime >= m_flStuckCheckTime )
+	{
+		if ( ( vPos - m_vStuckAnchor ).Length() < AgPB_STUCK_MOVE )
+		{
+			RouteReport( "stuck at %.0f %.0f %.0f: no progress towards waypoint #%d (dist %.0f, hop %d/%d) - stopped",
+			             vPos.x, vPos.y, vPos.z, iNode, flDist2D,
+			             m_iRouteIndex, m_vecRoute.Count() - 1 );
+			StopRoute();
+			return;
+		}
+
+		m_vStuckAnchor = vPos;
+		m_flStuckCheckTime = pGlobals->curtime + AgPB_STUCK_WINDOW;
+	}
 }
 
 // ---------------------------------------------------------------------------
