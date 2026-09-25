@@ -121,6 +121,28 @@ public:
 	/** 便捷版：同时给出解包后的 entry / serial（仅用于显示与诊断）。 */
 	bool GetNetVarHandle( const char *name, int *pEntry, int *pSerial ) const;
 
+	// -----------------------------------------------------------------------
+	// netvar 写入（**只对 bot 自己**，改的是引擎里的真成员）
+	//
+	// 注意：网络表示 != 内存表示 —— 1 字节成员（m_lifeState）和发送时位压缩的
+	// 字段不能乱写。目前只开放确认过宽度的那几种，详见 netvars.h 的说明。
+	// -----------------------------------------------------------------------
+
+	bool SetNetVarFloat( const char *name, float flValue );
+	bool SetNetVarInt( const char *name, int iValue );
+
+	/** 写一个 Vector：优先按 name[0..2] 三个元素写，退路是整条 Vector 字段。 */
+	bool SetNetVarVector( const char *name, const Vector &vValue );
+
+	/**
+	 * 【弹道跳/调试】下一 tick 直接把 `m_vecVelocity` 灌成这个值。
+	 *
+	 * 时序很关键：值会存在 bot 上，在 `Think()` 里**紧挨着 RunPlayerMove 之前**
+	 * 写进引擎（这样引擎的 GroundMove/AirMove 会在这个速度基础上继续算：
+	 * 摩擦、重力、CheckJumpButton 的 `+=` 冲量都作用在它之上），写完立刻清空。
+	 */
+	void SetVelocityOverride( const Vector &vVelocity );
+
 	/**
 	 * 句柄 -> edict_t*。
 	 *
@@ -131,13 +153,6 @@ public:
 	 * 和句柄里的 serial 就**对不上**。
 	 */
 	edict_t *HandleToEdict( uintp handle ) const;
-
-	/**
-	 * 【临时】直接指定下一个 CUserCmd 的 forwardmove / viewangles.y。
-	 * 仅用于验证 IBotController::RunPlayerMove() 真的驱动了玩家；
-	 * M3 移植过来的 control 模块会接管这里，届时可以删掉。
-	 */
-	void SetTestInput( float forward, float yaw );
 
 	// -----------------------------------------------------------------------
 	// 最小导航（M3 验证用"会不会走路"）
@@ -183,9 +198,9 @@ private:
 	float m_flNextJoinAttempt;
 	float m_flJoinDeadline;    // 小于 0 表示尚未开始计时
 
-	// 【临时】ucmd 注入验证用，默认 0 即行为与之前完全一致
-	float m_flTestForward;
-	float m_flTestYaw;
+	// 【弹道跳】下一 tick 的 m_vecVelocity 覆盖值（写一次就清）
+	Vector m_vVelOverride;
+	bool   m_bHasVelOverride;
 
 	// 最小导航的路線
 	CUtlVector<int> m_vecRoute;

@@ -422,43 +422,6 @@ static void Cmd_NetHandle( const CCommand &args )
 	META_CONPRINTF( "  scan of %d edicts done, %d match(es)\n", maxEnts, matches );
 }
 
-/**
- * agpb_testmove <idx> <forward> [yaw]
- *
- * 临时验证手段：把 forwardmove / viewangles.y 写进下一条 CUserCmd，
- * 用来确认 IBotController::RunPlayerMove() 真的驱动了玩家。
- *
- * 验证方法：
- *     agpb_testmove 0 400 90
- *     agpb_netlist 0 m_vecVelocity     // 三个分量应变非零，bot 开始走
- *     agpb_netlist 0 m_angEyeAngles    // [1] 应等于 90
- *
- * 验证完即可删除；M3 移植的 control 模块会取代它。
- */
-static void Cmd_TestMove( const CCommand &args )
-{
-	if ( args.ArgC() < 3 )
-	{
-		META_CONPRINTF( "[AgPB] usage: agpb_testmove <idx> <forward> [yaw]\n" );
-		return;
-	}
-
-	CAgPB *pBot = g_Bots.Get( V_atoi( args.Arg( 1 ) ) );
-	if ( pBot == NULL )
-	{
-		META_CONPRINTF( "[AgPB] invalid list index: %s\n", args.Arg( 1 ) );
-		return;
-	}
-
-	const float forward = (float)V_atof( args.Arg( 2 ) );
-	const float yaw = ( args.ArgC() >= 4 ) ? (float)V_atof( args.Arg( 3 ) ) : 0.0f;
-
-	pBot->SetTestInput( forward, yaw );
-
-	META_CONPRINTF( "[AgPB] %s test input set: forward=%.1f yaw=%.1f\n",
-	                pBot->Name(), forward, yaw );
-}
-
 // ---------------------------------------------------------------------------
 // 路点编辑器（agpb_wp_*）
 //
@@ -882,6 +845,39 @@ static void Cmd_BotGoto( const CCommand &args )
 }
 
 /** agpb_bot_stop <idx|all> —— 停止行走（清掉路线与输入）。 */
+/**
+ * agpb_bot_vel <idx> <x> <y> <z>
+ *
+ * 【弹道跳开发用】下一 tick 直接把 bot 的 `m_vecVelocity` 灌成这个值（写的是引擎里的
+ * 真成员）。写的是"下一 tick、紧挨 RunPlayerMove 之前"，所以引擎的摩擦/重力/
+ * 起跳冲量都会作用在它之上 —— 这正是弹道跳需要的时序。
+ */
+static void Cmd_BotVel( const CCommand &args )
+{
+	if ( args.ArgC() < 5 )
+	{
+		META_CONPRINTF( "[AgPB] usage: agpb_bot_vel <idx> <x> <y> <z>  (set m_vecVelocity for one tick)\n" );
+		return;
+	}
+
+	CAgPB *pBot = g_Bots.Get( V_atoi( args.Arg( 1 ) ) );
+
+	if ( pBot == NULL )
+	{
+		META_CONPRINTF( "[AgPB] invalid list index '%s'\n", args.Arg( 1 ) );
+		return;
+	}
+
+	const Vector vVel( (float)V_atof( args.Arg( 2 ) ),
+	                   (float)V_atof( args.Arg( 3 ) ),
+	                   (float)V_atof( args.Arg( 4 ) ) );
+
+	pBot->SetVelocityOverride( vVel );
+
+	META_CONPRINTF( "[AgPB] %s: next tick m_vecVelocity = (%.0f %.0f %.0f)\n",
+	                pBot->Name(), vVel.x, vVel.y, vVel.z );
+}
+
 static void Cmd_BotStop( const CCommand &args )
 {
 	if ( args.ArgC() < 2 )
@@ -926,9 +922,6 @@ static ConCommand agpb_netlist_cmd( "agpb_netlist", Cmd_NetList,
                                  "Dump a bot's netvar table: agpb_netlist <idx> [name-filter]", FCVAR_GAMEDLL );
 static ConCommand agpb_nethandle_cmd( "agpb_nethandle", Cmd_NetHandle,
                                  "Resolve an EHANDLE field: agpb_nethandle <idx> <field-name>", FCVAR_GAMEDLL );
-static ConCommand agpb_testmove_cmd( "agpb_testmove", Cmd_TestMove,
-                                 "TEMPORARY ucmd injection check: agpb_testmove <idx> <forward> [yaw]", FCVAR_GAMEDLL );
-
 static ConCommand agpb_wp_add_cmd( "agpb_wp_add", Cmd_WpAdd,
                                  "Add a waypoint: agpb_wp_add [x y z]  (default: your position)", FCVAR_GAMEDLL );
 static ConCommand agpb_wp_del_cmd( "agpb_wp_del", Cmd_WpDel,
@@ -988,12 +981,17 @@ static ConCommand agpb_wp_legend_cmd( "agpb_wp_legend", AgPB_Cmd_Legend,
                                  "Print the waypoint color legend to your console.", FCVAR_GAMEDLL );
 static ConCommand agpb_wp_wayzone_cmd( "agpb_wp_wayzone", AgPB_Cmd_Wayzone,
                                  "Recompute the arrival radius (wayzone): agpb_wp_wayzone [idx|all]", FCVAR_GAMEDLL );
+static ConCommand agpb_wp_reach_cmd( "agpb_wp_reach", AgPB_Cmd_Reach,
+                                 "Geometry check from where you stand: agpb_wp_reach [idx]", FCVAR_GAMEDLL );
 
 // 最小导航（M3 验证：让 bot 真的沿路点图走起来）
 static ConCommand agpb_bot_goto_cmd( "agpb_bot_goto", Cmd_BotGoto,
                                  "Walk a bot to a waypoint: agpb_bot_goto <idx> [waypoint]", FCVAR_GAMEDLL );
 static ConCommand agpb_bot_stop_cmd( "agpb_bot_stop", Cmd_BotStop,
                                  "Stop a bot's route: agpb_bot_stop <idx|all>", FCVAR_GAMEDLL );
+static ConCommand agpb_bot_vel_cmd( "agpb_bot_vel", Cmd_BotVel,
+                                 "DEV: write the bot's m_vecVelocity for one tick: agpb_bot_vel <idx> <x> <y> <z>",
+                                 FCVAR_GAMEDLL );
 
 // ---------------------------------------------------------------------------
 // Plugin

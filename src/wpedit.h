@@ -96,5 +96,6 @@ void AgPB_Cmd_Check( const CCommand &args );
 void AgPB_Cmd_Stats( const CCommand &args );
 void AgPB_Cmd_Legend( const CCommand &args );
 void AgPB_Cmd_Wayzone( const CCommand &args );
+void AgPB_Cmd_Reach( const CCommand &args );
 
 #endif // _INCLUDE_AGPB_WPEDIT_H_

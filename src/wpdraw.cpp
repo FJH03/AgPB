@@ -173,7 +173,11 @@ static void DrawTextAt( const Vector &vOrigin, int iLine, const char *pszFormat,
 
 static void DrawNode( const AgPBPath &path, bool bXray )
 {
-	const float flHeight = ( ( path.flags & AgPB_WP_CROUCH ) != 0 ) ? 36.0f : 72.0f;
+	// 高度用当前引擎真实的体积（站立 62/72、蹲姿 45/54，随 sv_cs_use_legacy_viewvectors 变），
+	// 不再用 GoldSrc 的 72/36
+	const float flHeight = ( ( path.flags & AgPB_WP_CROUCH ) != 0 )
+	                       ? AgPB_HullDuckHeight()
+	                       : AgPB_HullStandHeight();
 	const float flHalf   = flHeight * 0.5f;
 
 	const Vector vBottom = path.origin - Vector( 0.0f, 0.0f, flHalf );
@@ -198,7 +202,10 @@ static void DrawNode( const AgPBPath &path, bool bXray )
 /** 连线端点抬高到身体高度再画（EBot 也是这么错的位）。 */
 static Vector LinkPointOf( const AgPBPath &path )
 {
-	const float flZ = ( ( path.flags & AgPB_WP_CROUCH ) != 0 ) ? 9.0f : 18.0f;
+	// 连线画在身体中段（高度取当前引擎真实值的一半）
+	const float flZ = ( ( path.flags & AgPB_WP_CROUCH ) != 0 )
+	                  ? ( AgPB_HullDuckHeight() * 0.5f )
+	                  : ( AgPB_HullStandHeight() * 0.5f );
 	return path.origin + Vector( 0.0f, 0.0f, flZ );
 }
 

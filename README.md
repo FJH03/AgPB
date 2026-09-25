@@ -67,9 +67,9 @@ m_pParent->PlayerRunCommand( &cmd, MoveHelperServer() );
        └─ ServerClass -> SendTable -> “名字 → 偏移 → 类型”
 ```
 
-`Think()` 目前**不生成任何有意义的输入**（只有 `agpb_testmove` 这个临时开关会写
-`forwardmove` / `viewangles.y`）——移动 / 瞄准 / 战斗将由移植过来的
-EBot `control` / `navigate` / `combat` 模块填充。
+`Think()` 现在只有两条输入来源：**最小导航**（`agpb_bot_goto` 的路线跟随）与
+`SetVelocityOverride()`（弹道跳 / 调试用的一次性速度注入）。真正的瞄准与战斗
+将由移植过来的 EBot `navigate` / `control` / `combat` 模块填充。
 
 ### 路点系统（M3 第一步）
 
@@ -177,7 +177,6 @@ bot_quota_mode normal
 | `agpb_kick <idx\|all>` | 移除 bot |
 | `agpb_netlist <idx> [filter]` | 打印该 bot 的 SendTable 字段表（名字 / 偏移 / 当前值） |
 | `agpb_nethandle <idx> <field>` | 解包 EHANDLE 字段并解析回实体（entry / serial / class） |
-| `agpb_testmove <idx> <fwd> [yaw]` | **【临时】** 注入 `forwardmove` / `viewangles.y`，验证 ucmd 注入链路 |
 
 路点编辑器 / 寻路（`agpb_wp_*`，详见 [ARCHIVE §4](ARCHIVE.md)）：
 
@@ -223,6 +222,7 @@ bot_quota_mode normal
 | `agpb_wp_flag <flag\|clear>` | 切换最近点上的标志（flag 名同上，`clear` 清空） |
 | `agpb_wp_radius <0..255>` | 设最近点的到达半径 |
 | `agpb_wp_wayzone [idx\|all]` | **自动算到达半径**（EBot 的 `CalculateWayzone`）：不给参数=准星/缓存/最近那个点，`all`=全部重算 |
+| `agpb_wp_reach [idx]` | **几何体检**：你站的位置到目标点是否可达（`Reachable`）、这条边要不要跳（`MustJump`） |
 | `agpb_wp_connect <out\|in\|both\|jump\|boost\|visible>` | 连线：起点 = 最近点，终点 = **准星指向的点**（没有就用缓存点） |
 | `agpb_wp_cut` | 断开「最近点 ↔ 目标点」的连线 |
 | `agpb_wp_teleport [idx]` | 传送自己到路点（`setpos`，需要 `sv_cheats 1`） |
@@ -232,6 +232,7 @@ bot_quota_mode normal
 | `agpb_wp_legend` | 打印配色说明 |
 | `agpb_bot_goto <idx> [wp]` | **最小导航**：让 bot 沿 A* 路线走过去（不给 wp = 准星指向 / 缓存的那个点） |
 | `agpb_bot_stop <idx\|all>` | 停止行走 |
+| `agpb_bot_vel <idx> <x> <y> <z>` | **开发用**：下一 tick 直接写 bot 的 `m_vecVelocity`（弹道跳的底层原语） |
 
 **颜色语义照抄 EBot**（`IVDebugOverlay` 逐帧重画）：
 
@@ -262,6 +263,40 @@ bot_quota_mode normal
 - Source 里蹲行速度上限 ≈ `maxspeed * 0.34`（USP 250 → ~85），这是引擎设计；
   EBot 在 GoldSrc 上还要手动把速度顶上去（`navigate.cpp:459-475`），Source 不需要
 - 只想"蹲在这儿守着"用 `蹲守(CAMP)`；要蹲着钻又要守，就 CROUCH + CAMP 都打
+- **跳跃与蹲的关系（照引擎的真实机制）**：站立跳 **57**、蹲着跳只有 **42**
+  （`cs_gamemovement.cpp:723-728`）；bot 起跳那一 tick 只要**没按蹲**，引擎会自动接上
+  crouch-jump（`m_duckUntilOnGround = true` + `FinishDuck()`，`:767-772`），空中由引擎替它按蹲
+  （`:173-178`），落地后自己站起（`:1017+`）—— 空中蹲会把脚抬起 8.5 单位，更容易上高台。
+  所以最小导航的做法是：**跳跃边只按跳、不按蹲**；如果这一段原本在蹲行（钻矮洞），
+  会在**离起跳点 120 单位**就松开蹲（退蹲要 `TIME_TO_UNDUCK` 0.2 秒，`shareddefs.h:112`）；
+  矮区里松蹲是安全的（引擎的 `CanUnduck()` 会因为头顶没空间拒绝站起，`:857`）。
+  ⚠️ 我们**不能**在跳跃边/空中注入 `IN_DUCK` —— 那会取消引擎这套自动序列（`:166-171`）。
+
+**几何判定（移植 EBot 的三个函数）**：
+
+- `MustJump(a, b)`（EBot `Waypoint::MustJump`）：头高体积从 a 扫到 b 被挡，或中点上空 54 单位
+  没有地面（跨沟/跨台阶）→ 这条边要跳；三点都泡水里则不用跳
+- `IsNodeReachable(a, b, 250)`（EBot `Waypoint::IsNodeReachable`）：距离 ≤250、可走清线
+  （撞到门会绕过去重扫）、高度差 ≤ `agpb_wp_maxjump`(62) 且中点站得住 → 这条边人过得去
+- `Reachable(你, idx)`（EBot `Waypoint::Reachable`）：1200 单位以内 + 可走体积通畅 + 高度差够
+- 用法：这两个函数**只做体检、不改数据** —— 跳跃标志一律**手工**决定：连边时显式选 `jump`
+  模式（单方向，起跳点会自动打"跳跃点"并把半径压到 4），或者 `agpb_wp_link <a> <b> 1`
+  （双向，两个方向都跳，慎用）。`agpb_wp_check` 会列出"看起来要跳但没打标志"的边，
+  `agpb_wp_reach` 现场报"你 → 目标点"的可达性与跳跃需求
+- **尺寸不写死**（全部取自 CS:S 自己的源码）：站立 / 蹲姿体积默认**自动判定** —— 先量真人玩家的
+  碰撞盒（老 CS:S 站立 62 / 蹲姿 45，CS:GO 风格站立 72 / 蹲姿 54，四个值互不重叠），量不到就退到
+  引擎开关 `sv_cs_use_legacy_viewvectors`（`cs_gamerules.cpp:105/121` 的
+  `g_CSSViewVectors` / `g_CSGOViewVectors`）；要强制就用 `agpb_wp_hullmode`（0 自动 / 1 CSS / 2 CS:GO）。
+  跳跃高度按 `cs_gamemovement.cpp:723`：站立 **57**、蹲跳 **42**（`v += sqrt(2*800*h)`）
+
+**netvar 写入（弹道跳的地基）**：`netvars.h` 新增 `NetVar_WriteFloat / WriteInt`，
+`CAgPB::SetNetVarFloat / SetNetVarInt / SetNetVarVector`，以及"下一 tick 灌速度"的
+`SetVelocityOverride()`。写的是**引擎里的真成员**（netvar 偏移就是 `offsetof` 出来的），
+时序是"紧挨 `RunPlayerMove` 之前写"，所以引擎的摩擦 / 重力 /
+`CheckJumpButton` 里的 `+=` 冲量都会作用在它之上 —— 这正是弹道跳需要的时序。
+⚠️ 网络表示 ≠ 内存表示：1 字节成员（`m_lifeState`）和发送时位压缩的字段**不能乱写**，
+目前只开确认过宽度的那几种（`m_vecVelocity` / `m_flMaxspeed` / `m_fFlags` / `m_nButtons`）。
+`agpb_bot_vel <idx> <x> <y> <z>` 是它的开发用入口。
 
 - 点：下半截 = 基础色，上半截 = 附加标志色
   - 基础色：CAMP=青 GOAL=紫 LADDER=棕 RESCUE=白 AVOID=红 FALLCHECK/FALLRISK=灰
@@ -271,6 +306,10 @@ bot_quota_mode normal
   只有出边=白 只有入边=墨绿 其它点的连线=蓝
 - 半径 = 蓝框（≤4 画小叉）；缓存点 = 黄线、准星指向点 = 白线（拉到你身上）
 - FALLCHECK / FALLRISK 点：往下探 60 单位，有地面 = 蓝、悬空 = 红
+- **与 EBot 的差异（有意保留）**：EBot 的边只有 4+1 类颜色（跳红 / 叠罗汉蓝 / 仅通视绿橙 /
+  双向黄 / 单向白 / 单向入边 `(0,192,96)`，`waypoint.cpp:3438-3470`），且**点色链里没有
+  CROUCH / LIFT / JUMP**（蹲点在 EBot 里只是"矮一截的绿点"）。我们额外给
+  CROUCH 紫罗兰、JUMP 黄、LIFT 墨绿，并把所有连线画一层暗蓝作背景 —— 打点时更直观，**保留现状**。
 - 线的粗细与可见性：`agpb_wp_thick <1..5>`（默认 3）—— Source 的 debug overlay
   没有线宽参数，所以每根线会沿**观察者视角的 right/up** 做世界空间小偏移叠画 N 遍；
   `agpb_wp_xray <0|1>`（默认 1）决定要不要穿墙画；非最近点的连线按 110/255 压暗，
@@ -281,16 +320,17 @@ bot_quota_mode normal
 
 ConVar：`agpb_enable`（默认 1）、`agpb_team`（默认 2）、`agpb_wp_show`（默认 0）、
 `agpb_wp_labels`（默认 0）、`agpb_wp_alllinks`（默认 1）、`agpb_wp_thick`（默认 3）、
-`agpb_wp_xray`（默认 1）、`agpb_wp_autowayzone`（默认 1）。
+`agpb_wp_xray`（默认 1）、`agpb_wp_autowayzone`（默认 1）、`agpb_wp_maxjump`（默认 **57**，CS:S 站立跳）、
+`agpb_wp_hullmode`（默认 0 = 自动跟随引擎的体积模式）。
 
 ## 验收
 
 完整的四阶段验证清单（含期望输出与判读表）见 [`VERIFY.md`](VERIFY.md)。
 
-最关键的结论已经实测通过：
+最关键的结论已经实测通过（2026-09-19；现在复现用 `agpb_bot_goto`）：
 
 ```
-agpb_testmove 0 400 90
+（当时的 output：forwardmove=400、viewangles.y=90）
   m_vecVelocity[1] = 250.0000      <-- yaw=90 即 +Y 方向；250 正好是 USP 跑速上限
   m_angEyeAngles[1] = 90.0000      <-- 注入的 yaw 原样出现在视角字段里
 ```

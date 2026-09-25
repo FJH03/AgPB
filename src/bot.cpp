@@ -34,6 +34,9 @@ extern CGlobalVars *gpGlobals;
 #define AgPB_STUCK_WINDOW    2.0f
 #define AgPB_STUCK_MOVE      24.0f
 
+// 下一段是跳跃边时，离起跳点还有这么远就松开蹲（退蹲要 0.2 秒，留足余量）
+#define AgPB_UNDUCK_AHEAD    120.0f
+
 // 找起点时允许的最大吸附距离
 #define AgPB_ROUTE_PICK      512.0f
 
@@ -68,8 +71,8 @@ CAgPB::CAgPB()
 	m_bClassRequested = false;
 	m_flNextJoinAttempt = 0.0f;
 	m_flJoinDeadline = -1.0f;
-	m_flTestForward = 0.0f;
-	m_flTestYaw = 0.0f;
+	m_vVelOverride = Vector( 0.0f, 0.0f, 0.0f );
+	m_bHasVelOverride = false;
 	m_iRouteIndex = 0;
 	m_iGoalWaypoint = -1;
 	m_vStuckAnchor = Vector( 0.0f, 0.0f, 0.0f );
@@ -234,17 +237,19 @@ void CAgPB::Think( CGlobalVars *pGlobals )
 	CBotCmd cmd;
 	cmd.Reset();
 
-	// 有路线就走路线（最小导航）；否则还是原来那套"临时注入"。
+	// 有路线就走路线（最小导航）。
 	if ( HasRoute() )
 	{
 		UpdateRoute( pGlobals, cmd );
 	}
-	// 【临时】ucmd 注入验证：agpb_testmove 设置这两个值。
-	// 默认为 0，行为与之前完全一致；M3 的 control 模块接管后删掉这一段。
-	else if ( m_flTestForward != 0.0f || m_flTestYaw != 0.0f )
+
+	// 【弹道跳/调试】把本 tick 的速度覆盖值写进引擎（真成员地址），
+	// 时序：这里 -> RunPlayerMove -> 引擎的 GroundMove/AirMove 在这个速度上继续算
+	// （摩擦、重力，以及 CheckJumpButton 里那个 `+=` 冲量都会叠加在它之上）。
+	if ( m_bHasVelOverride )
 	{
-		cmd.viewangles.y = m_flTestYaw;
-		cmd.forwardmove = m_flTestForward;
+		SetNetVarVector( "m_vecVelocity", m_vVelOverride );
+		m_bHasVelOverride = false;
 	}
 
 	cmd.command_number = ++m_iCommandNumber;
@@ -457,15 +462,36 @@ void CAgPB::UpdateRoute( CGlobalVars *pGlobals, CBotCmd &cmd )
 		}
 	}
 
-	if ( bCrouch )
-		cmd.buttons |= IN_DUCK;
+	// 下一段是跳跃边 → 提前松蹲：退出蹲态要 TIME_TO_UNDUCK = 0.2 秒
+	// （shareddefs.h:112），不松的话到了起跳点还是"蹲着跳"，只能跳 42
+	// （矮区里松蹲是安全的：引擎的 CanUnduck() 会因为头顶没空间而拒绝站起，cs_gamemovement.cpp:857）
+	if ( bCrouch && !bJumpLeg && m_iRouteIndex + 1 < m_vecRoute.Count() )
+	{
+		unsigned int uNextLeg = 0;
 
-	// 跳跃边：站地上就按跳（空中按没用）。起点半径被压到 4，
-	// 所以会一路按到起跳、跳起来、落到下一个点为止。
-	if ( ( uLegFlags & AgPB_PATH_JUMP ) != 0 )
+		if ( wp.IsConnected( m_vecRoute[m_iRouteIndex], m_vecRoute[m_iRouteIndex + 1], &uNextLeg ) &&
+		     ( uNextLeg & AgPB_PATH_JUMP ) != 0 &&
+		     flDist2D < AgPB_UNDUCK_AHEAD )
+		{
+			bCrouch = false;
+		}
+	}
+
+	// ---- 按钮：跳 / 蹲 —— 严格照 CS:S 引擎的真实机制（cs_gamemovement.cpp）
+	//
+	// 1) 跳跃边：站地上就按跳，**不按蹲** —— 站着跳 57、蹲着跳只有 42（:723-728）
+	// 2) 起跳那一 tick 只要没按蹲，引擎会自动给 bot 接上 crouch-jump：
+	//    m_duckUntilOnGround = true + FinishDuck()（:767-772），空中它还替 bot 按着蹲（:173-178），
+	//    落地后自己决定何时站起（:1017+）；空中蹲会把脚抬起 8.5 单位，更容易上高台
+	// 3) 我们**绝不能**在跳跃边/空中按 IN_DUCK —— 那会把引擎这套自动序列取消掉（:166-171）
+	if ( bJumpLeg )
 	{
 		if ( ( GetNetVarInt( "m_fFlags", 0 ) & FL_ONGROUND ) != 0 )
 			cmd.buttons |= IN_JUMP;
+	}
+	else if ( bCrouch )
+	{
+		cmd.buttons |= IN_DUCK;
 	}
 
 	// 卡住检测：每 AgPB_STUCK_WINDOW 秒看一次位移，没动就放弃并报坐标
@@ -778,10 +804,77 @@ edict_t *CAgPB::HandleToEdict( uintp handle ) const
 	return pEdict;
 }
 
-void CAgPB::SetTestInput( float forward, float yaw )
+bool CAgPB::SetNetVarFloat( const char *pszName, float flValue )
 {
-	m_flTestForward = forward;
-	m_flTestYaw = yaw;
+	void *pBase = NetVarBase();
+	const BotNetVar *pVar = FindNetVar( pszName );
+
+	if ( pBase == NULL || pVar == NULL )
+		return false;
+
+	NetVar_WriteFloat( pBase, *pVar, flValue );
+	return true;
+}
+
+bool CAgPB::SetNetVarInt( const char *pszName, int iValue )
+{
+	void *pBase = NetVarBase();
+	const BotNetVar *pVar = FindNetVar( pszName );
+
+	if ( pBase == NULL || pVar == NULL )
+		return false;
+
+	NetVar_WriteInt( pBase, *pVar, iValue );
+	return true;
+}
+
+bool CAgPB::SetNetVarVector( const char *pszName, const Vector &vValue )
+{
+	void *pBase = NetVarBase();
+
+	if ( pBase == NULL || pszName == NULL )
+		return false;
+
+	// 优先按 VECTORELEM 的三个元素写（m_vecVelocity 在表里就是 [0]/[1]/[2]）
+	static const char *s_szIndex[3] = { "[0]", "[1]", "[2]" };
+
+	char szName[96];
+
+	const float *pValues = &vValue.x;
+	bool bAllFound = true;
+
+	for ( int i = 0; i < 3; ++i )
+	{
+		Q_snprintf( szName, sizeof( szName ), "%s%s", pszName, s_szIndex[i] );
+
+		const BotNetVar *pVar = FindNetVar( szName );
+
+		if ( pVar == NULL )
+		{
+			bAllFound = false;
+			break;
+		}
+
+		NetVar_WriteFloat( pBase, *pVar, pValues[i] );
+	}
+
+	if ( bAllFound )
+		return true;
+
+	// 退路：整条 Vector 字段（DPT_Vector / VectorXY）—— 内存里就是 3 个 float
+	const BotNetVar *pVar = FindNetVar( pszName );
+
+	if ( pVar == NULL )
+		return false;
+
+	*(Vector *)( (char *)pBase + pVar->offset ) = vValue;
+	return true;
+}
+
+void CAgPB::SetVelocityOverride( const Vector &vVelocity )
+{
+	m_vVelOverride = vVelocity;
+	m_bHasVelOverride = true;
 }
 
 const char *AgPB_EntityClassName( edict_t *pEdict )

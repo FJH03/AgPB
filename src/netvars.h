@@ -292,6 +292,32 @@ inline bool NetVar_IsHandleSized( const BotNetVar &nv )
 	return nv.type == DPT_Int && nv.stride >= (int)sizeof( uintp );
 }
 
+// ---------------------------------------------------------------------------
+// 写字段
+//
+// **只在确认过内存宽度时用** —— 网络表示 != 内存表示：
+//   - 1 字节成员（`m_lifeState` 是 char）按 4 字节写会踩到后面三个字段；
+//   - 发送时被位压缩的 int（`m_fFlags` 走 SendProxy_CropFlags、`m_iAmmo` 之类）
+//     内存宽度也未必是 4，但**多数 CBaseEntity/CBasePlayer 成员仍是 4 字节 int**；
+//   - float 类（`m_flMaxspeed`）、Vector / VectorXY 的三个 float、真数组元素
+//     （stride >= 4）都可以安全按 4 字节写。
+//
+// 已知可安全写的（本项目用到）：`m_vecVelocity[0..2]`、`m_flMaxspeed`、`m_fFlags`、
+// `m_nButtons`。要写别的字段前先 `agpb_netlist` 核对类型与 stride。
+// ---------------------------------------------------------------------------
+
+/** 按 float 写（4 字节）。 */
+inline void NetVar_WriteFloat( void *pBase, const BotNetVar &nv, float flValue )
+{
+	*(float *)( (char *)pBase + nv.offset ) = flValue;
+}
+
+/** 按 int 写（4 字节）。 */
+inline void NetVar_WriteInt( void *pBase, const BotNetVar &nv, int iValue )
+{
+	*(int *)( (char *)pBase + nv.offset ) = iValue;
+}
+
 /**
  * 按 field 的 stride 决定读取宽度：x64 的 CBaseHandle 是 8 字节，
  * 但早期 32 位构建是 4 字节。

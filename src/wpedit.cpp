@@ -42,6 +42,15 @@ ConVar agpb_wp_xray( "agpb_wp_xray", "1", FCVAR_GAMEDLL,
 ConVar agpb_wp_autowayzone( "agpb_wp_autowayzone", "1", FCVAR_GAMEDLL,
                             "On add, compute the arrival radius by scanning the terrain "
                             "(EBot's CalculateWayzone). 0 = use the type defaults (64/32/0)." );
+// CS:S 站立跳跃高度 57（game/shared/cstrike/cs_gamemovement.cpp:723，蹲跳是 42）
+ConVar agpb_wp_maxjump( "agpb_wp_maxjump", "57", FCVAR_GAMEDLL,
+                        "Max height difference that still counts as reachable/jumpable "
+                        "(CS:S standing jump = 57, duck jump = 42)." );
+// 玩家体积用哪套：0 = 自动（先量真人玩家的碰撞盒，再读引擎的
+// sv_cs_use_legacy_viewvectors），1 = 强制老 CS:S（62/45），2 = 强制 CS:GO 风格（72/54）
+ConVar agpb_wp_hullmode( "agpb_wp_hullmode", "0", FCVAR_GAMEDLL,
+                         "Player hull for traces: 0=auto (read the real collision box, then "
+                         "sv_cs_use_legacy_viewvectors), 1=CS:S (62/45), 2=CS:GO style (72/54)." );
 
 // 起点的最大吸附距离（EBot 一律用 75）
 #define AgPB_PICK_RANGE 75.0f
@@ -746,11 +755,59 @@ void AgPB_EditCheck( edict_t *pClient )
 		}
 	}
 
+	// 几何检查：逐条有向边判"要不要跳"，与标志对不上就报出来。
+	// 注意：这里**只提示、不改数据** —— 跳跃标志一律由人手工决定
+	// （连边用 jump 模式，或 agpb_wp_link ... 1）。
+	edict_t *pHost = AgPB_FindHost();
+	int nNeedJump = 0;
+	int nStaleJump = 0;
+
+	for ( int i = 0; i < nCount; ++i )
+	{
+		const AgPBPath *pA = wp.Get( i );
+
+		if ( pA == NULL )
+			continue;
+
+		for ( int s = 0; s < AgPB_WP_MAX_PATH_INDEX; ++s )
+		{
+			const int iTo = pA->index[s];
+
+			if ( !wp.IsValid( iTo ) || iTo == i )
+				continue;
+
+			// 双向边只报一次（正反两条是同一个物理连接）
+			if ( i > iTo && wp.IsConnected( iTo, i ) )
+				continue;
+
+			const AgPBPath *pB = wp.Get( iTo );
+			const bool bNeeds = wp.MustJump( pA->origin, pB->origin, pHost );
+			const bool bHas = ( pA->connectionFlags[s] & AgPB_PATH_JUMP ) != 0;
+
+			if ( bNeeds && !bHas )
+			{
+				++nNeedJump;
+
+				if ( nReported++ < 10 )
+				{
+					PrintTo( pClient, "  hint: edge %d -> %d looks like it needs a jump (PATH_JUMP missing)\n",
+					         i, iTo );
+				}
+			}
+			else if ( !bNeeds && bHas )
+			{
+				++nStaleJump;
+			}
+		}
+	}
+
 	PrintTo( pClient, "check done: %d waypoint(s), %d link(s) | %d error(s), %d isolated\n",
 	         nCount, wp.LinkCount(), nErrors, nIsolated );
+	PrintTo( pClient, "geometry: %d edge(s) look like they need a jump, %d edge(s) carry a needless jump flag\n",
+	         nNeedJump, nStaleJump );
 
-	if ( nErrors == 0 && nIsolated == 0 )
-		PrintTo( pClient, "graph looks fine (note: this is a structural check, not a geometry check)\n" );
+	if ( nErrors == 0 && nIsolated == 0 && nNeedJump == 0 )
+		PrintTo( pClient, "graph looks fine\n" );
 }
 
 void AgPB_EditStats( edict_t *pClient )
@@ -1425,6 +1482,55 @@ void AgPB_Cmd_Legend( const CCommand &args )
 
 	if ( pHost != NULL )
 		AgPB_DrawPrintLegend( pHost );
+}
+
+/** agpb_wp_reach [idx] —— 报告"你站这儿能不能走到那个点、要不要跳"。 */
+void AgPB_Cmd_Reach( const CCommand &args )
+{
+	CAgPBWaypoints &wp = BotWaypoints();
+	edict_t *pHost = AgPB_FindHost();
+
+	if ( pHost == NULL )
+	{
+		META_CONPRINTF( "[AgPB] no human player\n" );
+		return;
+	}
+
+	AgPB_RefreshHost();
+
+	AgPBWaypointEditor &ed = BotWaypointEditor();
+
+	int iIndex = ( args.ArgC() >= 2 ) ? V_atoi( args.Arg( 1 ) ) : AgPB_EditTargetWaypoint();
+
+	if ( !wp.IsValid( iIndex ) )
+	{
+		PrintTo( pHost, "usage: agpb_wp_reach [idx] (aim at a waypoint, or cache one first)\n" );
+		return;
+	}
+
+	const AgPBPath *pTarget = wp.Get( iIndex );
+	const Vector vFrom = ed.vHostOrigin;
+
+	const bool bReach = wp.Reachable( vFrom, iIndex, pHost );
+	const bool bJump = wp.MustJump( vFrom, pTarget->origin, pHost );
+
+	PrintTo( pHost, "-> #%d: dist %.0f, reachable=%s, must-jump=%s\n",
+	         iIndex, ( pTarget->origin - vFrom ).Length(),
+	         bReach ? "YES" : "NO", bJump ? "YES" : "NO" );
+
+	// 打点时最关心的是"我脚下这个点 -> 目标点"这条边
+	const int iNearest = ed.iNearest;
+
+	if ( wp.IsValid( iNearest ) && iNearest != iIndex )
+	{
+		unsigned int uFlags = 0;
+		const bool bEdge = wp.IsConnected( iNearest, iIndex, &uFlags );
+		const bool bEdgeJump = wp.MustJump( wp.Get( iNearest )->origin, pTarget->origin, pHost );
+
+		PrintTo( pHost, "   edge #%d -> #%d: %s, must-jump=%s, flags=0x%X\n",
+		         iNearest, iIndex, bEdge ? "exists" : "missing",
+		         bEdgeJump ? "YES" : "NO", uFlags );
+	}
 }
 
 /** agpb_wp_wayzone [idx|all] —— 用 EBot 的算法重算到达半径。 */

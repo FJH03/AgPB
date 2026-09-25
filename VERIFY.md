@@ -1,7 +1,6 @@
 # AgPB 验证清单
 
 > 所有验证都是**控制台命令**，仓库里不放任何测试脚本
-> （唯一例外是 `agpb_testmove` 这个临时 ConCommand，M3 的 `control` 接管后删除）。
 > 状态：M1 ✅ / M2 ✅ / **M2.5 ✅ 已实测通过** / **M3 路点系统 ✅ 已落地**
 > 详细背景见 [`ARCHIVE.md`](ARCHIVE.md)。
 >
@@ -130,33 +129,33 @@ agpb_nethandle 0 m_hActiveWeapon
 M1/M2 只验证了「能创建 bot、能读它的数据」，而**「`IBotController::RunPlayerMove()`
 真的驱动了玩家」才是整个架构（不走 CCSBot、自己注入 usercmd）的前提** ——
 所以这一步单独拉出来打，已于 2026-09-19 实测通过（记录见本节末尾）。
+现在复现这一步用**最小导航**：先打两个点，然后
 
 ```
-agpb_testmove 0 400 90
+agpb_bot_goto 0
 ```
 
-**★ 这里等 2 秒**，同时看着游戏里的 bot 是否开始往前走。
+**★ 这里等 2 秒**，同时看着游戏里的 bot 是否开始往前走（转身 + 前进）。
 
 ```
 agpb_netlist 0 m_vecVelocity
 agpb_netlist 0 m_angEyeAngles
 agpb_netlist 0 m_vecOrigin
-agpb_testmove 0 0 0
+agpb_bot_stop 0
 agpb_netlist 0 m_vecVelocity
 ```
 
-`agpb_testmove` 的输入是**持续生效**的（值存在 bot 对象里，每 tick 写进 `CUserCmd`），
-直到下一条 `agpb_testmove` 把它改掉，所以不需要掉时间。
+`m_vecVelocity` 应是非零（USP 上限 250），`m_angEyeAngles[1]` 应等于朝向目标点的 yaw
+（用 `agpb_wp_list` 看目标点坐标自己心算一下，或用 `agpb_wp_reach` 打印的距离方向核对）。
 
 ### ✅ 已实测通过（2026-09-19）
 
 ```
-agpb_testmove 0 400 90
+（当时的临时注入通道：forwardmove=400、viewangles.y=90）
   m_vecVelocity[0] = -0.0000
   m_vecVelocity[1] = 250.0000     <-- yaw=90 即 +Y 方向；250 正好是 USP 跑速上限
   m_vecVelocity[2] =  0.0000
   m_angEyeAngles[1] = 90.0000     <-- 我给的 yaw 原样出现在视角字段里
-agpb_testmove 0 0 0
 ```
 
 方向、大小、速度上限**三个都对**：
@@ -319,8 +318,14 @@ agpb_wp_flag jump
 agpb_wp_radius 64        // 蓝框放大
 agpb_wp_wayzone          // 用 EBot 的算法自动算半径（看蓝框变成地形算出来的大小）
 agpb_wp_wayzone all      // 全部重算（老图想换成自动半径时用这个）
+agpb_wp_reach            // 站在 A 点，准星指着 B：报"可达吗 / 要不要跳 / 那条边在不在"
+agpb_wp_check            // 结构 + 几何检查：会列出"看起来需要跳但没打 PATH_JUMP"的边
 agpb_wp_stats
 ```
+
+判读：`agpb_wp_reach` 输出形如 `-> #3: dist 210, reachable=YES, must-jump=NO`；
+跳跃边要跳就手工连（菜单"创建连线 → 跳跃连线"或 `agpb_wp_connect jump`），
+连出来的那条边在叠加层上应该是**红色**且**只有从起跳点出发的那一个方向**。
 
 > 崩溃提醒：bot 独占一队时 freezetime 结束会崩（见 [`CRASH_REPORT.md`](CRASH_REPORT.md)），
 > 打点与测试请让 bot 与人类**同队**。
@@ -362,6 +367,9 @@ agpb_bot_goto 0    // 不给下标 = 走到"准星指向 / 缓存"的那个点
 - `agpb_bot_stop <idx|all>` —— 中途停下
 - 跳跃：把 B 点打到需要跳的位置，在起跳点用 `agpb_wp_connect jump` 建边，
   再 `agpb_bot_goto 0`，观察它是否在起跳点起跳并落到 B
+  判读补充：起跳应是**站立跳（57 高度）**，能上更高的台；空中那段蹲是**引擎自动做的**
+  （bot 起跳时没按蹲 → `cs_gamemovement.cpp:767`）；如果它刚从矮洞/蹲行段出来，
+  会在离起跳点 120 单位先把蹲松开（判据：到起跳点时 `m_fFlags` 里不该还有 `FL_DUCKING`）
 - 蹲行（CROUCH）：把 B 点打在矮通道里，站上去 `agpb_wp_flag crouch`，
   `agpb_wp_wayzone`（蹲点应该算出半径 0 = 精确到达），再 `agpb_bot_goto 0`：
   观察 bot 是否蹲着走进去（速度掉到 ~85）、离开矮区前是否保持蹲姿
@@ -371,6 +379,54 @@ agpb_bot_goto 0    // 不给下标 = 走到"准星指向 / 缓存"的那个点
 > 正好用来检查路点打得对不对。
 
 ---
+
+## 阶段 G —— 几何判定 / 体积模式 / netvar 写入（2026-09-25 晚）
+
+### G.1 体积模式跟随（`sv_cs_use_legacy_viewvectors`）
+
+```
+agpb_wp_hullmode 0            // 0 = 自动（默认）
+agpb_wp_show 1
+// 引擎里把那套体积换一遍
+sv_cs_use_legacy_viewvectors 1     // 老 CS:S：站立 62 / 蹲姿 45
+// 看点画出来的高度（竖线）与最近的点的蓝框
+agpb_wp_wayzone 0
+sv_cs_use_legacy_viewvectors 0     // CS:GO 风格：站立 72 / 蹲姿 54
+agpb_wp_wayzone 0
+```
+
+判读：换过模式后**点的竖线高度**、`agpb_wp_wayzone` 算出来的半径、`agpb_wp_reach` 的
+可达性会跟着变（半秒内生效）。想固定就用 `agpb_wp_hullmode 1`（强制 CSS）或 `2`（强制 CS:GO）。
+
+### G.2 几何判定（`MustJump` / `IsNodeReachable` / `Reachable`）
+
+```
+// 站在 A 点，准星指向 B 点
+agpb_wp_reach
+```
+
+期望：`-> #N: dist ..., reachable=YES/NO, must-jump=YES/NO`，
+以及下面一行 `edge #A -> #B: exists/missing, must-jump=..., flags=0x...`。
+
+```
+agpb_wp_check
+```
+
+期望：除了结构检查，多一行 `geometry: N edge(s) look like they need a jump, M edge(s) carry a needless jump flag`
+—— 故意给一条平地上的边打 `agpb_wp_flag jump`（点在起跳侧）再跑一次，应该出现在后一个计数里。
+这两个数字**只提示、不改数据**（连边不会自动补 `PATH_JUMP`，跳跃边一律手工用 `jump` 模式连）。
+
+### G.3 netvar 写入冒烟（弹道跳地基）
+
+```
+agpb_add 2
+agpb_bot_vel 0 300 0 0        // 下一 tick 给 bot +X 方向 300 初速
+agpb_netlist 0 m_vecVelocity  // 应能读到非零速度（随后被摩擦衰减）
+agpb_bot_vel 0 0 0 0          // 清零
+```
+
+判读：bot 会被"推"一下；`SetVelocityOverride` 的写入时序是紧挨 `RunPlayerMove` 之前，
+所以摩擦/重力会作用在它之上（这正是弹道跳要的行为）。
 
 ## 相关命令一览
 
@@ -382,7 +438,6 @@ agpb_bot_goto 0    // 不给下标 = 走到"准星指向 / 缓存"的那个点
 | `agpb_team <idx> <team>` | 运行时切换队伍 |
 | `agpb_netlist <idx> [filter]` | 展开 SendTable 字段表（字段名 / 偏移 / 当前值） |
 | `agpb_nethandle <idx> <field>` | 解包 EHANDLE 并解析回实体 |
-| `agpb_testmove <idx> <fwd> [yaw]` | **【临时】** 注入 `forwardmove` / `viewangles.y`；M3 的 `control` 模块接管后删除。值存在 bot 对象里，**持续生效**直到被改掉 |
 | `agpb_wp_add [x y z]` | 加路点（不给坐标就用你的位置） |
 | `agpb_wp_del <idx>` | 删路点（后续下标前移，连边自动修正） |
 | `agpb_wp_link <from> <to> [flags]` | 连边（双向）；flags：1=跳 2=连跳 4=仅通视 |
@@ -413,6 +468,8 @@ agpb_bot_goto 0    // 不给下标 = 走到"准星指向 / 缓存"的那个点
 | `agpb_wp_check` | 结构校验（越界 / 自连 / 孤立点） |
 | `agpb_wp_stats` | 路点与连线统计 |
 | `agpb_wp_legend` | 打印配色说明 |
+| `agpb_wp_wayzone [idx\|all]` | 自动算到达半径（EBot 的 `CalculateWayzone`） |
+| `agpb_wp_reach [idx]` | 几何体检：可达性 + 要不要跳 + 那条边在不在（阶段 G.2） |
 
 最小导航（阶段 F）：
 
@@ -420,6 +477,9 @@ agpb_bot_goto 0    // 不给下标 = 走到"准星指向 / 缓存"的那个点
 |---|---|
 | `agpb_bot_goto <idx> [wp]` | 让 bot 沿 A* 路线走过去（不给 wp = 准星指向 / 缓存的那个点） |
 | `agpb_bot_stop <idx\|all>` | 停止行走 |
+| `agpb_bot_vel <idx> <x> <y> <z>` | **开发用**：下一 tick 写 `m_vecVelocity`（阶段 G.3） |
 
 ConVar：`agpb_enable`（默认 1）、`agpb_team`（默认 2）、
-`agpb_wp_show`（默认 0）、`agpb_wp_labels`（默认 0）、`agpb_wp_alllinks`（默认 1）。
+`agpb_wp_show`（默认 0）、`agpb_wp_labels`（默认 0）、`agpb_wp_alllinks`（默认 1）、
+`agpb_wp_thick`（默认 3）、`agpb_wp_xray`（默认 1）、`agpb_wp_autowayzone`（默认 1）、
+`agpb_wp_maxjump`（默认 57）、`agpb_wp_hullmode`（默认 0 = 自动）。

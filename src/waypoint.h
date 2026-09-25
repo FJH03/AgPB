@@ -39,6 +39,39 @@ struct edict_t;
 // 因为要压进 N×N 的 int16 矩阵；我们只算单源，直接用 float 大值。
 #define AgPB_WP_DIST_INF         999999.0f
 
+// ---------------------------------------------------------------------------
+// 尺寸 / 高度常量 —— **一律取自 CS:S 自己的源码**（不要再用 GoldSrc 的 ±36/±18）
+//
+// 站立与蹲姿体积（**两套**）：game/shared/cstrike/cs_gamerules.cpp:105/121
+//     g_CSSViewVectors    站立 (-16,-16,0)..(16,16,62)  蹲姿 (…,45)   ← 老 CS:S
+//     g_CSGOViewVectors   站立 (…,72)                    蹲姿 (…,54)   ← CS:GO 风格
+//     由引擎开关 `sv_cs_use_legacy_viewvectors` 选（`GetViewVectors()` 三目：
+//     1 → g_CSSViewVectors，0 → g_CSGOViewVectors；原点都在脚下，z 从 0 起）
+// 跳跃高度：game/shared/cstrike/cs_gamemovement.cpp:723-775
+//     站立 flJumpHeight = 57，蹲着（含 duckUntilOnGround）= 42
+//     起跳速度 v += sqrt(2 * 800 * h)
+// 蹲行速度系数：game/shared/cstrike/cs_shareddefs.cpp:17 = 0.34
+// ---------------------------------------------------------------------------
+#define AgPB_HULL_RADIUS         16.0f
+#define AgPB_HULL_STAND_Z_CSS    62.0f
+#define AgPB_HULL_DUCK_Z_CSS     45.0f
+#define AgPB_HULL_STAND_Z_CSGO   72.0f
+#define AgPB_HULL_DUCK_Z_CSGO    54.0f
+
+#define AgPB_JUMP_HEIGHT         57.0f   // 站立跳
+#define AgPB_JUMP_HEIGHT_DUCK    42.0f   // 蹲着跳
+
+/**
+ * 当前生效的站立 / 蹲姿高度。
+ *
+ * 运行期自动判定（不写死某一套）：
+ *   1. 看**真人玩家的碰撞盒**（ICollideable::OBBMins/OBBMaxs）—— 62/45 或 72/54，最权威；
+ *   2. 拿不到就退到引擎那个开关 `sv_cs_use_legacy_viewvectors`（1 → CSS，0 → CS:GO 风格）；
+ *   3. 想强制用 convar `agpb_wp_hullmode`（0 自动 / 1 强制 CSS / 2 强制 CS:GO）。
+ */
+float AgPB_HullStandHeight();
+float AgPB_HullDuckHeight();
+
 // 路点标志，照 EBot core.h:183-209 WaypointFlag（只留我们用得上的）
 #define AgPB_WP_LIFT          ( 1u << 1 )    // 等电梯降落再靠近
 #define AgPB_WP_CROUCH        ( 1u << 2 )    // 必须蹲着才能到
@@ -121,6 +154,30 @@ public:
 	 * pIgnore 通常是编辑器本人（别让他自己把扫描挡住）。
 	 */
 	void CalculateWayzone( int iIndex, edict_t *pIgnore = NULL );
+
+	// ------------------------------------------------------------------
+	// 几何判定（都移植自 EBot，编辑器与校验用）
+	// ------------------------------------------------------------------
+
+	/**
+	 * 这条边是不是**必须跳**（移植 EBot Waypoint::MustJump，waypoint.cpp:3076）：
+	 *   1) 头高体积从起点扫到终点被挡 → 要跳
+	 *   2) 中点上空 54 单位内没有地面（跨沟/跨台阶）→ 要跳
+	 *   3) 起点 / 中点 / 终点都泡在水里 → 不用跳（能游上去）
+	 */
+	bool MustJump( const Vector &vStart, const Vector &vEnd, edict_t *pIgnore ) const;
+
+	/**
+	 * 从 vStart 到 vEnd"人走得过去吗"（移植 EBot Waypoint::IsNodeReachable，waypoint.cpp:2971）。
+	 * flMaxDist 是允许的最大直线距离（EBot 用 g_autoPathDistance，默认 250）。
+	 */
+	bool IsNodeReachable( const Vector &vStart, const Vector &vEnd, float flMaxDist, edict_t *pIgnore ) const;
+
+	/**
+	 * 站在 vStart 能不能走到第 iIndex 个点（移植 EBot Waypoint::Reachable，waypoint.cpp:2934）：
+	 * 1200 单位以内 + 可走体积通畅 + 高度差不超过可跳高度。
+	 */
+	bool Reachable( const Vector &vStart, int iIndex, edict_t *pIgnore ) const;
 
 	/** 连边。flags 是 PATHFLAG_* 的组合。已存在则返回 false。 */
 	bool AddLink( int iFrom, int iTo, unsigned int flags = 0 );
@@ -218,8 +275,11 @@ void AgPB_WaypointFlagsString( unsigned int uFlags, char *pszOut, int iMaxLen );
 /** 两点之间点 trace 是否畅通（忽略 pIgnore）。enginetrace 不可用时一律 true。 */
 bool AgPB_TraceClear( const Vector &vStart, const Vector &vEnd, edict_t *pIgnore );
 
-/** 同上，但按"头高体积"（≈ 蹲姿 ±16/±18）扫过去 —— EBot 的 head_hull。 */
+/** 同上，但按**蹲姿体积**（CS:S 0..45）扫过去 —— 对应 EBot 的 head_hull。 */
 bool AgPB_TraceHullClear( const Vector &vStart, const Vector &vEnd, edict_t *pIgnore );
+
+/** 同上，但按**站立体积**（CS:S 0..62）扫过去 —— 判断"这儿站得下吗"。 */
+bool AgPB_TraceStandClear( const Vector &vStart, const Vector &vEnd, edict_t *pIgnore );
 
 /** 这条线撞到的实体是不是门（func_door / func_door_rotating）。 */
 bool AgPB_TraceHitsDoor( const Vector &vStart, const Vector &vEnd, edict_t *pIgnore );

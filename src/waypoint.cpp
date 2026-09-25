@@ -22,6 +22,15 @@
 
 extern IEngineTrace *enginetrace;
 extern IServerGameEnts *gameents;
+extern ICvar *icvar;
+extern CGlobalVars *gpGlobals;
+
+// wpedit.cpp 里定义（EBot 的 ebot_analyze_max_jump_height，默认 62）
+extern ConVar agpb_wp_maxjump;
+extern ConVar agpb_wp_hullmode;
+
+// wpedit.cpp 里实现：listen server 的"房主"（第一个非假客户端玩家）
+edict_t *AgPB_FindHost();
 
 // 插件链接不到 game DLL 里的 filesystem 全局，由 plugin.cpp 在 Load 时注入。
 static IFileSystem *s_pFileSystem = NULL;
@@ -1022,9 +1031,97 @@ void AgPB_WaypointFlagsString( unsigned int uFlags, char *pszOut, int iMaxLen )
 // 视线 / hull trace（编辑器、wayzone、绘制共用）
 // ---------------------------------------------------------------------------
 
-// GoldSrc 的 head_hull ≈ 蹲姿体积；Source 这边用同一套 extents
-static const Vector s_vHeadHullMin( -16.0f, -16.0f, -18.0f );
-static const Vector s_vHeadHullMax(  16.0f,  16.0f,  18.0f );
+// 体积尺寸见 waypoint.h 顶部那段注释（CS:S 的站立 62 / 蹲姿 45，原点在脚下）
+enum AgPBHullKind
+{
+	AgPB_HULL_POINT = 0,
+	AgPB_HULL_STAND,
+	AgPB_HULL_DUCK,
+};
+
+// 引擎那个开关（补丁加的）：1 = 老 CS:S 体积（62/45），0 = CS:GO 风格（72/54）
+#define AgPB_HULLMODE_CONVAR "sv_cs_use_legacy_viewvectors"
+
+// 当前生效的尺寸（AgPB_RefreshHullSize 里刷新）
+static float s_flHullStandZ = AgPB_HULL_STAND_Z_CSS;
+static float s_flHullDuckZ  = AgPB_HULL_DUCK_Z_CSS;
+static float s_flNextHullRefresh = 0.0f;
+
+/**
+ * 判定当前引擎用的是哪套体积（0 = 自动 / 1 = CSS / 2 = CS:GO 风格）。
+ *
+ * 顺序：① 直接量真人玩家的碰撞盒（最权威，62/45 与 72/54 互相不会混）；
+ *       ② 引擎开关 `sv_cs_use_legacy_viewvectors`；③ 都没有就按老 CS:S 算。
+ * 半秒刷一次就够（convar 改了也来得及，且不会每帧做字符串查找）。
+ */
+static void AgPB_RefreshHullSize()
+{
+	if ( gpGlobals != NULL && gpGlobals->curtime < s_flNextHullRefresh )
+		return;
+
+	s_flNextHullRefresh = ( ( gpGlobals != NULL ) ? gpGlobals->curtime : 0.0f ) + 0.5f;
+
+	int iMode = agpb_wp_hullmode.GetInt();
+
+	if ( iMode == 0 )
+	{
+		// ① 真人玩家的碰撞盒：站立 62/72、蹲着 45/54，四个值互不重叠
+		edict_t *pHost = AgPB_FindHost();
+
+		if ( pHost != NULL )
+		{
+			ICollideable *pColl = pHost->GetCollideable();
+
+			if ( pColl != NULL )
+			{
+				const float flHeight = pColl->OBBMaxs().z - pColl->OBBMins().z;
+
+				if ( flHeight > 71.0f )
+					iMode = 2;              // 72：CS:GO 风格（站立）
+				else if ( flHeight > 61.0f )
+					iMode = 1;              // 62：老 CS:S（站立）
+				else if ( flHeight > 53.0f )
+					iMode = 2;              // 54：CS:GO 风格（蹲着）
+				else if ( flHeight > 44.0f )
+					iMode = 1;              // 45：老 CS:S（蹲着）
+			}
+		}
+
+		// ② 引擎开关
+		if ( iMode == 0 )
+		{
+			ConVar *pLegacy = ( icvar != NULL ) ? icvar->FindVar( AgPB_HULLMODE_CONVAR ) : NULL;
+
+			if ( pLegacy != NULL )
+				iMode = pLegacy->GetBool() ? 1 : 2;
+			else
+				iMode = 1;                  // ③ 没有这个 convar → 就按老 CS:S 的算
+		}
+	}
+
+	if ( iMode == 2 )
+	{
+		s_flHullStandZ = AgPB_HULL_STAND_Z_CSGO;
+		s_flHullDuckZ  = AgPB_HULL_DUCK_Z_CSGO;
+	}
+	else
+	{
+		s_flHullStandZ = AgPB_HULL_STAND_Z_CSS;
+		s_flHullDuckZ  = AgPB_HULL_DUCK_Z_CSS;
+	}
+}
+
+float AgPB_HullStandHeight()
+{
+	AgPB_RefreshHullSize();
+	return s_flHullStandZ;
+}
+
+float AgPB_HullDuckHeight()
+{
+	AgPB_RefreshHullSize();
+	return s_flHullDuckZ;
+}
 
 class CAgPBWaypointTraceFilter : public CTraceFilter
 {
@@ -1053,13 +1150,23 @@ static IHandleEntity *AgPB_EdictHandleEntity( edict_t *pEdict )
 	return pNet->GetEntityHandle();
 }
 
-static void AgPB_Trace( const Vector &vStart, const Vector &vEnd, bool bHull,
+static void AgPB_Trace( const Vector &vStart, const Vector &vEnd, int iHull,
                         edict_t *pIgnore, trace_t &tr )
 {
 	Ray_t ray;
 
-	if ( bHull )
-		ray.Init( vStart, vEnd, s_vHeadHullMin, s_vHeadHullMax );
+	if ( iHull == AgPB_HULL_STAND )
+	{
+		ray.Init( vStart, vEnd,
+		          Vector( -AgPB_HULL_RADIUS, -AgPB_HULL_RADIUS, 0.0f ),
+		          Vector(  AgPB_HULL_RADIUS,  AgPB_HULL_RADIUS, AgPB_HullStandHeight() ) );
+	}
+	else if ( iHull == AgPB_HULL_DUCK )
+	{
+		ray.Init( vStart, vEnd,
+		          Vector( -AgPB_HULL_RADIUS, -AgPB_HULL_RADIUS, 0.0f ),
+		          Vector(  AgPB_HULL_RADIUS,  AgPB_HULL_RADIUS, AgPB_HullDuckHeight() ) );
+	}
 	else
 		ray.Init( vStart, vEnd );
 
@@ -1074,7 +1181,7 @@ bool AgPB_TraceClear( const Vector &vStart, const Vector &vEnd, edict_t *pIgnore
 		return true;
 
 	trace_t tr;
-	AgPB_Trace( vStart, vEnd, false, pIgnore, tr );
+	AgPB_Trace( vStart, vEnd, AgPB_HULL_POINT, pIgnore, tr );
 
 	return ( tr.fraction >= 1.0f );
 }
@@ -1085,7 +1192,18 @@ bool AgPB_TraceHullClear( const Vector &vStart, const Vector &vEnd, edict_t *pIg
 		return true;
 
 	trace_t tr;
-	AgPB_Trace( vStart, vEnd, true, pIgnore, tr );
+	AgPB_Trace( vStart, vEnd, AgPB_HULL_DUCK, pIgnore, tr );
+
+	return ( tr.fraction >= 1.0f );
+}
+
+bool AgPB_TraceStandClear( const Vector &vStart, const Vector &vEnd, edict_t *pIgnore )
+{
+	if ( enginetrace == NULL )
+		return true;
+
+	trace_t tr;
+	AgPB_Trace( vStart, vEnd, AgPB_HULL_STAND, pIgnore, tr );
 
 	return ( tr.fraction >= 1.0f );
 }
@@ -1096,7 +1214,7 @@ bool AgPB_TraceHitsDoor( const Vector &vStart, const Vector &vEnd, edict_t *pIgn
 		return false;
 
 	trace_t tr;
-	AgPB_Trace( vStart, vEnd, false, pIgnore, tr );
+	AgPB_Trace( vStart, vEnd, AgPB_HULL_POINT, pIgnore, tr );
 
 	if ( tr.m_pEnt == NULL )
 		return false;
@@ -1113,6 +1231,103 @@ bool AgPB_TraceHitsDoor( const Vector &vStart, const Vector &vEnd, edict_t *pIgn
 
 	return ( V_stricmp( pszClass, "func_door" ) == 0 ||
 	         V_stricmp( pszClass, "func_door_rotating" ) == 0 );
+}
+
+/** 这个位置上是不是水（EBot 用 POINT_CONTENTS 判，这里走引擎的点内容查询）。 */
+static bool AgPB_PointInWater( const Vector &vPoint )
+{
+	if ( enginetrace == NULL )
+		return false;
+
+	return ( ( enginetrace->GetPointContents( vPoint, NULL ) & CONTENTS_WATER ) != 0 );
+}
+
+/** EBot 在 IsNodeReachable 里把 func_wall / func_illusionary 当"能站过去"。 */
+static bool AgPB_TraceHitIsNonSolid( const trace_t &tr )
+{
+	if ( tr.m_pEnt == NULL || gameents == NULL )
+		return false;
+
+	edict_t *pEdict = gameents->BaseEntityToEdict( tr.m_pEnt );
+
+	if ( pEdict == NULL )
+		return false;
+
+	const char *pszClass = AgPB_EntityClassName( pEdict );
+
+	if ( pszClass == NULL )
+		return false;
+
+	return ( V_stricmp( pszClass, "func_illusionary" ) == 0 ||
+	         V_stricmp( pszClass, "func_wall" ) == 0 );
+}
+
+/**
+ * 命中的实体算不算"能穿过去的"（EBot IsEntityWalkable，support.cpp:667）：
+ * 门可以（等它开/推它），func_wall / func_illusionary 明确不算。
+ * 可破坏物那条 EBot 还要看 takedamage，这里先不跟（够用）。
+ */
+static bool AgPB_TraceEntityWalkable( const trace_t &tr )
+{
+	if ( tr.m_pEnt == NULL || gameents == NULL )
+		return false;
+
+	edict_t *pEdict = gameents->BaseEntityToEdict( tr.m_pEnt );
+
+	if ( pEdict == NULL )
+		return false;
+
+	const char *pszClass = AgPB_EntityClassName( pEdict );
+
+	if ( pszClass == NULL )
+		return false;
+
+	if ( V_stricmp( pszClass, "func_wall" ) == 0 || V_stricmp( pszClass, "func_illusionary" ) == 0 )
+		return false;
+
+	return ( V_stricmp( pszClass, "func_door" ) == 0 ||
+	         V_stricmp( pszClass, "func_door_rotating" ) == 0 );
+}
+
+/**
+ * "可走"清线：撞到可穿实体（门）就把它加进忽略列表、从命中点后面 5 单位继续扫，
+ * 最多 64 次（死循环检测照 EBot：同一个实体连着撞两次就放弃）。
+ * 移植 EBot support.cpp:687 IsWalkableLineClear / :723 IsWalkableHullClear。
+ */
+static bool AgPB_WalkableClear( const Vector &vFrom, const Vector &vTo, int iHull, edict_t *pIgnore )
+{
+	if ( enginetrace == NULL )
+		return true;
+
+	Vector vUseFrom = vFrom;
+	edict_t *pIgnoreEnt = pIgnore;
+	edict_t *pPrev = pIgnore;
+
+	for ( int i = 0; i < 64; ++i )
+	{
+		trace_t tr;
+		AgPB_Trace( vUseFrom, vTo, iHull, pIgnoreEnt, tr );
+
+		if ( tr.fraction >= 1.0f )
+			return true;
+
+		if ( !AgPB_TraceEntityWalkable( tr ) )
+			return false;
+
+		edict_t *pHit = gameents->BaseEntityToEdict( tr.m_pEnt );
+
+		if ( pHit == NULL || pHit == pPrev )
+			return false;
+
+		pPrev = pIgnoreEnt;
+		pIgnoreEnt = pHit;
+
+		Vector vDir = vTo - vFrom;
+		VectorNormalize( vDir );
+		vUseFrom = tr.endpos + vDir * 5.0f;
+	}
+
+	return false;
 }
 
 /**
@@ -1166,8 +1381,8 @@ void CAgPBWaypoints::CalculateWayzone( int iIndex, edict_t *pIgnore )
 			const Vector vSide = pPath->origin + vDir * flScan;
 			const Vector vBack = pPath->origin - vDir * flScan;
 
-			// 1) 这个位置站得下吗（零长度 hull = 把体积放进去试）
-			if ( !AgPB_TraceHullClear( vSide, vSide, pIgnore ) )
+			// 1) 这个位置站得下吗（零长度站立体积 = 把它放进去试；CS:S 站立 0..62）
+			if ( !AgPB_TraceStandClear( vSide, vSide, pIgnore ) )
 			{
 				// EBot 撞到门就直接给 0（门会动，半径算不准）。它那边用的是
 				// 零长度 trace，Source 下拿不到命中实体，所以这里顺着
@@ -1197,8 +1412,12 @@ void CAgPBWaypoints::CalculateWayzone( int iIndex, edict_t *pIgnore )
 				break;
 			}
 
-			// 4) 头顶 +34 得有空间（矮天花板/管道会挡）
-			if ( !AgPB_TraceHullClear( vSide, vSide + Vector( 0.0f, 0.0f, 34.0f ), pIgnore ) )
+			// 4) 头顶得有站直的空间：把蹲姿体积从采样点往上扫"蹲高→站高"这一段
+			//    （62-45 或 72-54，也就是矮天花板/管道会把半径收窄）
+			if ( !AgPB_TraceHullClear( vSide,
+			                           vSide + Vector( 0.0f, 0.0f,
+			                                           AgPB_HullStandHeight() - AgPB_HullDuckHeight() ),
+			                           pIgnore ) )
 			{
 				iFinalRadius -= 16;
 				bBlocked = true;
@@ -1219,4 +1438,120 @@ void CAgPBWaypoints::CalculateWayzone( int iIndex, edict_t *pIgnore )
 		iFinalRadius = 255;
 
 	pPath->radius = (unsigned char)iFinalRadius;
+}
+
+/**
+ * 这条边是不是必须跳 —— 移植 EBot Waypoint::MustJump（waypoint.cpp:3076）。
+ */
+bool CAgPBWaypoints::MustJump( const Vector &vStart, const Vector &vEnd, edict_t *pIgnore ) const
+{
+	if ( enginetrace == NULL )
+		return false;
+
+	const Vector vCenter = ( vStart + vEnd ) * 0.5f;
+
+	// 三点都在水里 → 能游上去，不用跳
+	if ( AgPB_PointInWater( vStart ) && AgPB_PointInWater( vCenter ) && AgPB_PointInWater( vEnd ) )
+		return false;
+
+	// 1) 头高体积直接从起点扫到终点：被挡就是要跳（有台阶/箱体之类）
+	if ( !AgPB_TraceHullClear( vStart, vEnd, pIgnore ) )
+		return true;
+
+	// 2) 中点上空"一个跳跃高度"内没有地面 → 中间是空的（跨沟/跨落差），也要跳
+	//    （CS:S 站立跳 57、蹲跳 42，见 waypoint.h 顶部注释；agpb_wp_maxjump 默认 57）
+	trace_t tr;
+	AgPB_Trace( vCenter, vCenter - Vector( 0.0f, 0.0f, agpb_wp_maxjump.GetFloat() ),
+	            AgPB_HULL_DUCK, pIgnore, tr );
+
+	if ( tr.fraction >= 1.0f )
+		return true;
+
+	return false;
+}
+
+/**
+ * 这条边"人走得过去吗" —— 移植 EBot Waypoint::IsNodeReachable（waypoint.cpp:2971）。
+ */
+bool CAgPBWaypoints::IsNodeReachable( const Vector &vStart, const Vector &vEnd, float flMaxDist,
+                                      edict_t *pIgnore ) const
+{
+	if ( enginetrace == NULL )
+		return true;
+
+	// 1) 距离上限（EBot 用 g_autoPathDistance，默认 250）
+	if ( ( vStart - vEnd ).LengthSqr() > ( flMaxDist * flMaxDist ) )
+		return false;
+
+	// 2) 可走清线（点 trace；撞到门会绕过去重扫）
+	if ( !AgPB_WalkableClear( vStart, vEnd, AgPB_HULL_POINT, pIgnore ) )
+		return false;
+
+	const Vector vCenter = ( vStart + vEnd ) * 0.5f;
+
+	// 3) 全在水里 → 直接算通
+	if ( AgPB_PointInWater( vStart ) && AgPB_PointInWater( vCenter ) && AgPB_PointInWater( vEnd ) )
+		return true;
+
+	// 4) 往高处走：高度差不能超过可跳高度，而且中点得能站（不是悬空）
+	if ( vEnd.z > vStart.z )
+	{
+		if ( vEnd.z > vStart.z + agpb_wp_maxjump.GetFloat() )
+			return false;
+
+		trace_t tr;
+		AgPB_Trace( vCenter + Vector( 0.0f, 0.0f, 1.0f ), vCenter - Vector( 0.0f, 0.0f, 1.0f ),
+		            AgPB_HULL_POINT, pIgnore, tr );
+
+		// EBot 这里把 func_illusionary / func_wall 也当"能站"
+		if ( tr.fraction >= 1.0f || AgPB_TraceHitIsNonSolid( tr ) )
+			return true;
+
+		return false;
+	}
+
+	return true;
+}
+
+/**
+ * 站在 vStart 能不能走到第 iIndex 个点 —— 移植 EBot Waypoint::Reachable（waypoint.cpp:2934）。
+ */
+bool CAgPBWaypoints::Reachable( const Vector &vStart, int iIndex, edict_t *pIgnore ) const
+{
+	const AgPBPath *pPath = Get( iIndex );
+
+	if ( pPath == NULL )
+		return false;
+
+	const Vector vEnd = pPath->origin;
+
+	// 1200 单位以内（EBot 的硬编码）
+	if ( ( vEnd - vStart ).LengthSqr() > ( 1200.0f * 1200.0f ) )
+		return false;
+
+	// 可走体积要通畅（蹲姿体积；EBot 这里用 head_hull，CS:S 的对应物就是 0..45）
+	if ( !AgPB_WalkableClear( vStart, vEnd, AgPB_HULL_DUCK, pIgnore ) )
+		return false;
+
+	const Vector vCenter = ( vStart + vEnd ) * 0.5f;
+
+	if ( AgPB_PointInWater( vStart ) && AgPB_PointInWater( vCenter ) && AgPB_PointInWater( vEnd ) )
+		return true;
+
+	if ( vEnd.z > vStart.z )
+	{
+		if ( vEnd.z > vStart.z + agpb_wp_maxjump.GetFloat() )
+			return false;
+
+		trace_t tr;
+		AgPB_Trace( vCenter + Vector( 0.0f, 0.0f, 1.0f ), vCenter - Vector( 0.0f, 0.0f, 1.0f ),
+		            AgPB_HULL_POINT, pIgnore, tr );
+
+		if ( tr.fraction >= 1.0f || AgPB_TraceHitIsNonSolid( tr ) )
+			return true;
+
+		return false;
+	}
+
+	return true;
 }
