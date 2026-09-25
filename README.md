@@ -175,8 +175,10 @@ bot_quota_mode normal
 | `agpb_team <idx> <team>` | 运行时切换队伍：1=观察者 2=T 3=CT |
 | `agpb_list` | 列出所有 bot（实际队伍 / 目标队伍 / 血量 / 武器 / 坐标） |
 | `agpb_kick <idx\|all>` | 移除 bot |
-| `agpb_netlist <idx> [filter]` | 打印该 bot 的 SendTable 字段表（名字 / 偏移 / 当前值） |
+| `agpb_netlist <bot-idx> [filter]` ｜ `agpb_netlist ent <edict-idx> [filter]` | 打印实体的 SendTable 字段表（名字 / 偏移 / 当前值）—— **能不能写某字段就看这张表** |
 | `agpb_nethandle <idx> <field>` | 解包 EHANDLE 字段并解析回实体（entry / serial / class） |
+| `agpb_netwrite <bot-idx> <field> <value> [element]` ｜ `agpb_netwrite ent <edict-idx> <field> <value> [element]` | **开发用 · 已搁置**（[ARCHIVE §9 #16](ARCHIVE.md)）：写一个网络字段（宽度取 SendProp 位宽，写完通知引擎），并打印 ±8 字节内邻字段的写前/写后对照。vec3 字段写三个数：`... m_vecOrigin x y z`。**不作为 bot 的行为手段** |
+| `agpb_ents [class-filter]` | 列出世界实体（edict 下标 / 类名 / 血量 / 坐标），给 `agpb_netwrite ent <idx>` 找目标 |
 
 路点编辑器 / 寻路（`agpb_wp_*`，详见 [ARCHIVE §4](ARCHIVE.md)）：
 
@@ -289,14 +291,34 @@ bot_quota_mode normal
   `g_CSSViewVectors` / `g_CSGOViewVectors`）；要强制就用 `agpb_wp_hullmode`（0 自动 / 1 CSS / 2 CS:GO）。
   跳跃高度按 `cs_gamemovement.cpp:723`：站立 **57**、蹲跳 **42**（`v += sqrt(2*800*h)`）
 
-**netvar 写入（弹道跳的地基）**：`netvars.h` 新增 `NetVar_WriteFloat / WriteInt`，
+**netvar 写入（弹道跳的地基）**：`netvars.h` 提供 `NetVar_WriteInt / WriteFloat / WriteVector`，
 `CAgPB::SetNetVarFloat / SetNetVarInt / SetNetVarVector`，以及"下一 tick 灌速度"的
 `SetVelocityOverride()`。写的是**引擎里的真成员**（netvar 偏移就是 `offsetof` 出来的），
 时序是"紧挨 `RunPlayerMove` 之前写"，所以引擎的摩擦 / 重力 /
 `CheckJumpButton` 里的 `+=` 冲量都会作用在它之上 —— 这正是弹道跳需要的时序。
-⚠️ 网络表示 ≠ 内存表示：1 字节成员（`m_lifeState`）和发送时位压缩的字段**不能乱写**，
-目前只开确认过宽度的那几种（`m_vecVelocity` / `m_flMaxspeed` / `m_fFlags` / `m_nButtons`）。
+**写入宽度问引擎要，不猜**：宽度取 `SendProp::m_nBits`（`SPROP_VARINT` 恒按 4 字节），
+口径与 SourceMod 的 `SetEntProp` 完全一致（`sourcemod/core/smn_entities.cpp:1687-1706`）——
+所以 `m_lifeState`（`SendPropInt(..., 3, ...)`，内存里是 char）自动写 1 字节、
+`m_iHealth`（`SPROP_VARINT`）写 4 字节；写完还会照 SourceMod 的做法给 edict 打
+`FL_EDICT_CHANGED`（`HalfLife2.cpp:531` 的可链接版本，见 ARCHIVE §6）。
+写之前一律校验类型与下标，失败原因会打回控制台。
 `agpb_bot_vel <idx> <x> <y> <z>` 是它的开发用入口。
+
+> ⛔ **这一层不作为 bot 的行为手段**（2026-09-25 决策，[ARCHIVE §9 #16](ARCHIVE.md)）：
+> "写网络字段本质上改变了服务端实体的行为，差不多算插件了"。navigate / control / combat
+> 一律走 `CUserCmd`；写入层只留作开发 / 诊断工具，验收段（[VERIFY 阶段 H](VERIFY.md)）已搁置。
+
+写入口**不限 bot**：`AgPB_WriteNetVarInt / Float / Vector(edict, name, ...)`
+（`bot.h` / `bot.cpp`）对任意实体都成立，命令侧的对应写法是 `agpb_netwrite ent <edict-idx> ...`
+（配 `agpb_ents` 找实体、`agpb_netlist ent <idx>` 看它有哪些字段）。
+
+⚠️ **只能写"网络字段"（SendTable 里有的）**：`m_vecVelocity` 只在 `DT_BasePlayer` 里
+（`player.cpp:7955-7957`），`m_iHealth` 只在玩家/鱼/人质那几个类；所有实体共有的
+`DT_BaseEntity` 里只有 `m_vecOrigin` / `m_angRotation` / `m_fEffects` / `m_clrRender` /
+`movetype` / `m_nModelIndex` / `m_iTeamNum` 这些。所以 EBot 的 ssm 那两件事在 Source 里
+**写不了网络字段**：手雷真速度和箱子血量都是非网络字段（要另开 datamap 路径），
+而"定点投雷"根本不需要写 —— 投射物初速完全由**视角 + 玩家当前速度**决定
+（`weapon_basecsgrenade.cpp:388-436`），走 ucmd 即可。细节见 [VERIFY 阶段 H.5](VERIFY.md)。
 
 - 点：下半截 = 基础色，上半截 = 附加标志色
   - 基础色：CAMP=青 GOAL=紫 LADDER=棕 RESCUE=白 AVOID=红 FALLCHECK/FALLRISK=灰

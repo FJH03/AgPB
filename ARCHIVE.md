@@ -763,6 +763,53 @@ wayzone 扫描、`MustJump` / `IsNodeReachable` / `Reachable` 全部共用这一
 在 `Think()` 里**紧挨 `RunPlayerMove` 之前**写进 `m_vecVelocity`，写完清空；这样引擎的
 `Friction()` / 重力 / `CheckJumpButton()` 的 `+=` 冲量都会叠在它之上（时序就是弹道跳要的）。
 
+**写入层重写（2026-09-25 深夜，口径 = SourceMod）**：原来的写法是"只开白名单里那几个
+确认过宽度的字段"，现在改成**问引擎要宽度**：
+
+> ⚠️ **2026-09-25 深夜决策（§9 #16）：netvar 写入不作为 bot 的行为手段。**
+> 下面这一整层（含 `agpb_netwrite` / `agpb_bot_vel`）保留为**开发 / 诊断工具**，
+> 不参与 navigate / control / combat 的实现，也不再扩展（datamap 不做）；
+> 验收段 VERIFY「阶段 H」已搁置。留着它的价值只剩两个：查字段（`agpb_netlist`）
+> 和"如果哪天要动实体的**网络字段**，这套手艺是现成的"。
+
+| 环节 | 做法 | 出处 |
+|---|---|---|
+| 宽度 | int 取 `SendProp::m_nBits`：≥17 → 4 字节、≥9 → 2 字节、≥2 → 1 字节、否则 1 字节 bool；`SPROP_VARINT` 恒 4 字节 | `sourcemod/core/smn_entities.cpp:1687-1706` |
+| float | 恒 4 字节 | 同文件 `:1837` |
+| 数组元素 | 地址 = `offset + stride * element`，先校验下标与元素类型 | 同文件 `:1343-1360` |
+| 写前校验 | 类型 / 下标不对就拒绝（它抛 `ThrowNativeError`，我们返回错误码并打控制台） | 同文件到处 |
+| 写完 | 给 edict 打 `FL_EDICT_CHANGED`（等价于它的 `SetEdictStateChanged`） | `core/HalfLife2.cpp:531` |
+
+为什么"问位宽"能对上内存 —— CS:S 自己的声明就是证据（`game/server/player.cpp`）：
+`m_lifeState` 是 `SendPropInt(SENDINFO(m_lifeState), 3, SPROP_UNSIGNED)`（`:7998`，内存里是
+char → 位宽小 → 写 1 字节 ✓），`m_iHealth` 是 `SendPropInt(..., -1, SPROP_VARINT)`（`:7997`，
+内存里是 int → 4 字节 ✓），`m_fFlags` 走 `SendProxy_CropFlagsToPlayerFlagBitsLength`（`:8002`）。
+
+**逐字段记账（`StateChanged(offset)`）在插件里用不了**：它内部要解引用
+`g_pSharedChangeInfo`、调 `CBaseEdict::GetChangeAccessor()`，这两个都是 server.dll 的实现，
+链接直接报 `LNK2019`（实测）。所以走 SourceMod 的兜底分支（`m_fStateFlags |= FL_EDICT_CHANGED`，
+纯 inline）—— 粒度粗一点（"这个实体变了"而不是"这个字段变了"），换掉"链接 server.dll /
+动态解析引擎符号"这两条违反项目原则的路。想逐字段可以以后再上动态解析，位置就在
+`NetVar_NotifyChanged()`。
+
+**调试入口 `agpb_netwrite <idx> <field> <value> [element]`**：打印"引擎给的位宽 → 实际写几字节"，
+外加**目标字段 ±8 字节内邻字段的写前/写后对照** —— 写错宽度会踩坏邻居，这个对照就是让它一眼暴露。
+验收见 [`VERIFY.md`](VERIFY.md)「阶段 H」。
+
+**写入口不限 bot（2026-09-25 深夜补）**：`AgPB_EntityBase / AgPB_EntityNetVarTable /
+AgPB_FindEntityNetVar / AgPB_WriteNetVarInt|Float|Vector / AgPB_ReadNetVar*`（`bot.h`/`bot.cpp`）
+都对**任意 edict** 成立；`CAgPB::SetNetVar*` 现在只是它们的一层薄封装。
+命令侧：`agpb_netwrite ent <edict-idx> <field> <value> [element]`，配 `agpb_ents [class-filter]`
+（列 edict 下标 / 类名 / 血量 / 坐标）找目标、`agpb_netlist ent <idx>` 看它有哪些字段。
+验收见 VERIFY「阶段 H.4 / H.5」。
+
+**能写什么 = 那个实体 SendTable 里有什么**（实测撞出来的）：`m_vecVelocity[0..2]` 只在
+`DT_BasePlayer`（`player.cpp:7955-7957`），`m_iHealth` 只在玩家/鱼/人质；所有实体共有的
+`DT_BaseEntity`（`baseentity.cpp:260+`）里只有 `m_vecOrigin` / `m_angRotation` / `m_fEffects` /
+`m_clrRender` / `movetype` / `m_nModelIndex` / `m_iTeamNum` 这些。EBot 的 ssm 那两件事
+（手雷速度、箱子血量）都是**非网络字段**，要另开 datamap 路径 —— 见 §6 的两条新坑，
+其中"定点投雷"其实不需要写字段。
+
 弹道跳的可行性（对着 CS:S 源码算过）：
 
 | 分量 | 能不能控 | 依据 |
@@ -926,8 +973,13 @@ USP（12/100）完全对得上，就说明 `baseclass` 递归累加偏移这条�
 | 引擎常量凭印象填 | `agpb_wp_maxjump` 曾填 EBot 的 62（GoldSrc 口径） | 一律回 CS:S 源码取数：站立跳 57、蹲跳 42 |
 | **工具替人做判断** | 连边时自动补 `PATH_JUMP`：落差边（上→下）必被 `MustJump` 判成"要跳"，`bothways` 还会两个方向各补一次，结果产生**双向跳跃边**，bot 到了下行起点的点就跳 | 这类"自动判定"默认不做：`MustJump` 只留在**只读体检**（`agpb_wp_check` / `agpb_wp_reach`），标志一律手工连 |
 | **蹲着跳只有 42** | 在蹲行段之后紧接一条跳跃边，bot 起跳时还按着 `IN_DUCK`（或刚从蹲态起身），CS:CZS 跳高只有 42 而不是 57，上不去高台 | 站立跳 57 / 蹲跳 42 见 `cs_gamemovement.cpp:723-728`；起跳 tick 别按蹲（引擎会自动接 crouch-jump，`:767-772`），并在离起跳点 120 单位提前松蹲（退蹲 0.2s）；空中**不要**注入 `IN_DUCK`（会取消引擎的自动序列，`:166-171`） |
-| **netvar 可以读不等于可以随便写** | 想照搬 EBot "直接改速度" 时，若按 4 字节写 `m_lifeState`（内存里是 1 字节 char）或位压缩字段，会踩坏邻居字段 | 只写确认过宽度的：float 类、真数组元素（stride ≥ 4）、Vector 的三个 float；`netvars.h` 里已写明清单与原因 |
+| **netvar 可以读不等于可以随便写** | 想照搬 EBot "直接改速度" 时，若按 4 字节写 `m_lifeState`（内存里是 1 字节 char）或位压缩字段，会踩坏邻居字段 | **宽度问引擎要**：`SendProp::m_nBits`（`SPROP_VARINT` 恒 4 字节），照 SourceMod `SetEntProp` 的口径（`smn_entities.cpp:1687-1706`）；写前校验类型/下标，写完打 `FL_EDICT_CHANGED`。核查工具 `agpb_netwrite`（带邻字段对照），验收见 VERIFY 阶段 H |
 | 写速度的**时序** | 早一 tick 写会被摩擦/重力吃掉，晚一 tick 又赶不上 | 用 `SetVelocityOverride()`：值挂在 bot 上，`Think()` 里紧挨 `RunPlayerMove` 之前写、写完清空 |
+| **`StateChanged(offset)` 插件链接不到** | 照抄 SourceMod 的逐字段变更通知，直接 `LNK2019: 无法解析的外部符号 g_pSharedChangeInfo / CBaseEdict::GetChangeAccessor` | 这两个都是 server.dll 里的实现；插件用**同一个头文件里的兜底分支** `m_fStateFlags \|= FL_EDICT_CHANGED`（SourceMod 在 `g_pSharedChangeInfo == NULL` 时走的也是这条）。想逐字段就得上 `GetProcAddress` 动态解析，位置留在 `NetVar_NotifyChanged()` |
+| **AMBuild 不跟踪头文件依赖** | 改了 `src/*.h` 后 `ambuild` 只重链接、**不重编译**，于是改动没进产物（表现像"代码没生效"，实际是旧 obj） | 改完头文件要么 `Remove-Item build` 里的内容重配一次，要么把对应 `.cpp` 也碰一下；验证办法：看产物时间戳是否更新 |
+| **反射层只能写"网络字段"** | `agpb_netwrite ent 94 m_vecVelocity ...` → `field 'm_vecVelocity' not found (class=CHEGrenade, props=86)`。第一反应是"名字写错了"，实际是**那个实体根本没有这个网络字段** | 引擎只给**需要客户端预测的实体**发速度：`m_vecVelocity[0..2]` 只在 `DT_BasePlayer`（`player.cpp:7955-7957`），`m_iHealth` 只在玩家/鱼/人质（`player.cpp:7997` / `fish.cpp:102` / `cs_simple_hostage.cpp:101`）；所有实体共有的 `DT_BaseEntity`（`baseentity.cpp:260+`）里只有 `m_vecOrigin` / `m_angRotation` / `m_fEffects` / `m_clrRender` / `movetype` / `m_nModelIndex` / `m_iTeamNum` 这些。**判据只有一个**：`agpb_netlist ent <idx> <名字>` 看字段在不在表里。非网络字段要另开 **datamap** 路径（`CBaseEntity::GetDataDescMap()` 是虚函数、索引编译期不可知，要么引 gamedata 要么运行期探测）——**暂不做** |
+| **`agpb_ents grenade` 抓到的不是飞出去的手雷** | 想写手雷速度，`agpb_ents grenade` 列出 `CHEGrenade`（hp=-1、坐标贴在玩家身上） | `CHEGrenade : CBaseCSGrenade : CWeaponCSBase` 是**身上那把武器 item**（`weapon_hegrenade.h:26`）；飞出去的投射物是 `CHEGrenadeProjectile : CBaseCSGrenadeProjectile : CBaseGrenade`（`hegrenade_projectile.h:15`）。用 `agpb_ents projectile` |
+| **"定点投雷"在 Source 里不需要写手雷速度** | EBot 的 `ssm/throw*.cpp` 是 `ent->v.velocity = m_throw`（GoldSrc 里自己解抛物线） | CS:S 的 `CBaseCSGrenade::ThrowGrenade()`（`game/shared/cstrike/weapon_basecsgrenade.cpp:388-436`）：`flVel = (90 - 俯仰角) * 6`（≤750），`vecThrow = vForward * flVel + pPlayer->GetAbsVelocity()` —— 初速**完全由视角 + 玩家当前速度决定**，没有随机、没有强度条（`m_fThrowStrength` 是 CS:GO 才有的）。所以 Source 版定点投雷 = 算角度 → 喂 ucmd → 让引擎自己扔；也顺带解释了跑投/跳投更远（那一 tick 的玩家速度更大）。投射物上确实有网络字段 `m_vInitialVelocity`（`basecsgrenade_projectile.cpp:38-43`，20 位量化），但那是**给客户端重建插值轨迹**用的，写它只会让画面上的轨迹变形，不改变服务端物理 |
 
 ---
 
@@ -1205,11 +1257,47 @@ CS:S 是 66 tick → 每帧 15.15 ms；LLM 往返 300~2000 ms = 20~130 帧。
 | 13 | 跳跃/叠罗汉/仅通视三种边**单向写**，点属性只标**起点** | EBot `AddPath(type)` 就是这么写的：边打 `PATHFLAG_*`，起点打 `WAYPOINT_JUMP`/`DJUMP`，跳跃起点半径压到 4 |
 | 14 | 配色**保持 AgPB 扩展版**（CROUCH 紫罗兰 / JUMP 黄 / LIFT 墨绿 + 所有连线压暗蓝作背景层） | 已逐行核对 EBot：**边只有 4+1 类颜色**（跳红 / 叠罗汉蓝 / 仅通视绿橙 / 双向黄 / 单向白 / 单向入边 `(0,192,96)`，`waypoint.cpp:3438-3470`），**点色链里没有 CROUCH / LIFT / JUMP**（`:3282-3318`），蹲伏在 EBot 里只体现为点更矮（36/72）+ 连线偏移更低（9/18）+ wayzone 给 0。实测打点时扩展色更直观，**决定保留现状**（2026-09-25） |
 | 15 | `MustJump` / `IsNodeReachable` / `Reachable` **只做只读体检，不自动改数据** | 曾有一版"连边自动补 `PATH_JUMP`"，落差边必被判"要跳"、`bothways` 还会两个方向各补一次 → 产生双向跳跃边；按用户要求删除，跳跃标志一律手工连（`jump` 模式 / `agpb_wp_link ... 1`） |
+| 16 | **netvar 写入不作为 bot 的行为手段**（2026-09-25 深夜，用户决定） | 理由（用户原话）：**"写网络字段本质上改变了服务端实体的行为，差不多算插件了"** —— 偏离项目主线（外部 agent 下意图 → 插件只生成 `CUserCmd`，像玩家一样玩）。因此：① 写入层**保留在代码里**，但降级为**开发 / 诊断工具**（`agpb_netwrite`、`agpb_bot_vel`），不再扩展、不再列入常规验收（VERIFY 阶段 H 已搁置）；② **不开 datamap 路径**（写非网络字段这类事不做）；③ navigate / control / combat 的实现**只能用 ucmd**；④ 连带取消：拆箱子写 health、投雷写手雷速度（后者已查明 Source 里不需要，改走"算角度 + ucmd"，见 §6）；⑤ 受影响待拍板的：**弹道跳**（它本来就要写 `m_vecVelocity`）—— 见「待定」 |
 
 ### 待定
 
-- **`entvars_t` 的建模方案**（A 影子结构 / B 访存属性 / C 全改写）—— 见 §7「M3 起步调研」
-  的「`entvars_t` 怎么建模」。**推荐 A**（读点零改动）。
+- ~~**`entvars_t` 的建模方案**（A 影子结构 / B 访存属性 / C 全改写）~~
+  → **已定（2026-09-25 深夜）：走 B「访存属性」（代理类型）**。依据：
+  1. 把 EBot 的 `source/*.cpp` + `include/*.h` 全扫了一遍：`v.<field>` 引用 321 处，
+     其中 `.x/.y/.z` 取分量 23、深层访问 32、位运算（flags/effects/button）59、
+     复合赋值 10、整体赋值 22，而 **`&v.xxx` 取地址 0 处** —— 代理类型最大的雷（拿不到真内存）
+     根本不存在；
+  2. 真正的写点只有十来处：`include/engine.h` 里 6 个 setter（velocity / angles / v_angle /
+     maxspeed / health / fov）、`ssm/throw*.cpp` 改手雷速度、`ssm/destroybreakable.cpp` 改 health；
+     而且 **EBot 从不写 `v.button`** —— 它按键也走
+     `pfnRunPlayerMove(GetEntity(), angles, forwardmove, sidemove, upmove, m_buttons, ...)`
+     （`basecode.cpp:786/875`），和我们的 ucmd 注入是同一条路，所以 `v.button` 只读即可；
+  3. 写字段的"宽度 / 类型校验 / 写完通知引擎"三件事已经按 SourceMod 的口径落地
+     （见 §4「写入层重写」），所以 B 的写点不需要逐个改写。
+
+  **代价与待办（语义不匹配，代理糊不过去，必须显式改写）**：
+  `v.classname`（Source 里不是 netvar）、`v.model`（Source 是 `m_nModelIndex`，要用
+  `IVModelInfo::GetModelName()`）、`v.owner` / `v.groundentity`（GoldSrc `edict_t*` vs Source EHANDLE，
+  读写都要透明解包/打包）、`v.health`（GoldSrc float vs Source `m_iHealth` int）、
+  `v.iuser1..4`（Source 没有，放进包装类当普通成员）。
+
+  **更正（2026-09-25 深夜，扫描口径修正后）**：上面第 2 条里"EBot 从不写按钮字段"**是错的** ——
+  EBot 的 `entvars_t` 里字段名是 **`buttons`**（`include/engine.h:1597`），它确实写：
+  `basecode.cpp:643/699/710` 把 `m_buttons` 镜像进实体、`ssm/usebutton.cpp:23`
+  在 Xash 分支 `buttons |= IN_USE`；此外 `basecode.cpp:1427` 写 `flags |= FL_DUCKING`、
+  `basecode.cpp:817-850` 直接写 `v_angle` / `angles` 做平滑转向。
+  但这些写点在 Source 里**都不需要**：引擎自己会用 `cmd.buttons` 维护 `m_nButtons`
+  （`SetupMove` → `MoveData`、`UpdateButtonState` → 实体字段），用 `ucmd->viewangles` 覆盖
+  `pl.v_angle`（`player.cpp:3661`）；按照决策 16，我们一律走 ucmd。
+
+- **弹道跳要不要保留？**（2026-09-25 深夜新冒出来的问题）
+  EBot 在 `navigate.cpp:332-339` 跳远/跳高时**直接写 `pev->velocity`**（解
+  `T = (Vz + √(Vz²-2g·dz))/g` 后灌发射速度），我们这边的对应原语是 `SetVelocityOverride()`
+  —— 但按决策 16，写字段不作为行为手段。
+  - **只走 ucmd**：跳跃高度 57（蹲跳 42）、水平射程 ≈ 189 单位（250 × 0.755 s；起跳前速度还会被
+    引擎钳到 `1.1 × m_flMaxspeed`）→ 路点图里**超出这个范围的边不能打**。
+  - **例外方案**：只在"跳跃边"这一个动作上用 `SetVelocityOverride()`，不碰其它字段。
+  **需要拍板：放弃超范围跳跃边（导航图按引擎能力画），还是把弹道跳作为唯一例外？**
 
 ---
 
@@ -1308,16 +1396,27 @@ M3 的「编辑器 + 可视化 + 最小导航」三件套已落地并部署上�
 | `MustJump` / `IsNodeReachable` / `Reachable` 已移植 | `waypoint.cpp`；只用于**只读体检**（`agpb_wp_check` 的几何行、`agpb_wp_reach`）。跳跃标志按用户要求**不再自动补**，一律手工连（`jump` 模式 / `agpb_wp_link ... 1`） |
 | 体积与跳跃高度改用 CS:S 真实值 + 运行期动态判定 | `cs_gamerules.cpp:105`（62/45 与 72/54）、`cs_gamemovement.cpp:723`（57/42）；`AgPB_HullStandHeight/DuckHeight` 先量玩家碰撞盒再读 `sv_cs_use_legacy_viewvectors`，可用 `agpb_wp_hullmode` 覆盖 |
 | netvar **写入**能力 + 速度覆盖原语 | `netvars.h` 的 `NetVar_WriteFloat/WriteInt`、`CAgPB::SetNetVarFloat/Int/Vector`、`SetVelocityOverride()`（紧挨 `RunPlayerMove` 前写、写完清空）；开发入口 `agpb_bot_vel` |
+| **写入层重写**（深夜）：宽度问引擎（`m_nBits` / `SPROP_VARINT`，SourceMod 口径）、类型/下标校验、写完打 `FL_EDICT_CHANGED` | `netvars.h` 的 `NetVar_WriteInt/Float/Vector`、`NetVar_WriteWidth`、`NetVar_NotifyChanged`；调试入口 `agpb_netwrite`；验收 [VERIFY](VERIFY.md) 阶段 H |
+| **决策 16**（深夜）：netvar 写入**不作为 bot 的行为手段**，只留作开发 / 诊断工具；验证清单阶段 H 搁置 | 见 §9 #16。连带结论：不开 datamap 路径；拆箱子（写 health）、投雷（写手雷速度）都不做 —— 其中投雷已查明 Source 里靠"算角度 + ucmd"即可（`weapon_basecsgrenade.cpp:388-436`） |
+| 实测撞出来的字段边界（写档案用） | `m_vecVelocity` 只在 `DT_BasePlayer`（`player.cpp:7955-7957`）、`m_iHealth` 只在玩家/鱼/人质；`DT_BaseEntity` 只有 `m_vecOrigin`/`m_angRotation`/`m_fEffects`/`m_clrRender`/`movetype`/`m_nModelIndex`/`m_iTeamNum` 等（`baseentity.cpp:260+`）。判据：`agpb_netlist ent <idx>` |
 
 ### 数字基线（回归时对照）
 
 ```
-agpb_mm.dll（2026-09-25 收工版）  500,736 字节
+agpb_mm.dll（2026-09-25 收工版）        500,736 字节
+agpb_mm.dll（含写入层重写，深夜）        503,296 字节
+    sha256 = BD3B56B698FFBE97C5B4EBDFA46EB7097EEA3B8FDA67BD61FDB6D736611CE767
+    从零重配 + 编译，本项目源码 0 警告（只剩 SDK 的 utlbuffer C4267）
+agpb_mm.dll（写入层支持任意实体）        506,880 字节
+    ← **服上（bin\win64）跑的是这一版**（2026-09-25 21:20）
+agpb_mm.dll（+ vec3 写 / netlist ent）   507,904 字节
+    ← build\ 里的产物：多出来的两项属于决策 16 已搁置的功能，
+      **故意不追平部署**（等哪天需要再换；换之前记得先停游戏，DLL 会被占用）
 obj：src_plugin / src_bot / src_netvars / src_waypoint / src_menu / src_wpdraw / src_wpedit
 启动自检：[AgPB] loaded. ... overlay=ok, showmenu=ok
 ```
 
-新增命令：`agpb_menu`、`agpb_wp_show|labels|alllinks|cache|type|flag|radius|connect|cut|teleport|noclip|check|stats|legend|wayzone|reach`、`agpb_bot_goto|stop|vel`
+新增命令：`agpb_menu`、`agpb_wp_show|labels|alllinks|cache|type|flag|radius|connect|cut|teleport|noclip|check|stats|legend|wayzone|reach`、`agpb_bot_goto|stop|vel`、`agpb_netwrite`、`agpb_ents`
 
 新增 ConVar：`agpb_wp_show(0)`、`agpb_wp_labels(0)`、`agpb_wp_alllinks(1)`、
 `agpb_wp_thick(3)`、`agpb_wp_xray(1)`、`agpb_wp_autowayzone(1)`、`agpb_wp_maxjump(57)`、
@@ -1331,15 +1430,25 @@ obj：src_plugin / src_bot / src_netvars / src_waypoint / src_menu / src_wpdraw 
    （几何检查：列出"该跳却没打标志"的边）、`agpb_wp_wayzone all`（老图重算半径）、
    `agpb_bot_vel`（netvar 写入冒烟测试）
 3. 三选一定优先级（**推荐 a**）：
-   - **a. 移植 EBot 的 `navigate` + 写 `AgPBControl`（意图 → CUserCmd）** —— 前提是先拍板
-     "**放弃 `entvars_t` 影子结构**，改成只读 `AgPBEntity` 包装 + 一律用 CUserCmd 驱动"；
-     好消息：EBot 的移动最终也是 `pfnRunPlayerMove(...)`（`basecode.cpp:786/875`），接缝一致
+   - **a. 移植 EBot 的 `navigate` + 写 `AgPBControl`（意图 → CUserCmd）** —— 前提**已定**
+     （2026-09-25 深夜）：`entvars_t` 走 **B 访存属性**（见 §9「待定」那条），
+     动作一律走 ucmd；好消息：EBot 的移动最终也是 `pfnRunPlayerMove(...)`
+     （`basecode.cpp:786/875`），接缝一致
    - b. **弹道跳落地**：`navigate.cpp:318-345` 的数学 + `SetVelocityOverride()` + 空中 sidemove 微调；
      需要先拿到服务器的 `sv_enablebunnyhopping` / `sv_airaccelerate` / `sv_gravity` 值
      （水平发射速度会被 `PreventBunnyJumping()` 压到 `1.1 × m_flMaxspeed`）
    - c. `CreateBasic` + Analyze 自动打点（省手工铺点）
 4. `CRASH_REPORT.md` 的 freezetime Radio 崩溃**仍未修**（决定用 SourceMod 内存补丁处理；
    所有测试继续**同队**进行）
+
+5. **决策 16 之后的路线（2026-09-25 深夜更新）**：
+   - 写入层已降级为工具，**navigate / control / combat 的实现只能用 ucmd**；
+   - 移植 `navigate` 时要**逐个改写 EBot 的写点**（清单见 §9「待定」那一段 + §6 的坑表）：
+     弹道跳写 velocity → 待拍板；蹲行速度补偿 → Source 不需要；
+     "瞬间转身"写 velocity → 待定；`v_angle` 平滑转向 → 走 ucmd viewangles；
+     `flags |= FL_DUCKING` → 走 `IN_DUCK`；手雷/箱子 → 不做；
+   - **需要拍板的一件事**：**弹道跳留不留**（留就得给 `SetVelocityOverride()` 开一个"只用于跳跃边"的例外，
+     不留就只在引擎能力范围内打点：跳高 57、跳远 ≈189 单位）。
 
 ### 可以删 / 建议留
 

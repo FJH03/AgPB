@@ -250,6 +250,37 @@ CAgPBManager &AgPB_Bots();
  */
 const char *AgPB_EntityClassName( edict_t *pEdict );
 
+// ---------------------------------------------------------------------------
+// netvar 访问：**任意实体**，不限于 bot
+//
+// 为什么要有这一层：EBot 的 ssm 模块写的是**别的实体** —— 定点投雷写手雷的
+// `v.velocity`（`ssm/throw*.cpp`）、拆箱子写箱子的 `v.health`
+// （`ssm/destroybreakable.cpp:18`）。写层本身是"名字 → 偏移 → 值"，
+// 和写哪个实体无关，所以入口不能只挂在 CAgPB 上。
+//
+// 注意：这是"按 netvar 名字读写"的访问层，**不是** §9 定的 B 方案那层
+// `entvars_t` 代理（那个是给 EBot 的 `ent->v.xxx` 源码用的）。
+// ---------------------------------------------------------------------------
+
+/** 实体对象基址（CBaseEntity*，不透明指针）；无效实体返回 NULL。 */
+void *AgPB_EntityBase( edict_t *pEdict );
+
+/** 该实体所属类的扁平化字段表；失败返回 NULL。 */
+const CNetVarTable *AgPB_EntityNetVarTable( edict_t *pEdict );
+
+/** 按名字查字段；找不到返回 NULL。 */
+const BotNetVar *AgPB_FindEntityNetVar( edict_t *pEdict, const char *pszName );
+
+/** 写完会自动通知引擎（`NetVar_NotifyChanged`）。 */
+NetVarWriteResult AgPB_WriteNetVarInt( edict_t *pEdict, const char *pszName, int iValue, int iElement = 0 );
+NetVarWriteResult AgPB_WriteNetVarFloat( edict_t *pEdict, const char *pszName, float flValue, int iElement = 0 );
+NetVarWriteResult AgPB_WriteNetVarVector( edict_t *pEdict, const char *pszName, const Vector &vValue );
+
+/** 读：字段缺失 / 实体无效时返回默认值。 */
+int    AgPB_ReadNetVarInt( edict_t *pEdict, const char *pszName, int iDefault = 0 );
+float  AgPB_ReadNetVarFloat( edict_t *pEdict, const char *pszName, float flDefault = 0.0f );
+Vector AgPB_ReadNetVarVector( edict_t *pEdict, const char *pszName );
+
 /**
  * 引擎为该实体维护的 ref ehandle 的整值（`CBaseHandle::ToInt()`）。
  * 取不到时返回 INVALID_EHANDLE_INDEX。

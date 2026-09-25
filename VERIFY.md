@@ -428,6 +428,141 @@ agpb_bot_vel 0 0 0 0          // 清零
 判读：bot 会被"推"一下；`SetVelocityOverride` 的写入时序是紧挨 `RunPlayerMove` 之前，
 所以摩擦/重力会作用在它之上（这正是弹道跳要的行为）。
 
+---
+
+## 阶段 H —— netvar 写入层（SourceMod 口径，2026-09-25 晚）
+
+> ⛔ **本阶段已搁置（2026-09-25 深夜，见 [ARCHIVE §9 决策 16](ARCHIVE.md)）**：
+> 用户判断"写网络字段本质上改变了服务端实体的行为，差不多算插件了"，偏离
+> "agent 下意图 → 插件只生成 `CUserCmd`"这条主线。所以写入层降级为**开发 / 诊断工具**，
+> **不再列入常规验收**；下面内容保留作参考（手艺已经验证过：SourceMod 口径的宽度、
+> 类型校验、写完通知引擎）。日常回归只跑 A–G。
+
+写层重写成了 SourceMod 的口径：**宽度取 `SendProp::m_nBits`**（`SPROP_VARINT` 恒 4 字节），
+写前校验类型/下标，写完给 edict 打 `FL_EDICT_CHANGED`。
+`agpb_netwrite` 就是这一层的显微镜：它把"引擎给的位宽 → 实际写几字节"和
+"±8 字节内邻字段的写前/写后"一起打出来。
+
+### H.1 宽度是引擎给的（三种宽度各打一发）
+
+```
+agpb_add 2
+
+agpb_netwrite 0 m_lifeState 0     // 位宽 3（char，1 字节）
+agpb_netwrite 0 m_iHealth 100     // VARINT（int，4 字节）
+agpb_netwrite 0 m_fFlags 0        // PLAYER_FLAG_BITS（1~2 字节，高位本来就是 0）
+agpb_netwrite 0 m_vecVelocity[2] 0
+```
+
+期望输出（形如）：
+
+```
+[AgPB] AgPB_01 m_lifeState offset=+368 type=int elems=1 stride=-1 bits=3 varint=no -> width 1
+[AgPB] changed=m_lifeState (engine notified at offset 368)
+[AgPB] readback m_lifeState = 0 (via engine proxy)
+[AgPB] neighbours before: m_iHealth +364 int=100 | ...
+[AgPB] neighbours after : m_iHealth +364 int=100 | ...
+```
+
+判读：
+
+| 现象 | 结论 |
+|---|---|
+| `bits=3 ... -> width 1`，而 `m_iHealth` 是 `bits=-1 varint=yes -> width 4` | ✅ 宽度确实来自引擎声明（`player.cpp:7997-8002`），不是猜的 |
+| `neighbours before` 与 `after` **该字段之外的部分完全相同** | ✅ 没有踩坏邻居字段（这正是 ARCHIVE §6 那条教训的自动化检查） |
+| `readback` 走的是引擎 proxy，能看到新值 | ✅ 写的是引擎里的真成员 |
+
+⚠️ 写 `m_lifeState = 2`（`LIFE_DEAD`）会让 bot 立刻"死"（可以再写回 0）——
+这是**故意**的端到端验证：值真的进了引擎，不是我们自己的影子。
+
+### H.2 类型 / 下标被挡下来
+
+```
+agpb_netwrite 0 m_iHealth 100 3   // 非数组却给 element
+agpb_netwrite 0 m_flMaxspeed 250  // float 字段（会走 float 分支，4 字节）
+agpb_netwrite 0 m_iAmmo 100 8     // 真数组元素（stride 由 SendTable 给出）
+```
+
+判读：第一条应回 `write refused: bad element index (not an array, or out of range)`；
+`m_iAmmo` 那条应打印 `array[32 x 4]` 并写进 `[8]`（那就是 USP 的备用弹匣）。
+
+### H.3 与 `agpb_bot_vel` 的关系
+
+`agpb_bot_vel 0 300 0 0` 走的也是同一套写层（`m_vecVelocity[0..2]` 三个 VECTORELEM），
+现在每次写都会顺带打 `FL_EDICT_CHANGED`。所以 G.3 的判读不变：
+bot 被推一下、速度随后被摩擦衰减。
+
+### H.4 写**任意实体**（不是 bot）
+
+写入口是"名字 → 偏移 → 值"，跟写哪个实体无关（EBot 的 ssm 写的就是手雷 / 箱子）。
+**但只有"网络字段"（SendTable 里有的）能写** —— 先看目标实体到底有哪些字段：
+
+```
+agpb_ents                  // 全部实体（最多 60 行）
+agpb_ents weapon           // 类名子串过滤
+agpb_ents projectile       // 手雷/飞弹类投射物
+agpb_netlist ent 94        // 这个实体的完整字段表（能不能写就看这张表）
+agpb_netlist ent 94 m_     // 过滤看
+```
+
+> ⚠️ **`agpb_ents grenade` 找到的是 `CHEGrenade` —— 那是你身上"手雷武器"这个 item，
+> 不是飞出去的那颗**。投射物叫 `CHEGrenadeProjectile`（`agpb_ents projectile` 找它）。
+
+**测试 A：任意实体都能写的字段（`m_vecOrigin` / `m_fEffects`）**
+
+```
+agpb_ents projectile                        // 例如 [ 123] CHEGrenadeProjectile hp=-1 pos=...
+agpb_netlist ent 123 m_                     // 确认字段名（m_vecOrigin / m_fEffects 一定在）
+agpb_netwrite ent 123 m_vecOrigin 100 200 300    // 把这颗手雷瞬移过去（vec3 写 12 字节）
+agpb_netwrite ent 123 m_fEffects 32         // 32 = EF_NODRAW：实体在客户端看不见了
+agpb_netwrite ent 123 m_fEffects 0          // 再显示回来
+```
+
+判读：
+
+| 现象 | 结论 |
+|---|---|
+| 头一行是 `edict[123] CHEGrenadeProjectile m_vecOrigin offset=+... type=vec3 -> write 12 bytes` | ✅ 目标解析到了**另一个实体**，字段表来自它自己的 ServerClass |
+| 手雷在游戏里瞬移到新坐标 / 消失又出现 | ✅ 写的是引擎里的真成员 |
+| `no entity at edict index 123` | 那个下标已经空了（手雷炸了 / 实体换了）→ 重新 `agpb_ents` 取新下标 |
+| `field 'xxx' not found` | 这个实体**没有**这个网络字段 → 先 `agpb_netlist ent <idx> <名字>` 核对（见下面 H.5） |
+
+**测试 B：写自己（listen server 上你就是一个 edict）**
+
+```
+agpb_ents CCSPlayer
+agpb_netwrite ent <你的下标> m_fFlags 0
+agpb_netwrite ent <你的下标> m_iHealth 100
+```
+
+### H.5 已知限制：非玩家实体没有 `m_vecVelocity` / `m_iHealth`
+
+```
+agpb_netwrite ent 123 m_vecVelocity 0 0 900
+→ [AgPB] field 'm_vecVelocity' not found (class=CHEGrenadeProjectile, props=86)
+```
+
+**这不是 bug，是 Source 的事实**（实测 + 源码双证）：
+
+| 字段 | 在哪个表里 | 依据 |
+|---|---|---|
+| `m_vecVelocity[0..2]` | **只在 `DT_BasePlayer`** | `game/server/player.cpp:7955-7957`（三个 `SENDINFO_VECTORELEM` + `SPROP_NOSCALE\|SPROP_CHANGES_OFTEN`） |
+| `m_iHealth` | 只在玩家 / 鱼 / 人质那几个类 | `player.cpp:7997`、`fish.cpp:102`、`cs_simple_hostage.cpp:101` |
+| `DT_BaseEntity`（所有实体共有） | 只有 `m_vecOrigin` / `m_angRotation` / `m_fEffects` / `m_clrRender` / `movetype` / `m_nModelIndex` / `m_iTeamNum` … | `game/server/baseentity.cpp:260+` |
+
+原因：引擎只给**客户端需要预测的实体（玩家）**发送速度；其它实体客户端只做插值
+（手雷投射物甚至专门用 `m_vInitialVelocity` 这类 20 位量化字段重建插值轨迹，
+`basecsgrenade_projectile.cpp:38-43`）。所以"非网络字段"（手雷的真速度、箱子的血量）
+**不在 SendTable 里**，这套反射层就够不着 —— 要写得再上 **datamap** 路径
+（`CBaseEntity::GetDataDescMap()`，虚函数索引编译期不可知，见 ARCHIVE §6 的那条）。
+
+> **投雷不需要写字段**：CS:S 的 `CBaseCSGrenade::ThrowGrenade()`
+> （`game/shared/cstrike/weapon_basecsgrenade.cpp:388-436`）里
+> `flVel = (90 - 俯仰角) * 6`（上限 750），`vecThrow = vForward * flVel + pPlayer->GetAbsVelocity()` ——
+> **站位 + 视角 + 玩家当前速度就是全部输入**，没有随机、没有强度条。
+> 这三样全是 ucmd 能表达的东西（顺带解释了"跑投/跳投更远"：那一下的 `GetAbsVelocity()` 更大）。
+> 所以 ssm 的"定点投雷"在 Source 里应当走"算角度 → 喂 ucmd → 让引擎自己扔"。
+
 ## 相关命令一览
 
 | 命令 | 说明 |
@@ -438,6 +573,8 @@ agpb_bot_vel 0 0 0 0          // 清零
 | `agpb_team <idx> <team>` | 运行时切换队伍 |
 | `agpb_netlist <idx> [filter]` | 展开 SendTable 字段表（字段名 / 偏移 / 当前值） |
 | `agpb_nethandle <idx> <field>` | 解包 EHANDLE 并解析回实体 |
+| `agpb_netwrite <idx> <field> <value> [element]` | **开发用**：写 netvar（宽度取引擎位宽），带邻字段对照（阶段 H） |
+| `agpb_ents [class-filter]` | 列出世界实体（edict 下标 / 类名 / 血量 / 坐标） |
 | `agpb_wp_add [x y z]` | 加路点（不给坐标就用你的位置） |
 | `agpb_wp_del <idx>` | 删路点（后续下标前移，连边自动修正） |
 | `agpb_wp_link <from> <to> [flags]` | 连边（双向）；flags：1=跳 2=连跳 4=仅通视 |

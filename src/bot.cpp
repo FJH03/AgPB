@@ -632,32 +632,17 @@ CNetVarRegistry &BotNetVarRegistry()
 
 void *CAgPB::NetVarBase() const
 {
-	if ( m_pEdict == NULL )
-		return NULL;
-
-	IServerUnknown *pUnk = m_pEdict->GetUnknown();
-	if ( pUnk == NULL )
-		return NULL;
-
-	// CBaseEntity*，公开头文件里只有前置声明，这里当不透明指针用。
-	return (void *)pUnk->GetBaseEntity();
+	return AgPB_EntityBase( m_pEdict );
 }
 
 const CNetVarTable *CAgPB::NetVarTable() const
 {
-	if ( m_pEdict == NULL )
-		return NULL;
-
-	return BotNetVarRegistry().GetForEdict( m_pEdict );
+	return AgPB_EntityNetVarTable( m_pEdict );
 }
 
 const BotNetVar *CAgPB::FindNetVar( const char *name ) const
 {
-	const CNetVarTable *pTable = NetVarTable();
-	if ( pTable == NULL )
-		return NULL;
-
-	return pTable->Find( name );
+	return AgPB_FindEntityNetVar( m_pEdict, name );
 }
 
 bool CAgPB::GetNetVarBool( const char *name, bool defaultValue ) const
@@ -806,33 +791,36 @@ edict_t *CAgPB::HandleToEdict( uintp handle ) const
 
 bool CAgPB::SetNetVarFloat( const char *pszName, float flValue )
 {
-	void *pBase = NetVarBase();
-	const BotNetVar *pVar = FindNetVar( pszName );
+	// 走任意实体那套 API：bot 只是"实体"的一个特例（见 bot.h 的说明）
+	const NetVarWriteResult result = AgPB_WriteNetVarFloat( m_pEdict, pszName, flValue );
 
-	if ( pBase == NULL || pVar == NULL )
+	if ( result != NETVAR_WRITE_OK )
+	{
+		META_CONPRINTF( "[AgPB] %s: write %s refused (%s)\n",
+		                m_Name, pszName, NetVarWriteResultName( result ) );
 		return false;
+	}
 
-	NetVar_WriteFloat( pBase, *pVar, flValue );
 	return true;
 }
 
 bool CAgPB::SetNetVarInt( const char *pszName, int iValue )
 {
-	void *pBase = NetVarBase();
-	const BotNetVar *pVar = FindNetVar( pszName );
+	const NetVarWriteResult result = AgPB_WriteNetVarInt( m_pEdict, pszName, iValue );
 
-	if ( pBase == NULL || pVar == NULL )
+	if ( result != NETVAR_WRITE_OK )
+	{
+		META_CONPRINTF( "[AgPB] %s: write %s refused (%s)\n",
+		                m_Name, pszName, NetVarWriteResultName( result ) );
 		return false;
+	}
 
-	NetVar_WriteInt( pBase, *pVar, iValue );
 	return true;
 }
 
 bool CAgPB::SetNetVarVector( const char *pszName, const Vector &vValue )
 {
-	void *pBase = NetVarBase();
-
-	if ( pBase == NULL || pszName == NULL )
+	if ( pszName == NULL )
 		return false;
 
 	// 优先按 VECTORELEM 的三个元素写（m_vecVelocity 在表里就是 [0]/[1]/[2]）
@@ -847,28 +835,18 @@ bool CAgPB::SetNetVarVector( const char *pszName, const Vector &vValue )
 	{
 		Q_snprintf( szName, sizeof( szName ), "%s%s", pszName, s_szIndex[i] );
 
-		const BotNetVar *pVar = FindNetVar( szName );
-
-		if ( pVar == NULL )
+		if ( AgPB_WriteNetVarFloat( m_pEdict, szName, pValues[i] ) != NETVAR_WRITE_OK )
 		{
 			bAllFound = false;
 			break;
 		}
-
-		NetVar_WriteFloat( pBase, *pVar, pValues[i] );
 	}
 
 	if ( bAllFound )
 		return true;
 
-	// 退路：整条 Vector 字段（DPT_Vector / VectorXY）—— 内存里就是 3 个 float
-	const BotNetVar *pVar = FindNetVar( pszName );
-
-	if ( pVar == NULL )
-		return false;
-
-	*(Vector *)( (char *)pBase + pVar->offset ) = vValue;
-	return true;
+	// 退路：整条 Vector 字段（DPT_Vector）—— 内存里就是 3 个 float
+	return ( AgPB_WriteNetVarVector( m_pEdict, pszName, vValue ) == NETVAR_WRITE_OK );
 }
 
 void CAgPB::SetVelocityOverride( const Vector &vVelocity )
@@ -887,6 +865,130 @@ const char *AgPB_EntityClassName( edict_t *pEdict )
 		return NULL;
 
 	return pNet->GetServerClass()->GetName();
+}
+
+// ---------------------------------------------------------------------------
+// netvar 访问：任意实体（见 bot.h 的说明）
+// ---------------------------------------------------------------------------
+
+void *AgPB_EntityBase( edict_t *pEdict )
+{
+	if ( pEdict == NULL || pEdict->IsFree() )
+		return NULL;
+
+	IServerUnknown *pUnk = pEdict->GetUnknown();
+	if ( pUnk == NULL )
+		return NULL;
+
+	// CBaseEntity*，公开头文件里只有前置声明，这里当不透明指针用。
+	return (void *)pUnk->GetBaseEntity();
+}
+
+const CNetVarTable *AgPB_EntityNetVarTable( edict_t *pEdict )
+{
+	return BotNetVarRegistry().GetForEdict( pEdict );
+}
+
+const BotNetVar *AgPB_FindEntityNetVar( edict_t *pEdict, const char *pszName )
+{
+	if ( pszName == NULL )
+		return NULL;
+
+	const CNetVarTable *pTable = AgPB_EntityNetVarTable( pEdict );
+	if ( pTable == NULL )
+		return NULL;
+
+	return pTable->Find( pszName );
+}
+
+NetVarWriteResult AgPB_WriteNetVarInt( edict_t *pEdict, const char *pszName, int iValue, int iElement )
+{
+	void *pBase = AgPB_EntityBase( pEdict );
+	const BotNetVar *pVar = AgPB_FindEntityNetVar( pEdict, pszName );
+
+	if ( pBase == NULL )
+		return NETVAR_WRITE_NO_BASE;
+
+	if ( pVar == NULL )
+		return NETVAR_WRITE_NOT_FOUND;
+
+	const NetVarWriteResult result = NetVar_WriteInt( pBase, *pVar, iValue, iElement );
+
+	if ( result == NETVAR_WRITE_OK )
+		NetVar_NotifyChanged( pEdict, pVar->offset );
+
+	return result;
+}
+
+NetVarWriteResult AgPB_WriteNetVarFloat( edict_t *pEdict, const char *pszName, float flValue, int iElement )
+{
+	void *pBase = AgPB_EntityBase( pEdict );
+	const BotNetVar *pVar = AgPB_FindEntityNetVar( pEdict, pszName );
+
+	if ( pBase == NULL )
+		return NETVAR_WRITE_NO_BASE;
+
+	if ( pVar == NULL )
+		return NETVAR_WRITE_NOT_FOUND;
+
+	const NetVarWriteResult result = NetVar_WriteFloat( pBase, *pVar, flValue, iElement );
+
+	if ( result == NETVAR_WRITE_OK )
+		NetVar_NotifyChanged( pEdict, pVar->offset );
+
+	return result;
+}
+
+NetVarWriteResult AgPB_WriteNetVarVector( edict_t *pEdict, const char *pszName, const Vector &vValue )
+{
+	void *pBase = AgPB_EntityBase( pEdict );
+	const BotNetVar *pVar = AgPB_FindEntityNetVar( pEdict, pszName );
+
+	if ( pBase == NULL )
+		return NETVAR_WRITE_NO_BASE;
+
+	if ( pVar == NULL )
+		return NETVAR_WRITE_NOT_FOUND;
+
+	const NetVarWriteResult result = NetVar_WriteVector( pBase, *pVar, vValue );
+
+	if ( result == NETVAR_WRITE_OK )
+		NetVar_NotifyChanged( pEdict, pVar->offset );
+
+	return result;
+}
+
+int AgPB_ReadNetVarInt( edict_t *pEdict, const char *pszName, int iDefault )
+{
+	void *pBase = AgPB_EntityBase( pEdict );
+	const BotNetVar *pVar = AgPB_FindEntityNetVar( pEdict, pszName );
+
+	if ( pBase == NULL || pVar == NULL )
+		return iDefault;
+
+	return NetVar_GetInt( pBase, *pVar );
+}
+
+float AgPB_ReadNetVarFloat( edict_t *pEdict, const char *pszName, float flDefault )
+{
+	void *pBase = AgPB_EntityBase( pEdict );
+	const BotNetVar *pVar = AgPB_FindEntityNetVar( pEdict, pszName );
+
+	if ( pBase == NULL || pVar == NULL )
+		return flDefault;
+
+	return NetVar_GetFloat( pBase, *pVar );
+}
+
+Vector AgPB_ReadNetVarVector( edict_t *pEdict, const char *pszName )
+{
+	void *pBase = AgPB_EntityBase( pEdict );
+	const BotNetVar *pVar = AgPB_FindEntityNetVar( pEdict, pszName );
+
+	if ( pBase == NULL || pVar == NULL )
+		return Vector( 0.0f, 0.0f, 0.0f );
+
+	return NetVar_GetVector( pBase, *pVar );
 }
 
 uintp AgPB_RefEHandle( edict_t *pEdict )

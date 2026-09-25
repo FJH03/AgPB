@@ -293,29 +293,183 @@ inline bool NetVar_IsHandleSized( const BotNetVar &nv )
 }
 
 // ---------------------------------------------------------------------------
-// 写字段
+// 写字段（2026-09-25 重写）
 //
-// **只在确认过内存宽度时用** —— 网络表示 != 内存表示：
-//   - 1 字节成员（`m_lifeState` 是 char）按 4 字节写会踩到后面三个字段；
-//   - 发送时被位压缩的 int（`m_fFlags` 走 SendProxy_CropFlags、`m_iAmmo` 之类）
-//     内存宽度也未必是 4，但**多数 CBaseEntity/CBasePlayer 成员仍是 4 字节 int**；
-//   - float 类（`m_flMaxspeed`）、Vector / VectorXY 的三个 float、真数组元素
-//     （stride >= 4）都可以安全按 4 字节写。
+// 纪律：网络表示 != 内存表示，所以**写入宽度问引擎要，不猜**。
+// 口径照抄 SourceMod（core/smn_entities.cpp，SetEntProp 的 int 分支）：
 //
-// 已知可安全写的（本项目用到）：`m_vecVelocity[0..2]`、`m_flMaxspeed`、`m_fFlags`、
-// `m_nButtons`。要写别的字段前先 `agpb_netlist` 核对类型与 stride。
+//   pProp->m_nBits >= 17 -> 4 字节；>= 9 -> 2 字节；>= 2 -> 1 字节；否则 1 字节 bool
+//   同一个文件 :1706 的 SPROP_VARINT 特例 -> 恒按 4 字节
+//   同一个文件 :1837（SetEntPropFloat） -> float 恒 4 字节
+//
+// 为什么这套能对上内存 —— CS:S 自己的声明（game/server/player.cpp）：
+//   SendPropInt( SENDINFO(m_iHealth), -1, SPROP_VARINT|SPROP_CHANGES_OFTEN )  :7997 -> 写 4 字节 ✓（它是 int）
+//   SendPropInt( SENDINFO(m_lifeState), 3, SPROP_UNSIGNED )                   :7998 -> 写 1 字节 ✓（它是 char）
+//   SendPropInt( SENDINFO(m_fFlags), PLAYER_FLAG_BITS, SPROP_UNSIGNED )       :8002 -> 写 1~2 字节（高位字节本来就是 0）
+//
+// 另外两条同样来自 SourceMod 的纪律：
+//   1. 写之前校验类型与下标（它那边是 ThrowNativeError，我们这边是错误码）；
+//   2. **写完通知引擎**（HalfLife2.cpp:531 SetEdictStateChanged）—— 不通知的话，
+//      引擎手里那份「这个字段没变」的记录会让它继续用旧值。
+//      我们 SDK 里就是 CBaseEdict::StateChanged(offset)（edict.h:286），它内部会
+//      解引用 g_pSharedChangeInfo（edict.h:295），所以调用前必须先判空。
 // ---------------------------------------------------------------------------
 
-/** 按 float 写（4 字节）。 */
-inline void NetVar_WriteFloat( void *pBase, const BotNetVar &nv, float flValue )
+/** 写入结果；失败原因要在控制台里有回显，不然调试时只能猜。 */
+enum NetVarWriteResult
 {
-	*(float *)( (char *)pBase + nv.offset ) = flValue;
+	NETVAR_WRITE_OK = 0,
+	NETVAR_WRITE_NO_BASE,   // 实体基址为空（实体无效 / 没有 CBaseEntity）
+	NETVAR_WRITE_NOT_FOUND, // 字段不存在（名字写错，或该字段不在网络表里）
+	NETVAR_WRITE_TYPE,      // 字段类型不是要写的那种（例如往 float 字段写 int）
+	NETVAR_WRITE_ELEMENT,   // 非数组却给了下标 / 下标越界 / stride 不合法
+	NETVAR_WRITE_VECTORXY,  // VectorXY 只有两个 float，不能按 Vector 写
+};
+
+const char *NetVarWriteResultName( NetVarWriteResult result );
+
+/** 由网络位宽推出"内存里按几字节写"：1 / 2 / 4。 */
+inline int NetVar_WriteWidth( const BotNetVar &nv )
+{
+	if ( nv.pProp == NULL )
+		return 4;
+
+	// SPROP_VARINT：网络上是变长编码，内存里仍是完整 int（smn_entities.cpp:1706 同样处理）
+	if ( ( nv.pProp->GetFlags() & SPROP_VARINT ) != 0 )
+		return 4;
+
+	const int iBits = nv.pProp->m_nBits;
+
+	if ( iBits >= 17 )
+		return 4;
+	if ( iBits >= 9 )
+		return 2;
+	if ( iBits >= 1 )
+		return 1;      // 1 位 bool 在内存里也是 1 字节
+
+	return 4;          // 引擎没给位宽 -> 按 4 字节（SourceMod 的默认口径）
 }
 
-/** 按 int 写（4 字节）。 */
-inline void NetVar_WriteInt( void *pBase, const BotNetVar &nv, int iValue )
+inline bool NetVar_CanWriteInt( const BotNetVar &nv )
 {
-	*(int *)( (char *)pBase + nv.offset ) = iValue;
+	return ( nv.type == DPT_Int ) || ( nv.type == DPT_Array && nv.elementType == DPT_Int );
+}
+
+inline bool NetVar_CanWriteFloat( const BotNetVar &nv )
+{
+	return ( nv.type == DPT_Float ) || ( nv.type == DPT_Array && nv.elementType == DPT_Float );
+}
+
+/**
+ * 取写入地址：标量只接受 element 0；数组要 stride > 0 且 0 <= element < elements。
+ * 失败返回 NULL。
+ */
+inline char *NetVar_WriteAddress( void *pBase, const BotNetVar &nv, int iElement )
+{
+	if ( pBase == NULL )
+		return NULL;
+
+	char *p = (char *)pBase + nv.offset;
+
+	if ( nv.type == DPT_Array )
+	{
+		if ( nv.stride <= 0 || iElement < 0 || iElement >= nv.elements )
+			return NULL;
+
+		return p + nv.stride * iElement;
+	}
+
+	return ( iElement == 0 ) ? p : NULL;
+}
+
+/** int 写入：宽度由 pProp->m_nBits 决定（1 / 2 / 4 字节）。 */
+inline NetVarWriteResult NetVar_WriteInt( void *pBase, const BotNetVar &nv, int iValue, int iElement = 0 )
+{
+	if ( pBase == NULL )
+		return NETVAR_WRITE_NO_BASE;
+
+	if ( !NetVar_CanWriteInt( nv ) )
+		return NETVAR_WRITE_TYPE;
+
+	char *p = NetVar_WriteAddress( pBase, nv, iElement );
+	if ( p == NULL )
+		return NETVAR_WRITE_ELEMENT;
+
+	switch ( NetVar_WriteWidth( nv ) )
+	{
+		case 2:  *(int16 *)p = (int16)iValue; break;
+		case 1:  *(int8 *)p  = (int8)iValue;  break;
+		default: *(int32 *)p = (int32)iValue; break;
+	}
+
+	return NETVAR_WRITE_OK;
+}
+
+/** float 写入：恒 4 字节（smn_entities.cpp:1837 同样的处理）。 */
+inline NetVarWriteResult NetVar_WriteFloat( void *pBase, const BotNetVar &nv, float flValue, int iElement = 0 )
+{
+	if ( pBase == NULL )
+		return NETVAR_WRITE_NO_BASE;
+
+	if ( !NetVar_CanWriteFloat( nv ) )
+		return NETVAR_WRITE_TYPE;
+
+	char *p = NetVar_WriteAddress( pBase, nv, iElement );
+	if ( p == NULL )
+		return NETVAR_WRITE_ELEMENT;
+
+	*(float *)p = flValue;
+
+	return NETVAR_WRITE_OK;
+}
+
+/**
+ * 整条 Vector 写入（内存里就是 3 个连续 float）。
+ * VectorXY 只有 x/y 两个 float，按 Vector 写会踩到下一个字段，所以直接拒绝。
+ */
+inline NetVarWriteResult NetVar_WriteVector( void *pBase, const BotNetVar &nv, const Vector &vValue )
+{
+	if ( pBase == NULL )
+		return NETVAR_WRITE_NO_BASE;
+
+	if ( nv.type == DPT_VectorXY )
+		return NETVAR_WRITE_VECTORXY;
+
+	if ( nv.type != DPT_Vector )
+		return NETVAR_WRITE_TYPE;
+
+	*(Vector *)( (char *)pBase + nv.offset ) = vValue;
+
+	return NETVAR_WRITE_OK;
+}
+
+/**
+ * 告诉引擎"这个实体有字段被我改过了"。
+ *
+ * 等价于 SourceMod 的 SetEdictStateChanged（HalfLife2.cpp:531），但只能用它的
+ * **兜底分支**：那边的首选路径 `pEdict->StateChanged(offset)`（逐字段记账）内部要
+ *   ① 解引用 g_pSharedChangeInfo，② 调 CBaseEdict::GetChangeAccessor()
+ * 这两个都是 server.dll 里的实现 —— 插件链接不到它们（实测就是
+ * `LNK2019: 无法解析的外部符号 g_pSharedChangeInfo / CBaseEdict::GetChangeAccessor`）。
+ * 要逐字段记账就得动态解析引擎符号或链接 server.dll，两条都违反本项目
+ * "只依赖公开接口、不链接 server.dll"的原则，所以不做。
+ *
+ * 这里用的 `m_fStateFlags |= FL_EDICT_CHANGED` 正是 SourceMod 在
+ * g_pSharedChangeInfo == NULL 时走的那一条（HalfLife2.cpp:548），
+ * 纯 inline，无外部依赖。代价是粒度粗一点（引擎按"这个实体变了"处理，
+ * 而不是"这个实体的这个字段变了"）；对一个 bot 来说可以忽略。
+ *
+ * offset 保留在签名里：命令回显要用它说明"改的是哪个偏移"，将来若真需要
+ * 逐字段版，再在这里换成动态解析的 accessor 实现。
+ */
+inline void NetVar_NotifyChanged( edict_t *pEdict, int offset )
+{
+	(void)offset;
+
+	if ( pEdict == NULL || pEdict->IsFree() )
+		return;
+
+	pEdict->m_fStateFlags |= FL_EDICT_CHANGED;
 }
 
 /**

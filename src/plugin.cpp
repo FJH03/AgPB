@@ -196,38 +196,104 @@ static bool ContainsNoCase( const char *haystack, const char *needle )
 }
 
 /**
- * agpb_netlist <idx> [name-filter]
+ * 命令目标的两种写法（agpb_netlist / agpb_netwrite 共用）：
+ *   <bot-idx>              —— bot 列表下标（agpb_list）
+ *   ent <edict-idx>        —— 任意实体的 edict 下标（agpb_ents）
+ */
+struct CmdTargetInfo
+{
+	edict_t *pEdict;
+	char     szName[96];
+	int      iArgBase;    // 字段名所在的参数下标
+};
+
+/** 解析失败时自己打印原因并返回 false。 */
+static bool ResolveCmdTarget( const CCommand &args, CmdTargetInfo &out )
+{
+	out.pEdict = NULL;
+	out.szName[0] = '\0';
+	out.iArgBase = 1;
+
+	const bool bEntTarget = ( args.ArgC() >= 2 ) && ( V_stricmp( args.Arg( 1 ), "ent" ) == 0 );
+
+	if ( bEntTarget )
+	{
+		if ( args.ArgC() < 3 )
+		{
+			META_CONPRINTF( "[AgPB] usage: ... ent <edict-idx> ...   (edict list: agpb_ents)\n" );
+			return false;
+		}
+
+		const int iEdict = V_atoi( args.Arg( 2 ) );
+		edict_t *pEdict = ( engine != NULL ) ? engine->PEntityOfEntIndex( iEdict ) : NULL;
+
+		if ( pEdict == NULL || pEdict->IsFree() )
+		{
+			META_CONPRINTF( "[AgPB] no entity at edict index %d (see agpb_ents)\n", iEdict );
+			return false;
+		}
+
+		const char *pszClass = AgPB_EntityClassName( pEdict );
+
+		out.pEdict = pEdict;
+		out.iArgBase = 3;
+		Q_snprintf( out.szName, sizeof( out.szName ), "edict[%d] %s",
+		            iEdict, ( pszClass != NULL ) ? pszClass : "?" );
+		return true;
+	}
+
+	CAgPB *pBot = g_Bots.Get( V_atoi( args.Arg( 1 ) ) );
+
+	if ( pBot == NULL )
+	{
+		META_CONPRINTF( "[AgPB] invalid list index: %s\n", args.Arg( 1 ) );
+		return false;
+	}
+
+	out.pEdict = pBot->Edict();
+	out.iArgBase = 2;
+	Q_snprintf( out.szName, sizeof( out.szName ), "%s", pBot->Name() );
+	return true;
+}
+
+/**
+ * agpb_netlist <bot-idx> [name-filter]
+ * agpb_netlist ent <edict-idx> [name-filter]
  *
- * 把某个 bot 的 ServerClass 展开成 (名字, 偏移, 类型) 列表并打印当前值。
+ * 把某个实体的 ServerClass 展开成 (名字, 偏移, 类型) 列表并打印当前值。
  * 这是 M2 反射层的验证工具，也是移植 EBot Entity 层时查字段名的字典。
+ *
+ * **能不能写某个字段，唯一可靠的判断方式就是看这张表** —— 它列的是 SendTable
+ * （= 网络字段）。非网络字段（例如非玩家实体上的 `m_vecVelocity`）这里根本没有，
+ * `agpb_netwrite` 也会回 `field not found`（见 ARCHIVE §6）。
  */
 static void Cmd_NetList( const CCommand &args )
 {
 	if ( args.ArgC() < 2 )
 	{
-		META_CONPRINTF( "[AgPB] usage: agpb_netlist <idx> [name-filter]\n" );
+		META_CONPRINTF( "[AgPB] usage: agpb_netlist <bot-idx> [name-filter]\n" );
+		META_CONPRINTF( "[AgPB]        agpb_netlist ent <edict-idx> [name-filter]\n" );
 		return;
 	}
 
-	CAgPB *pBot = g_Bots.Get( V_atoi( args.Arg( 1 ) ) );
-	if ( pBot == NULL )
-	{
-		META_CONPRINTF( "[AgPB] invalid list index: %s\n", args.Arg( 1 ) );
-		return;
-	}
+	CmdTargetInfo target;
 
-	const CNetVarTable *pTable = pBot->NetVarTable();
+	if ( !ResolveCmdTarget( args, target ) )
+		return;
+
+	const CNetVarTable *pTable = AgPB_EntityNetVarTable( target.pEdict );
+
 	if ( pTable == NULL )
 	{
-		META_CONPRINTF( "[AgPB] no SendTable for bot %s\n", pBot->Name() );
+		META_CONPRINTF( "[AgPB] no SendTable for %s\n", target.szName );
 		return;
 	}
 
-	const char *pFilter = ( args.ArgC() >= 3 ) ? args.Arg( 2 ) : NULL;
-	void *pBase = pBot->NetVarBase();
+	const char *pFilter = ( args.ArgC() > target.iArgBase ) ? args.Arg( target.iArgBase ) : NULL;
+	void *pBase = AgPB_EntityBase( target.pEdict );
 
 	META_CONPRINTF( "[AgPB] %s class=%s props=%d base=%p filter=%s\n",
-	                pBot->Name(), pTable->ClassName(), pTable->Count(), pBase,
+	                target.szName, pTable->ClassName(), pTable->Count(), pBase,
 	                ( pFilter != NULL ) ? pFilter : "(none)" );
 
 	if ( pBase == NULL )
@@ -420,6 +486,298 @@ static void Cmd_NetHandle( const CCommand &args )
 	}
 
 	META_CONPRINTF( "  scan of %d edicts done, %d match(es)\n", maxEnts, matches );
+}
+
+// ---------------------------------------------------------------------------
+// agpb_netwrite <bot-idx> <field> <value> [element]
+// agpb_netwrite ent <edict-idx> <field> <value> [element]
+//
+// 开发用：按 SourceMod 的口径写一个网络字段 —— 宽度取 SendProp 的位宽
+// （SPROP_VARINT 按 4 字节），写完调 CBaseEdict::StateChanged 通知引擎。
+//
+// 目标可以是 bot（列表下标），也可以是**任意实体**（edict 下标，用 agpb_ents 查）——
+// EBot 的 ssm 写的就是别的实体：手雷的 velocity（`ssm/throw*.cpp`）、
+// 箱子的 health（`ssm/destroybreakable.cpp:18`）。
+//
+// 为什么要打印"邻字段对照"：写错宽度会踩坏邻居字段（ARCHIVE §6），
+// 而这种错在游戏里的表现是"某个不相干的数值自己变了"，极难查。
+// 这里把目标字段 ±8 字节内的字段在写前 / 写后各读一遍，谁被踩了一眼可见。
+// ---------------------------------------------------------------------------
+
+// 注意：Q_snprintf（= V_snprintf）的长度参数是 int，所以这里一律用 int，
+// 免得 size_t 转 int 的 C4267 警告把编译输出刷花。
+static void DescribeNetVar( void *pBase, const BotNetVar &nv, char *pszOut, int nMaxLen )
+{
+	switch ( nv.type )
+	{
+		case DPT_Float:
+			Q_snprintf( pszOut, nMaxLen, "%s +%d float=%.4f",
+			            nv.name, nv.offset, NetVar_GetFloat( pBase, nv ) );
+			break;
+
+		case DPT_Vector:
+		{
+			const Vector v = NetVar_GetVector( pBase, nv );
+			Q_snprintf( pszOut, nMaxLen, "%s +%d vec=(%.2f %.2f %.2f)",
+			            nv.name, nv.offset, v.x, v.y, v.z );
+			break;
+		}
+
+		case DPT_VectorXY:
+		{
+			// 只读两个 float：VectorXY 后面紧跟别的字段，按 Vector 读会多读 4 字节
+			const float *p = (const float *)( (const char *)pBase + nv.offset );
+			Q_snprintf( pszOut, nMaxLen, "%s +%d vec2=(%.2f %.2f)",
+			            nv.name, nv.offset, p[0], p[1] );
+			break;
+		}
+
+		case DPT_String:
+			// 不按指针解引用（char* 布局会崩服务端），只报位置
+			Q_snprintf( pszOut, nMaxLen, "%s +%d string", nv.name, nv.offset );
+			break;
+
+		case DPT_Array:
+			Q_snprintf( pszOut, nMaxLen, "%s +%d array[%d x %d]",
+			            nv.name, nv.offset, nv.elements, nv.stride );
+			break;
+
+		default:
+			Q_snprintf( pszOut, nMaxLen, "%s +%d int=%d",
+			            nv.name, nv.offset, NetVar_GetInt( pBase, nv ) );
+			break;
+	}
+}
+
+/** 目标字段 ±8 字节内的其它字段（写前 / 写后各来一份对照）。 */
+static void BuildNeighbourDump( const CNetVarTable *pTable, void *pBase,
+                                const BotNetVar &nv, char *pszOut, int nMaxLen )
+{
+	int used = 0;
+	pszOut[0] = '\0';
+
+	for ( int i = 0; i < pTable->Count(); ++i )
+	{
+		const BotNetVar &other = pTable->Prop( i );
+
+		if ( V_strcmp( other.name, nv.name ) == 0 )
+			continue;
+
+		const int delta = other.offset - nv.offset;
+
+		if ( delta < -8 || delta > 8 )
+			continue;
+
+		if ( used + 1 >= nMaxLen )
+			break;
+
+		char buf[160];
+		DescribeNetVar( pBase, other, buf, (int)sizeof( buf ) );
+
+		if ( used != 0 && used + 3 < nMaxLen )
+			used += Q_snprintf( pszOut + used, nMaxLen - used, " | " );
+
+		used += Q_snprintf( pszOut + used, nMaxLen - used, "%s", buf );
+	}
+}
+
+/**
+ * agpb_ents [class-filter]
+ *
+ * 列出世界里的实体（edict 下标 / 类名 / 血量 / 坐标），用来给
+ * `agpb_netwrite ent <idx> ...` 找目标 —— 想写手雷的速度、箱子的血量，
+ * 先得知道那个实体的 edict 下标。
+ *
+ * 输出上限 60 行，过滤用类名子串（例如 `agpb_ents grenade` / `agpb_ents weapon`）。
+ */
+static void Cmd_Ents( const CCommand &args )
+{
+	if ( engine == NULL || gpGlobals == NULL )
+	{
+		META_CONPRINTF( "[AgPB] engine globals unavailable\n" );
+		return;
+	}
+
+	const char *pFilter = ( args.ArgC() >= 2 ) ? args.Arg( 1 ) : NULL;
+	const int maxEnts = ( gpGlobals->maxEntities < MAX_EDICTS ) ? gpGlobals->maxEntities : MAX_EDICTS;
+	int printed = 0;
+
+	META_CONPRINTF( "[AgPB] entities matching '%s' (max %d edicts):\n",
+	                ( pFilter != NULL ) ? pFilter : "*", maxEnts );
+
+	for ( int i = 0; i < maxEnts; ++i )
+	{
+		edict_t *pEdict = engine->PEntityOfEntIndex( i );
+
+		if ( pEdict == NULL || pEdict->IsFree() )
+			continue;
+
+		const char *pszClass = AgPB_EntityClassName( pEdict );
+
+		if ( pszClass == NULL )
+			continue;
+
+		if ( pFilter != NULL && !ContainsNoCase( pszClass, pFilter ) )
+			continue;
+
+		const Vector vOrigin = AgPB_ReadNetVarVector( pEdict, "m_vecOrigin" );
+		const int iHealth = AgPB_ReadNetVarInt( pEdict, "m_iHealth", -1 );
+
+		META_CONPRINTF( "  [%4d] %-30s hp=%-4d pos=%.0f,%.0f,%.0f\n",
+		                i, pszClass, iHealth, vOrigin.x, vOrigin.y, vOrigin.z );
+
+		if ( ++printed >= 60 )
+		{
+			META_CONPRINTF( "  ... truncated, narrow it down with a class filter\n" );
+			break;
+		}
+	}
+
+	META_CONPRINTF( "[AgPB] %d entit(ies) listed\n", printed );
+}
+
+static void Cmd_NetWrite( const CCommand &args )
+{
+	if ( args.ArgC() < 4 )
+	{
+		META_CONPRINTF( "[AgPB] usage: agpb_netwrite <bot-idx> <field> <value> [element]\n" );
+		META_CONPRINTF( "[AgPB]        agpb_netwrite ent <edict-idx> <field> <value> [element]   (edict: agpb_ents)\n" );
+		META_CONPRINTF( "[AgPB]        vec3 field: ... <field> <x> <y> <z>\n" );
+		return;
+	}
+
+	CmdTargetInfo target;
+
+	if ( !ResolveCmdTarget( args, target ) )
+		return;
+
+	const int iFieldArg   = target.iArgBase;
+	const int iValueArg   = iFieldArg + 1;
+	const int iElementArg = iFieldArg + 2;
+
+	if ( args.ArgC() <= iValueArg )
+	{
+		META_CONPRINTF( "[AgPB] %s needs a value: <field> <value> [element]\n", target.szName );
+		return;
+	}
+
+	const CNetVarTable *pTable = AgPB_EntityNetVarTable( target.pEdict );
+	const BotNetVar *pVar = AgPB_FindEntityNetVar( target.pEdict, args.Arg( iFieldArg ) );
+	void *pBase = AgPB_EntityBase( target.pEdict );
+
+	if ( pVar == NULL || pTable == NULL )
+	{
+		META_CONPRINTF( "[AgPB] field '%s' not found (class=%s, props=%d)\n",
+		                args.Arg( iFieldArg ),
+		                ( pTable != NULL ) ? pTable->ClassName() : "?",
+		                ( pTable != NULL ) ? pTable->Count() : 0 );
+		META_CONPRINTF( "[AgPB]   note: only SendTable (networked) fields can be written; see agpb_netlist for the list\n" );
+		return;
+	}
+
+	if ( pBase == NULL )
+	{
+		META_CONPRINTF( "[AgPB] entity base pointer unavailable\n" );
+		return;
+	}
+
+	const int iElement = ( args.ArgC() > iElementArg ) ? V_atoi( args.Arg( iElementArg ) ) : 0;
+	const bool bVector = ( pVar->type == DPT_Vector );
+	const bool bFloat = NetVar_CanWriteFloat( *pVar );
+
+	if ( bVector )
+	{
+		// 写之前先把"这一下会动几个字节"摆出来：宽度是引擎给的，不是我猜的
+		META_CONPRINTF( "[AgPB] %s %s offset=+%d type=vec3 -> write 12 bytes (3 floats)\n",
+		                target.szName, pVar->name, pVar->offset );
+	}
+	else
+	{
+		META_CONPRINTF( "[AgPB] %s %s offset=+%d type=%s elems=%d stride=%d bits=%d varint=%s -> width %d\n",
+		                target.szName, pVar->name, pVar->offset, NetVarTypeName( pVar->type ),
+		                pVar->elements, pVar->stride,
+		                ( pVar->pProp != NULL ) ? pVar->pProp->m_nBits : -1,
+		                ( pVar->pProp != NULL && ( pVar->pProp->GetFlags() & SPROP_VARINT ) != 0 ) ? "yes" : "no",
+		                bFloat ? 4 : NetVar_WriteWidth( *pVar ) );
+	}
+
+	if ( !bVector && pVar->type != DPT_Array && args.ArgC() > iElementArg )
+	{
+		META_CONPRINTF( "[AgPB] note: %s is not an array, element %d will be rejected\n",
+		                pVar->name, iElement );
+	}
+
+	char szBefore[512];
+	char szAfter[512];
+
+	BuildNeighbourDump( pTable, pBase, *pVar, szBefore, (int)sizeof( szBefore ) );
+
+	NetVarWriteResult result;
+
+	if ( bVector )
+	{
+		if ( args.ArgC() <= iValueArg + 2 )
+		{
+			META_CONPRINTF( "[AgPB] %s is a vec3 field: give three numbers <x> <y> <z>\n", pVar->name );
+			return;
+		}
+
+		const Vector v( V_atof( args.Arg( iValueArg ) ),
+		                V_atof( args.Arg( iValueArg + 1 ) ),
+		                V_atof( args.Arg( iValueArg + 2 ) ) );
+
+		result = AgPB_WriteNetVarVector( target.pEdict, pVar->name, v );
+	}
+	else if ( bFloat )
+	{
+		result = AgPB_WriteNetVarFloat( target.pEdict, pVar->name, V_atof( args.Arg( iValueArg ) ), iElement );
+	}
+	else
+	{
+		result = AgPB_WriteNetVarInt( target.pEdict, pVar->name, V_atoi( args.Arg( iValueArg ) ), iElement );
+	}
+
+	if ( result != NETVAR_WRITE_OK )
+	{
+		META_CONPRINTF( "[AgPB] write refused: %s\n", NetVarWriteResultName( result ) );
+		return;
+	}
+
+	char szValue[128];
+
+	if ( pVar->type == DPT_Array && pVar->elementType == DPT_Float )
+	{
+		Q_snprintf( szValue, sizeof( szValue ), "[%d] = %.4f",
+		            iElement, NetVar_GetArrayFloat( pBase, *pVar, iElement ) );
+	}
+	else if ( pVar->type == DPT_Array )
+	{
+		Q_snprintf( szValue, sizeof( szValue ), "[%d] = %d",
+		            iElement, NetVar_GetArrayInt( pBase, *pVar, iElement ) );
+	}
+	else if ( pVar->type == DPT_Float )
+	{
+		Q_snprintf( szValue, sizeof( szValue ), "= %.4f", NetVar_GetFloat( pBase, *pVar ) );
+	}
+	else if ( pVar->type == DPT_Vector )
+	{
+		const Vector v = NetVar_GetVector( pBase, *pVar );
+		Q_snprintf( szValue, sizeof( szValue ), "= %.2f %.2f %.2f", v.x, v.y, v.z );
+	}
+	else
+	{
+		Q_snprintf( szValue, sizeof( szValue ), "= %d (via engine proxy)",
+		            NetVar_GetInt( pBase, *pVar ) );
+	}
+
+	BuildNeighbourDump( pTable, pBase, *pVar, szAfter, (int)sizeof( szAfter ) );
+
+	META_CONPRINTF( "[AgPB] changed=%s (engine notified at offset %d)\n", pVar->name, pVar->offset );
+	META_CONPRINTF( "[AgPB] readback %s %s\n", pVar->name, szValue );
+	META_CONPRINTF( "[AgPB] neighbours before: %s\n",
+	                ( szBefore[0] != '\0' ) ? szBefore : "(none within +-8 bytes)" );
+	META_CONPRINTF( "[AgPB] neighbours after : %s\n",
+	                ( szAfter[0] != '\0' ) ? szAfter : "(none within +-8 bytes)" );
 }
 
 // ---------------------------------------------------------------------------
@@ -919,9 +1277,13 @@ static ConCommand agpb_list_cmd( "agpb_list", Cmd_List,
 static ConCommand agpb_team_cmd( "agpb_team", Cmd_SetTeam,
                                  "Switch a bot's team: agpb_team <idx> <1=spec|2=T|3=CT>", FCVAR_GAMEDLL );
 static ConCommand agpb_netlist_cmd( "agpb_netlist", Cmd_NetList,
-                                 "Dump a bot's netvar table: agpb_netlist <idx> [name-filter]", FCVAR_GAMEDLL );
+                                 "Dump a netvar table: agpb_netlist <bot-idx|ent <edict>> [name-filter]", FCVAR_GAMEDLL );
 static ConCommand agpb_nethandle_cmd( "agpb_nethandle", Cmd_NetHandle,
                                  "Resolve an EHANDLE field: agpb_nethandle <idx> <field-name>", FCVAR_GAMEDLL );
+static ConCommand agpb_netwrite_cmd( "agpb_netwrite", Cmd_NetWrite,
+                                 "DEV: write a netvar field (width from the SendProp bit count): agpb_netwrite <bot-idx|ent <edict>> <field> <value> [element]", FCVAR_GAMEDLL );
+static ConCommand agpb_ents_cmd( "agpb_ents", Cmd_Ents,
+                                 "List world entities (edict index / class / hp / pos): agpb_ents [class-filter]", FCVAR_GAMEDLL );
 static ConCommand agpb_wp_add_cmd( "agpb_wp_add", Cmd_WpAdd,
                                  "Add a waypoint: agpb_wp_add [x y z]  (default: your position)", FCVAR_GAMEDLL );
 static ConCommand agpb_wp_del_cmd( "agpb_wp_del", Cmd_WpDel,

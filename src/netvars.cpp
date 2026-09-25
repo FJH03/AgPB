@@ -260,3 +260,22 @@ void CNetVarRegistry::Clear()
 
 	m_Tables.RemoveAll();
 }
+
+// ---------------------------------------------------------------------------
+// 写入结果的名字（控制台回显用）
+// ---------------------------------------------------------------------------
+
+const char *NetVarWriteResultName( NetVarWriteResult result )
+{
+	switch ( result )
+	{
+		case NETVAR_WRITE_OK:        return "ok";
+		case NETVAR_WRITE_NO_BASE:   return "no entity base pointer";
+		case NETVAR_WRITE_NOT_FOUND: return "field not found in this entity's SendTable";
+		case NETVAR_WRITE_TYPE:      return "field type mismatch";
+		case NETVAR_WRITE_ELEMENT:   return "bad element index (not an array, or out of range)";
+		case NETVAR_WRITE_VECTORXY:  return "VectorXY holds only x/y, refusing to write 3 floats";
+	}
+
+	return "unknown";
+}
