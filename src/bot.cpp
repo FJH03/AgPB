@@ -22,7 +22,7 @@ extern CGlobalVars *gpGlobals;
 // 最小导航的参数
 // ---------------------------------------------------------------------------
 
-// USP 跑速上限（ARCHIVE §10 实测：forwardmove=400 时 m_vecVelocity[1] 顶到 250）
+// USP 跑速上限（实测：forwardmove=400 时 m_vecVelocity[1] 顶到 250，见 PROGRESS.md 问题 6）
 #define AgPB_WALK_SPEED      250.0f
 
 // 到达判定的两根时间轴（EBot navigate.cpp:643-690 的简化版）：
@@ -438,7 +438,7 @@ void CAgPB::UpdateRoute( CGlobalVars *pGlobals, CBotCmd &cmd )
 		return;
 	}
 
-	// 朝下一个点转（视角会跟随 CUserCmd，ARCHIVE §10 已实测）
+	// 朝下一个点转（视角会跟随 CUserCmd，已实测，见 PROGRESS.md 问题 6）
 	QAngle angTo;
 	VectorAngles( vDelta, angTo );
 	cmd.viewangles.y = angTo.y;

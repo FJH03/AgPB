@@ -265,7 +265,7 @@ static bool ResolveCmdTarget( const CCommand &args, CmdTargetInfo &out )
  *
  * **能不能写某个字段，唯一可靠的判断方式就是看这张表** —— 它列的是 SendTable
  * （= 网络字段）。非网络字段（例如非玩家实体上的 `m_vecVelocity`）这里根本没有，
- * `agpb_netwrite` 也会回 `field not found`（见 ARCHIVE §6）。
+ * `agpb_netwrite` 也会回 `field not found`（见 PROGRESS.md 的坑：netvar 只能碰 SendTable 里有的字段）。
  */
 static void Cmd_NetList( const CCommand &args )
 {
@@ -499,7 +499,7 @@ static void Cmd_NetHandle( const CCommand &args )
 // EBot 的 ssm 写的就是别的实体：手雷的 velocity（`ssm/throw*.cpp`）、
 // 箱子的 health（`ssm/destroybreakable.cpp:18`）。
 //
-// 为什么要打印"邻字段对照"：写错宽度会踩坏邻居字段（ARCHIVE §6），
+// 为什么要打印"邻字段对照"：写错宽度会踩坏邻居字段（见 PROGRESS.md 的坑），
 // 而这种错在游戏里的表现是"某个不相干的数值自己变了"，极难查。
 // 这里把目标字段 ±8 字节内的字段在写前 / 写后各读一遍，谁被踩了一眼可见。
 // ---------------------------------------------------------------------------

@@ -184,7 +184,7 @@ void AgPB_RefreshHost()
 
 	ed.vHostOrigin = pInfo->GetAbsOrigin();
 
-	// 视角优先读 m_angEyeAngles[0..1]（ARCHIVE 实测 +6984/+6988 跟随 CUserCmd），
+	// 视角优先读 m_angEyeAngles[0..1]（实测 +6984/+6988，跟随 CUserCmd），
 	// 读不到才退回 GetAbsAngles()（那是身体朝向，不是视线）。
 	QAngle angView = pInfo->GetAbsAngles();
 	Vector vViewOfs( 0.0f, 0.0f, 64.0f );
@@ -656,7 +656,7 @@ void AgPB_EditToggleNoclip( edict_t *pClient )
 	}
 
 	// noclip 是服务端命令：用 IServerPluginHelpers 在服务端本地执行，
-	// 不用 IVEngineServer::ClientCommand（那是 stuffcmd，见 ARCHIVE §3.2）。
+	// 不用 IVEngineServer::ClientCommand（那是 stuffcmd，见 PROGRESS.md 问题 2）。
 	if ( helpers != NULL )
 		helpers->ClientCommand( pHost, "noclip" );
 
