@@ -26,8 +26,8 @@ SDK 静态库必须先编好：`hl2sdk-css\source-engine-czero\build\{tier0,vstd
 ## 构建与部署
 
 命令模板、包目录、部署步骤、红线都在 [`AGENTS.md`](AGENTS.md) §2，这里不重复。
-一句话版本：`ambuild` 一条命令，产出 `build\package\addons\...`（SourceMod 目录约定，
-不压 zip），整个覆盖到游戏的 `cstrike\addons\` 即完成部署。
+一句话版本：`ambuild` 产出 `build\package\addons\...`（SourceMod 目录约定，不压 zip），
+构建命令最后一条 `xcopy` 把它覆盖到 [`AGENTS.md`](AGENTS.md) §2 写的目标目录。
 
 ## 文档
 

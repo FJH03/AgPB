@@ -12,8 +12,13 @@
   几何体检（可达性、要不要跳）/ wayzone 自动到达半径。
 - 编辑器可用：HUD 中文数字菜单 + `agpb_wp_*` 命令 + 叠加层绘制（EBot 配色，上服实测）。
 - 最小导航可用：`agpb_bot_goto` 沿路点转向 / 前进、按边起跳、按点蹲行、卡住就停。
-- 打包可用：`ambuild` 直接产出 SourceMod 目录约定的 `build/package/addons/...`
-  （`PackageScript`），拷进 `cstrike/` 即完成部署；不压 zip。
+- 打包 / 部署可用：`ambuild` 产出 SourceMod 目录约定的 `build/package/addons/...`
+  （`PackageScript`，不压 zip）；构建命令最后用 `xcopy` 覆盖到游戏 mod 目录
+  （部署目标在 AGENTS.md §2，单一出处，改一行即可）。
+- 模式开关：`agpb_mode`（normal / zombie）已落地（运行期、按图手动切，菜单显示当前模式）；
+  **僵尸模式行为未实现**。
+- 工具：`tools\agpw_view.py`（+ `.bat`）只读查看 `.agpw` 路点图 —— 图论力导向布局、
+  单向/双向边、边 flag 着色、点选节点看出入边；默认打开 deploy 配置指向的游戏目录。
 - 没做：EBot 替身层（`Entity` / `Client` / `Engine`）、真正的 `navigate` / `control` / `combat`、
   UDP 桥、LLM 战术层。
 - 已知问题：freezetime 时 bot 独占一队会触发 `Radio()` 崩溃（**未修**，见
@@ -87,6 +92,7 @@
 | `src/wpdraw.*` | 叠加层绘制（EBot 配色） |
 | `addons/AgPB/waypoints/<map>.agpw` | 每张图的路点数据（换图自动读盘） |
 | `PackageScript` | AMBuild 打包脚本：组装 `build/package/addons/`（纯 ASCII） |
+| `tools/agpw_view.py` | 只读路点图查看器（图论布局 / 单向双向 / flag 着色） |
 
 ## 已定决策（摘要）
 
@@ -97,7 +103,8 @@
   同名文件 diff 着看，僵尸专用分支直接砍。
 - netvar 走 SendTable（零特征码）；寻路用手工路点图 + 单源 Dijkstra；不做自动连线。
 - 菜单用 `ShowMenu` usermessage，中文；控制台英文。
-- 尺寸 / 跳跃高度取 CS:S 源码并运行期判定（站立 62、蹲姿 45 或 72/54；跳 57、蹲跳 42）。
+- 尺寸 / 跳跃高度取 CS:S 源码：csczs 运行期判定（跟随 `sv_cs_use_legacy_viewvectors`，
+  站立 62 / 蹲姿 45 或 72/54），css / csgo 编译期固定各自规格；跳 57、蹲跳 42。
 - 替身层的 `entvars_t` 走访存属性（代理类型），不再走影子结构方案。
 - 许可证 GPL-3.0（要移植 EBot / SyPB 的代码）。
 
@@ -109,6 +116,52 @@ EBot 版逐个 diff，取它更新的实现（异步寻路、符号版本化等�
 
 - EBot 独有：`ssm/`（战斗状态机：投雷 / 致盲 / 破门 / 用按钮…）、`clib`、`bot_query_hook*`、`tinythread`
 - SyPB 独有：`Experience`（经验 / 技能）、`chatlib`（聊天）—— 我们用不上
+
+### 路点系统对照（SyPB / CS-EBOT / AgPB）
+
+| 维度 | SyPB | CS-EBOT | AgPB（已落地） |
+|---|---|---|---|
+| 数据模型 | `Path` 带 camp 矩形 / `connectionVelocity[8]` / `distances[8]` / 可见性数据；上限 **1024** | 精简 `Path`（+ `mesh` / `gravity`）；上限 **8192** | 照 EBot 精简版；私有 `.agpw`（magic + version，逐字段读写） |
+| 距离 | 1024² int 矩阵 + `.pmt` 缓存 | 8192² int16 矩阵（128MB，多线程算，可关） | **无矩阵**；单源 Dijkstra（`ComputeDistances`） |
+| 寻路 | `navigate.cpp` 堆 + 矩阵查距 | `async_pathfinder` 异步线程 | 帧内同步 A*（二叉堆，欧氏启发式） |
+| 可见性 | **预计算**（`InitializeVisibility` / `IsVisible` / `IsDuckVisible`） | 按需 trace | 按需 trace（`AgPB_Trace*`） |
+| 自动打点 | `CreateBasic` + 下载现成 `.pwf` + XML 导出 | 分析器 / 优化器全家桶 + 空间桶（`AddToBucket`） | 未做（纯手工打点） |
+| 原生模式目标逻辑 | **炸弹 / 人质 / goal 分数**（`GetBombPoint` / `SetGoalVisited` / `AddGoalScore`） | 无（僵尸模式用不上） | 未做（只有 flag，没有逻辑） |
+| 僵尸专用 | 少（`ZMHMCAMP`） | 多（`ZOMBIEONLY` / `HUMANONLY` / `ZOMBIEPUSH` / `HELICOPTER`…） | 不需要 |
+| 几何体检 | `IsNodeReachable` / `Reachable` | 另加 `MustJump` / `CheckCrouchRequirement` | `MustJump` / `IsNodeReachable` / `Reachable`（EBot 版） |
+| 文件 | `.pwf`（`PODWAY!` v7） | `.pwf`（`EBOTWP!`，兼容旧版 125/126） | `.agpw`（不兼容两边，刻意） |
+
+结论：底座照 EBot（精简模型 + 几何 + 到达判定 + 单向边），距离矩阵按我们自己的决策改成 Dijkstra；
+**原生模式要补的目标逻辑（炸弹/人质/GOAL 分数）只在 SyPB 里有**，EBot 对应位置是空的。
+
+## 双模式支持方案（普通 / ZM-ZE，草案）
+
+目标：同一个 AgPB 同时服务 SyPB 血统的**普通模式**和 EBot 血统的 **ZM/ZE**，
+不搞两套代码、不搞两套路点格式。
+
+两个正交的轴：
+
+- **目标游戏**（csczs / css / csgo）—— 编译期 `AGPB_GAME_*`（已落地）。
+- **游戏模式**（normal / zombie）—— **运行期 profile**：换图、换模式只切状态，不重编。
+  切换入口 `agpb_mode normal|zombie`（用户按图在 cfg 里设置，不做自动判定）；
+  当前只落地开关与菜单显示，**僵尸模式行为未实现**。
+
+共用（不分模式）：路点模型 / `.agpw` / A* + 单源 Dijkstra / 几何体检 / wayzone /
+编辑器 / 绘制 / 到达判定。
+
+分模式（行为层钩子，写 navigate / control / combat 时挂上）：
+
+| 钩子 | normal（SyPB 血统） | zombie（EBot 血统） |
+|---|---|---|
+| `Mode_FilterWaypoint` | `GOAL` / `RESCUE` / `CROSSING` / `NOHOSTAGE` | `ZOMBIEONLY` / `HUMANONLY` / `ZOMBIEPUSH` / `HELICOPTER` / `ZMHMCAMP` |
+| `Mode_IsEnemyValid` | 敌我 = 队伍比较 | 僵尸/人类阵营、无敌、隐身（EBot 的 `IsEnemyInvincible` / `IsEnemyHidden`） |
+| `Mode_PickGoal` | 炸弹 / 人质 / goal 分数（抄 SyPB） | ZE 逃跑点 / 守点 |
+| `Mode_Camp` | `CAMP` / `SNIPER` | ZM camp 点 |
+
+路点 flag 取并集（u32 还剩位），编辑器显示全部、按当前模式标出"本模式有效"。
+
+移植顺序：**先普通模式**（navigate / control / combat 以 SyPB 为基线，目标逻辑来自 SyPB），
+再在 mode 钩子里补僵尸模式的 flag / 敌人判定 / camp；共用层保持单套。
 
 ## 游戏差异登记（csczs / css / csgo）
 

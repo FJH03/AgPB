@@ -19,6 +19,7 @@
 #include "waypoint.h"
 #include "wpdraw.h"
 #include "wpedit.h"
+#include "game_mode.h"
 
 extern IVEngineServer *engine;
 extern ICvar *icvar;
@@ -929,8 +930,9 @@ static void BuildContextMessage( char *pszOut, int iMaxLen )
 		Q_snprintf( szCache, sizeof( szCache ), "%d", ed.iCache );
 
 	Q_snprintf( pszOut, iMaxLen,
-	            "%d 个路点 | 最近 %s (半径 %d %s) | 指向 %s | 缓存 %s",
-	            wp.Count(), szNear, iRadius, szFlags, szFacing, szCache );
+	            "%d 个路点 | 模式 %s | 最近 %s (半径 %d %s) | 指向 %s | 缓存 %s",
+	            wp.Count(), AgPB_GameModeName( AgPB_GameMode() ),
+	            szNear, iRadius, szFlags, szFacing, szCache );
 }
 
 void AgPB_OpenMenu( edict_t *pClient, int iMenuId )

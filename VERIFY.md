@@ -125,6 +125,7 @@ agpb_wp_legend
 agpb_wp_thick 4
 agpb_wp_xray 0
 agpb_wp_flag t
+agpb_mode zombie          // 菜单头应显示"模式 zombie"；切回：agpb_mode normal
 ```
 
 期望：
@@ -132,6 +133,7 @@ agpb_wp_flag t
 - 屏幕左上角出现**中文**数字菜单，`0` 退出；按数字键有英文控制台回显。
 - 点按标志变色（`agpb_wp_flag t` 后上半截变红），最近点带信息文字，连线可辨类型。
 - 菜单不会自己消失（每 3 秒续命）；弹不出菜单时控制台出现同样的文本菜单也算通过。
+- `agpb_mode` 只验证开关与显示（菜单头"模式 xxx"）；僵尸模式行为未实现。
 
 ## 阶段 F —— bot 走路（最小导航）
 
@@ -161,6 +163,9 @@ agpb_bot_goto 0
 再 `agpb_bot_goto 0`：期望 bot 蹲着走进去、速度掉到 ~85、离开矮区前保持蹲姿。
 
 ## 阶段 G —— 几何判定 / 体积模式
+
+> 本节的 `sv_cs_use_legacy_viewvectors` **只有 csczs（当前项目）有**；css / csgo 没有这个开关，
+> 体积规格编译期固定（见 PROGRESS「游戏差异登记」），跳过这两条 cvar 命令。
 
 ```
 agpb_wp_hullmode 0          // 0=自动

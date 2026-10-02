@@ -15,6 +15,7 @@ for sdk_target in MMSPlugin.sdk_targets:
     'src/menu.cpp',
     'src/wpdraw.cpp',
     'src/wpedit.cpp',
+    'src/game_mode.cpp',
   ]
 
   nodes = builder.Add(binary)

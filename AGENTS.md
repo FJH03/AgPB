@@ -25,7 +25,7 @@
   cd E:\Plugins-Platform\AgPB
   mkdir build
   cd build
-  cmd /c '"E:\vs\VC\Auxiliary\Build\vcvarsall.bat" amd64 && chcp 65001 && set PYTHONIOENCODING=utf-8 && py ../configure.py -s css --targets x86_64 --enable-optimize && ambuild'
+  cmd /c '"E:\vs\VC\Auxiliary\Build\vcvarsall.bat" amd64 && chcp 65001 && set PYTHONIOENCODING=utf-8 && py ../configure.py -s css --targets x86_64 --enable-optimize && ambuild && xcopy /E /I /Y .\package\addons "O:\SteamLibrary\steamapps\common\czero-game-x64\cstrike\addons"'
   ```
 
   csczs 基于 css 改造，**日常构建命令保持原样**（`-s css`）；`configure.py` 另接
@@ -36,8 +36,10 @@
 - `ambuild` 同时按 SourceMod 目录约定组装好可分发的包目录（由 `PackageScript` 负责，
   不需要额外命令，**不压 zip**）：`build\package\addons\AgPB\bin\win64\agpb_mm.dll`
   \+ `addons\AgPB\waypoints\` + `addons\metamod\AgPB.vdf`。
-- 部署 = 把 `build\package\addons\` 整个覆盖到游戏 `cstrike\addons\`（服务器在
-  `O:\...\cstrike\`，DLL 被运行中的服务器占用，替换前先停服）。
+- 部署目标：`O:\SteamLibrary\steamapps\common\czero-game-x64\cstrike`
+  （构建命令里的 `xcopy` 和 `tools\agpw_view.py` 都看**本行**，换目录只改这一行。）
+- 部署就是构建命令最后那条 `xcopy /E /I /Y .\package\addons "<目标>\addons"`：
+  把 `build\package\addons\` 覆盖过去；服务器运行中 DLL 被占用，替换前先停服。
 - VDF 模板在 `configs\metamod\AgPB.vdf`（打包时由 `PackageScript` 拷进包里）；
   `server.cfg` 建议 `bot_quota 0`，避免引擎自带 bot 干预。
 - 冒烟：启动服务器，控制台出现 `[AgPB] loaded. ... IBotManager=ok ...` 才算成功。
@@ -58,6 +60,10 @@
 - 目标游戏：**csczs（当前）/ css / csgo**。游戏间差异**只认用户指出的**，不自己猜；
   每处差异在实现点用 `AGPB_GAME_<目标>` 宏显式分支（**允许编译期硬编码**，不要为了
   区分游戏去读内存 / 做运行期探测），并在代码注释里标 `[game-diff]` 说明差异内容。
+- 游戏模式：**普通模式（SyPB 血统）和 ZM/ZE（EBot 血统）都要支持** —— 同一个插件、
+  同一套路点格式，模式差异走运行期 profile 分支，不复制两套核心代码。
+  切换入口是 cvar **`agpb_mode normal|zombie`**（用户按图在 cfg 里设置，不做自动判定）；
+  **僵尸模式行为暂不实现**（先留开关）。
 - 控制台输出英文（控制台是 GBK）；HUD 菜单用中文（UTF-8）。
 - 许可证 GPL-3.0：移植 CS-EBOT / SyPB 代码时保留来源与版权。
 

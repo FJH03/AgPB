@@ -71,6 +71,7 @@
 |---|---|---|
 | `agpb_enable` | 1 | 0 = 不驱动 bot（路点编辑器 / 绘制 / 菜单不受影响） |
 | `agpb_team` | 2 | `agpb_add` 不带队伍参数时用的默认队 |
+| `agpb_mode` | normal | 运行期游戏模式：`normal`（原生）/ `zombie`（ZM-ZE，行为未实现）。按图在 cfg 里切 |
 | `agpb_wp_show` | 0 | 绘制路点 |
 | `agpb_wp_labels` | 0 | 画下标 |
 | `agpb_wp_alllinks` | 1 | 画所有连线 |
