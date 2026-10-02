@@ -47,7 +47,6 @@
 | `agpb_wp_type <type>` | 在你脚下加指定类型的点：`normal` `t` `ct` `avoid` `rescue` `camp` `goal` `jump` `crouch` `ladder` `usebutton` `sniper` `lift` `fallcheck` `fallrisk` |
 | `agpb_wp_flag <flag\|clear>` | 切换最近点上的标志（flag 名同上，`clear` 清空） |
 | `agpb_wp_radius <0..255>` | 设最近点的到达半径 |
-| `agpb_wp_wayzone [idx\|all]` | 自动算到达半径；`all` = 全部重算（算完记得 `agpb_wp_save`） |
 | `agpb_wp_reach [idx]` | 几何体检：你站的位置到目标点是否可达、要不要跳 |
 | `agpb_wp_connect <out\|in\|both\|jump\|boost\|visible>` | 连线：起点 = 最近点，终点 = 准星指向的点 |
 | `agpb_wp_cut` | 断开「最近点 ↔ 目标点」 |
@@ -56,6 +55,9 @@
 | `agpb_wp_check` | 结构 + 几何校验：越界 / 自连 / 孤立点 /「该跳但没打标志」的边 |
 | `agpb_wp_stats` | 统计各类点与连线数 |
 | `agpb_wp_legend` | 打印配色说明 |
+
+加点默认到达半径（固定值，自动算已删）：精确类（`AVOID` / `LADDER` / `GOAL` / `RESCUE` / `CROUCH`）= **0**，
+`CAMP` = **32**，`JUMP` 起跳点 = **4**，其它（普通 / T / CT）= **64**；要改就 `agpb_wp_radius <n>`。
 
 ## 最小导航
 
@@ -77,7 +79,6 @@
 | `agpb_wp_alllinks` | 1 | 画所有连线 |
 | `agpb_wp_thick` | 3 | 线宽（1..5，叠画遍数） |
 | `agpb_wp_xray` | 1 | 连线穿墙可见 |
-| `agpb_wp_autowayzone` | 1 | 加点时自动算到达半径（EBot `CalculateWayzone`） |
 | `agpb_wp_maxjump` | 57 | 几何判定的最大跳跃高度（CS:S 站立跳） |
 | `agpb_wp_hullmode` | 0 | 0=自动 / 1=老 CS:S 体积 / 2=CS:GO 风格体积 |
 
@@ -103,7 +104,7 @@ agpb_wp_save
 - 反向也要跳就站到落地点再连一次
 
 **蹲行点**（CROUCH 的语义是「必须蹲着才能到达」）：放在低矮通道内部、两端各一个；
-wayzone 会自动算成半径 0（精确到达），别手动调大，否则会提前算到达。
+蹲行点默认半径 0（精确到达），别手动调大，否则会提前算到达。
 
 **绘图配色**
 

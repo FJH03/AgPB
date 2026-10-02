@@ -159,7 +159,7 @@ agpb_bot_goto 0
 跳跃：在起跳点用 `agpb_wp_connect jump` 连到落点，再 `agpb_bot_goto 0`。
 期望是**站立跳**（57 高度）起跳；空中蹲由引擎自动完成，bot 不该在跳跃边按蹲。
 
-蹲行：把 B 打在矮通道里、`agpb_wp_flag crouch`、`agpb_wp_wayzone`（蹲点应算出半径 0），
+蹲行：把 B 打在矮通道里、`agpb_wp_flag crouch`（蹲点默认半径 0，可用 `agpb_wp_radius` 核对），
 再 `agpb_bot_goto 0`：期望 bot 蹲着走进去、速度掉到 ~85、离开矮区前保持蹲姿。
 
 ## 阶段 G —— 几何判定 / 体积模式
@@ -171,12 +171,10 @@ agpb_bot_goto 0
 agpb_wp_hullmode 0          // 0=自动
 agpb_wp_show 1
 sv_cs_use_legacy_viewvectors 1   // 老 CS:S：站立 62 / 蹲姿 45
-agpb_wp_wayzone 0
 sv_cs_use_legacy_viewvectors 0   // CS:GO 风格：站立 72 / 蹲姿 54
-agpb_wp_wayzone 0
 ```
 
-期望：切换体积模式后，点的竖线高度、wayzone 算出的半径、`agpb_wp_reach` 的可达性跟着变。
+期望：切换体积模式后，点的竖线高度和 `agpb_wp_reach` 的可达性跟着变。
 想固定用 `agpb_wp_hullmode 1`（CSS）或 `2`（CS:GO）。
 
 ```

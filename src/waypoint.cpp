@@ -1028,14 +1028,13 @@ void AgPB_WaypointFlagsString( unsigned int uFlags, char *pszOut, int iMaxLen )
 }
 
 // ---------------------------------------------------------------------------
-// 视线 / hull trace（编辑器、wayzone、绘制共用）
+// 视线 / hull trace（编辑器、几何判定、绘制共用）
 // ---------------------------------------------------------------------------
 
 // 体积尺寸见 waypoint.h 顶部那段注释（CS:S 的站立 62 / 蹲姿 45，原点在脚下）
 enum AgPBHullKind
 {
 	AgPB_HULL_POINT = 0,
-	AgPB_HULL_STAND,
 	AgPB_HULL_DUCK,
 };
 
@@ -1172,13 +1171,7 @@ static void AgPB_Trace( const Vector &vStart, const Vector &vEnd, int iHull,
 {
 	Ray_t ray;
 
-	if ( iHull == AgPB_HULL_STAND )
-	{
-		ray.Init( vStart, vEnd,
-		          Vector( -AgPB_HULL_RADIUS, -AgPB_HULL_RADIUS, 0.0f ),
-		          Vector(  AgPB_HULL_RADIUS,  AgPB_HULL_RADIUS, AgPB_HullStandHeight() ) );
-	}
-	else if ( iHull == AgPB_HULL_DUCK )
+	if ( iHull == AgPB_HULL_DUCK )
 	{
 		ray.Init( vStart, vEnd,
 		          Vector( -AgPB_HULL_RADIUS, -AgPB_HULL_RADIUS, 0.0f ),
@@ -1210,17 +1203,6 @@ bool AgPB_TraceHullClear( const Vector &vStart, const Vector &vEnd, edict_t *pIg
 
 	trace_t tr;
 	AgPB_Trace( vStart, vEnd, AgPB_HULL_DUCK, pIgnore, tr );
-
-	return ( tr.fraction >= 1.0f );
-}
-
-bool AgPB_TraceStandClear( const Vector &vStart, const Vector &vEnd, edict_t *pIgnore )
-{
-	if ( enginetrace == NULL )
-		return true;
-
-	trace_t tr;
-	AgPB_Trace( vStart, vEnd, AgPB_HULL_STAND, pIgnore, tr );
 
 	return ( tr.fraction >= 1.0f );
 }
@@ -1345,116 +1327,6 @@ static bool AgPB_WalkableClear( const Vector &vFrom, const Vector &vTo, int iHul
 	}
 
 	return false;
-}
-
-/**
- * 自动算 wayzone 半径（移植 EBot Waypoint::CalculateWayzone，waypoint.cpp:1733）。
- */
-void CAgPBWaypoints::CalculateWayzone( int iIndex, edict_t *pIgnore )
-{
-	AgPBPath *pPath = GetMutable( iIndex );
-
-	if ( pPath == NULL )
-		return;
-
-	// EBot：这些点不让半径散开
-	if ( pPath->flags & ( AgPB_WP_LADDER | AgPB_WP_GOAL | AgPB_WP_CAMP |
-	                      AgPB_WP_RESCUE | AgPB_WP_CROUCH ) )
-	{
-		pPath->radius = 0;
-		return;
-	}
-
-	// 邻点带 LADDER / JUMP → 也不散开
-	for ( int s = 0; s < AgPB_WP_MAX_PATH_INDEX; ++s )
-	{
-		const AgPBPath *pLink = Get( pPath->index[s] );
-
-		if ( pLink == NULL )
-			continue;
-
-		if ( pLink->flags & ( AgPB_WP_LADDER | AgPB_WP_JUMP ) )
-		{
-			pPath->radius = 0;
-			return;
-		}
-	}
-
-	bool bBlocked = false;
-	int  iFinalRadius = 0;
-
-	for ( int iScan = 32; iScan < 128; iScan += 16 )
-	{
-		const float flScan = (float)iScan;
-
-		iFinalRadius = iScan;
-
-		for ( int iYaw = 0; iYaw < 360; iYaw += 20 )
-		{
-			const QAngle angDir( 0.0f, (float)iYaw, 0.0f );
-			Vector vDir;
-			AngleVectors( angDir, &vDir );
-
-			const Vector vSide = pPath->origin + vDir * flScan;
-			const Vector vBack = pPath->origin - vDir * flScan;
-
-			// 1) 这个位置站得下吗（零长度站立体积 = 把它放进去试；CS:S 站立 0..62）
-			if ( !AgPB_TraceStandClear( vSide, vSide, pIgnore ) )
-			{
-				// EBot 撞到门就直接给 0（门会动，半径算不准）。它那边用的是
-				// 零长度 trace，Source 下拿不到命中实体，所以这里顺着
-				// "原点到采样点"的实际连线找是谁挡的。
-				if ( AgPB_TraceHitsDoor( pPath->origin, vSide, pIgnore ) )
-					iFinalRadius = 0;
-				else
-					iFinalRadius -= 16;
-
-				bBlocked = true;
-				break;
-			}
-
-			// 2) 前方采样点往下探（scan + 60）得有地面
-			if ( !AgPB_TraceClear( vSide, vSide - Vector( 0.0f, 0.0f, flScan + 60.0f ), pIgnore ) )
-			{
-				iFinalRadius -= 16;
-				bBlocked = true;
-				break;
-			}
-
-			// 3) 反方向也一样
-			if ( !AgPB_TraceClear( vBack, vBack - Vector( 0.0f, 0.0f, flScan + 60.0f ), pIgnore ) )
-			{
-				iFinalRadius -= 16;
-				bBlocked = true;
-				break;
-			}
-
-			// 4) 头顶得有站直的空间：把蹲姿体积从采样点往上扫"蹲高→站高"这一段
-			//    （62-45 或 72-54，也就是矮天花板/管道会把半径收窄）
-			if ( !AgPB_TraceHullClear( vSide,
-			                           vSide + Vector( 0.0f, 0.0f,
-			                                           AgPB_HullStandHeight() - AgPB_HullDuckHeight() ),
-			                           pIgnore ) )
-			{
-				iFinalRadius -= 16;
-				bBlocked = true;
-				break;
-			}
-		}
-
-		if ( bBlocked )
-			break;
-	}
-
-	iFinalRadius -= 16;
-
-	if ( iFinalRadius < 0 )
-		iFinalRadius = 0;
-
-	if ( iFinalRadius > 255 )
-		iFinalRadius = 255;
-
-	pPath->radius = (unsigned char)iFinalRadius;
 }
 
 /**

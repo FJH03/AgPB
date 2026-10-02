@@ -845,8 +845,8 @@ static void Cmd_WpAdd( const CCommand &args )
 		return;
 	}
 
-	// 半径：默认用 EBot 的 wayzone 算法（agpb_wp_autowayzone 0 时跳过）
-	AgPB_EditAutoRadius( iIndex, NULL );
+	// 半径：固定默认值（普通 64 / Camp 32 / Avoid 0），要改用手动 agpb_wp_radius
+	AgPB_EditApplyDefaultRadius( iIndex );
 
 	META_CONPRINTF( "[AgPB] waypoint %d added at %.0f %.0f %.0f (%d total, %d links)\n",
 	                iIndex, vOrigin.x, vOrigin.y, vOrigin.z, wp.Count(), wp.LinkCount() );
@@ -1341,8 +1341,6 @@ static ConCommand agpb_wp_stats_cmd( "agpb_wp_stats", AgPB_Cmd_Stats,
                                  "Print waypoint/link statistics for this map.", FCVAR_GAMEDLL );
 static ConCommand agpb_wp_legend_cmd( "agpb_wp_legend", AgPB_Cmd_Legend,
                                  "Print the waypoint color legend to your console.", FCVAR_GAMEDLL );
-static ConCommand agpb_wp_wayzone_cmd( "agpb_wp_wayzone", AgPB_Cmd_Wayzone,
-                                 "Recompute the arrival radius (wayzone): agpb_wp_wayzone [idx|all]", FCVAR_GAMEDLL );
 static ConCommand agpb_wp_reach_cmd( "agpb_wp_reach", AgPB_Cmd_Reach,
                                  "Geometry check from where you stand: agpb_wp_reach [idx]", FCVAR_GAMEDLL );
 

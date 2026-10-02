@@ -59,8 +59,8 @@ void AgPB_EditToggleShow( edict_t *pClient );
 void AgPB_EditToggleLabels( edict_t *pClient );
 void AgPB_EditToggleAllLinks( edict_t *pClient );
 void AgPB_EditCache( edict_t *pClient );
-/** 按 agpb_wp_autowayzone 决定要不要用 EBot 的算法自动算半径。 */
-void AgPB_EditAutoRadius( int iIndex, edict_t *pClient );
+/** 加点后的默认到达半径（照 EBot 加点菜单）：AVOID=0，CAMP=32，其它=64。 */
+void AgPB_EditApplyDefaultRadius( int iIndex );
 void AgPB_EditAddType( edict_t *pClient, unsigned int uFlags, const char *pszTypeName );
 void AgPB_EditDeleteNearest( edict_t *pClient );
 void AgPB_EditConnect( edict_t *pClient, int iMode );
@@ -95,7 +95,6 @@ void AgPB_Cmd_Noclip( const CCommand &args );
 void AgPB_Cmd_Check( const CCommand &args );
 void AgPB_Cmd_Stats( const CCommand &args );
 void AgPB_Cmd_Legend( const CCommand &args );
-void AgPB_Cmd_Wayzone( const CCommand &args );
 void AgPB_Cmd_Reach( const CCommand &args );
 
 #endif // _INCLUDE_AGPB_WPEDIT_H_

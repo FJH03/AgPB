@@ -9,7 +9,7 @@
 - 能创建**无 AI 假客户端**，正常入队、出生，并由 `CUserCmd` 驱动移动与视角（已实测）。
 - netvar 反射可用：按名字读实体的网络字段（标量 / 数组 / 向量元素 / EHANDLE）。
 - 路点系统可用：打点 / 连线 / 删除 / 存盘 / 换图自动重载 / A* 寻路 / 路径代价 /
-  几何体检（可达性、要不要跳）/ wayzone 自动到达半径。
+  几何体检（可达性、要不要跳）。
 - 编辑器可用：HUD 中文数字菜单 + `agpb_wp_*` 命令 + 叠加层绘制（EBot 配色，上服实测）。
 - 最小导航可用：`agpb_bot_goto` 沿路点转向 / 前进、按边起跳、按点蹲行、卡住就停。
 - 打包 / 部署可用：`ambuild` 产出 SourceMod 目录约定的 `build/package/addons/...`
@@ -58,10 +58,11 @@
 | 9 | 想要 EBot 那种左上角数字菜单 | `CreateMessage` 在 CS:S 里弹 VGUI 对话框 | 用 `ShowMenu` usermessage + `menuselect` |
 | 10 | 菜单 5 秒自己消失 / 太长不显示 | 客户端菜单超时；单条 usermessage 上限 255 字节 | 每 3 秒重发续命；超长按行分段发送 |
 | 11 | 中文乱码 | 客户端 HUD 走 UTF-8；服务端控制台是 GBK | 菜单发中文，控制台输出保持英文 |
-| 12 | 到达半径要一个个手调 | EBot 加点会把半径覆盖成固定 64 | 移植 wayzone 自动算（默认开），想回 EBot 原味设 0 |
+| 12 | 到达半径要一个个手调 | EBot 加点会把半径覆盖成固定 64 | 曾移植 wayzone 自动算；**2026-10-02 按用户要求删除**，改成加点固定默认值 + `agpb_wp_radius` 手调 |
 | 13 | 蹲点走不进去 / 跳跃高度不对 | 到达判定用了兜底大半径；CS:S 站立跳 57、蹲跳 42；引擎会自动 crouch-jump，注入 `IN_DUCK` 反而打断 | 按 EBot 到达规则判定；跳跃边只按跳；蹲行段提前松蹲 |
 | 14 | netvar 能读，能不能当行为手段写 | 写服务端字段等于改实体行为，偏离「只生成 ucmd」 | 写入层只留作开发 / 诊断工具；navigate / control / combat 一律走 ucmd |
 | 15 | 想写手雷速度做定点投雷 | Source 里是非网络字段，而且本来不需要 | 投雷初速由视角 + 玩家当前速度决定，走 ucmd 即可 |
+| 16 | wayzone 自动半径在平地也大量算出 0（cs_office 实测 98 点里 72 个 0，且没有任何 16/32/48/64/80/96 档） | 两处"向下探地面"判断写反：**命中有地面**被当成阻塞（EBot/SyPB 是"没命中才判没地面 → blocked"），平地第一档 32 就挂 | 先修正方向，随后按用户要求**整体删除自动算**；加点改固定默认（精确类 0 / Camp 32 / Jump 4 / 其它 64） |
 
 ## 踩过的坑
 
@@ -86,7 +87,7 @@
 | `src/plugin.cpp` | MMS 入口、GameFrame 钩子、命令注册与分发 |
 | `src/bot.cpp` | 假客户端生命周期、队伍切换、ucmd 驱动、最小导航 |
 | `src/netvars.*` | SendTable 反射层 / 写入层 |
-| `src/waypoint.*` | 路点数据、文件 IO、A*、路径代价、几何判定、wayzone |
+| `src/waypoint.*` | 路点数据、文件 IO、A*、路径代价、几何判定 |
 | `src/menu.*` | ShowMenu 菜单框架（中文 HUD） |
 | `src/wpedit.*` | 编辑器状态、动作、ConVar |
 | `src/wpdraw.*` | 叠加层绘制（EBot 配色） |
@@ -125,6 +126,7 @@ EBot 版逐个 diff，取它更新的实现（异步寻路、符号版本化等�
 | 距离 | 1024² int 矩阵 + `.pmt` 缓存 | 8192² int16 矩阵（128MB，多线程算，可关） | **无矩阵**；单源 Dijkstra（`ComputeDistances`） |
 | 寻路 | `navigate.cpp` 堆 + 矩阵查距 | `async_pathfinder` 异步线程 | 帧内同步 A*（二叉堆，欧氏启发式） |
 | 可见性 | **预计算**（`InitializeVisibility` / `IsVisible` / `IsDuckVisible`） | 按需 trace | 按需 trace（`AgPB_Trace*`） |
+| 半径默认 | `Add()` 末尾自动 `CalculateWayzone`（16 起步、36 方向）；但菜单随后 `SetRadius(g_sautoRadius=32)` 覆盖，只有 `g_sautoWaypoint`（Auto Put Waypoint 模式，**默认关**）开着时才保留自动值 | `Add()` 也自动算（32 起步、18 方向），但菜单一定 `SetRadius(64/32/0)` 覆盖，没有保留开关 | **自动算已删除**（2026-10-02 用户决定）：加点固定 精确类 0 / Camp 32 / Jump 4 / 其它 64，之后 `agpb_wp_radius` 手调 |
 | 自动打点 | `CreateBasic` + 下载现成 `.pwf` + XML 导出 | 分析器 / 优化器全家桶 + 空间桶（`AddToBucket`） | 未做（纯手工打点） |
 | 原生模式目标逻辑 | **炸弹 / 人质 / goal 分数**（`GetBombPoint` / `SetGoalVisited` / `AddGoalScore`） | 无（僵尸模式用不上） | 未做（只有 flag，没有逻辑） |
 | 僵尸专用 | 少（`ZMHMCAMP`） | 多（`ZOMBIEONLY` / `HUMANONLY` / `ZOMBIEPUSH` / `HELICOPTER`…） | 不需要 |
@@ -146,7 +148,7 @@ EBot 版逐个 diff，取它更新的实现（异步寻路、符号版本化等�
   切换入口 `agpb_mode normal|zombie`（用户按图在 cfg 里设置，不做自动判定）；
   当前只落地开关与菜单显示，**僵尸模式行为未实现**。
 
-共用（不分模式）：路点模型 / `.agpw` / A* + 单源 Dijkstra / 几何体检 / wayzone /
+共用（不分模式）：路点模型 / `.agpw` / A* + 单源 Dijkstra / 几何体检 /
 编辑器 / 绘制 / 到达判定。
 
 分模式（行为层钩子，写 navigate / control / combat 时挂上）：

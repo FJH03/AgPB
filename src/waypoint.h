@@ -148,18 +148,6 @@ public:
 	int  FindNearest( const Vector &vOrigin, float flMaxDist = 99999.0f ) const;
 	int  FindFarthest( const Vector &vOrigin, float flMinDist = 0.0f ) const;
 
-	/**
-	 * 自动算"到达半径"（wayzone）—— 移植 EBot Waypoint::CalculateWayzone。
-	 *
-	 * 32/48/…/112 逐级往外扫，每一级绕点转 18 个方向检查
-	 * （头高体积放得下吗、前方和后方往下 scan+60 有没有地面、头顶 +34 有没有空间），
-	 * 撞到东西就把这一级减 16 收工，最后再减 16 并 clamp。
-	 * 点自己有 LADDER/GOAL/CAMP/RESCUE/CROUCH、或任一邻点带 LADDER/JUMP → 直接 0。
-	 *
-	 * pIgnore 通常是编辑器本人（别让他自己把扫描挡住）。
-	 */
-	void CalculateWayzone( int iIndex, edict_t *pIgnore = NULL );
-
 	// ------------------------------------------------------------------
 	// 几何判定（都移植自 EBot，编辑器与校验用）
 	// ------------------------------------------------------------------
@@ -274,7 +262,7 @@ unsigned int AgPB_WaypointFlagByName( const char *pszName );
 void AgPB_WaypointFlagsString( unsigned int uFlags, char *pszOut, int iMaxLen );
 
 // ---------------------------------------------------------------------------
-// 视线 / hull trace（编辑器、wayzone、绘制共用；实现见 waypoint.cpp）
+// 视线 / hull trace（编辑器、几何判定、绘制共用；实现见 waypoint.cpp）
 // ---------------------------------------------------------------------------
 
 /** 两点之间点 trace 是否畅通（忽略 pIgnore）。enginetrace 不可用时一律 true。 */
@@ -282,9 +270,6 @@ bool AgPB_TraceClear( const Vector &vStart, const Vector &vEnd, edict_t *pIgnore
 
 /** 同上，但按**蹲姿体积**（CS:S 0..45）扫过去 —— 对应 EBot 的 head_hull。 */
 bool AgPB_TraceHullClear( const Vector &vStart, const Vector &vEnd, edict_t *pIgnore );
-
-/** 同上，但按**站立体积**（CS:S 0..62）扫过去 —— 判断"这儿站得下吗"。 */
-bool AgPB_TraceStandClear( const Vector &vStart, const Vector &vEnd, edict_t *pIgnore );
 
 /** 这条线撞到的实体是不是门（func_door / func_door_rotating）。 */
 bool AgPB_TraceHitsDoor( const Vector &vStart, const Vector &vEnd, edict_t *pIgnore );

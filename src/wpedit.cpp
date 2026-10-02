@@ -40,9 +40,6 @@ ConVar agpb_wp_thick( "agpb_wp_thick", "3", FCVAR_GAMEDLL,
                       "Overlay line thickness: how many offset passes to draw (1..5)." );
 ConVar agpb_wp_xray( "agpb_wp_xray", "1", FCVAR_GAMEDLL,
                      "Draw the waypoint graph through walls (1/0)." );
-ConVar agpb_wp_autowayzone( "agpb_wp_autowayzone", "1", FCVAR_GAMEDLL,
-                            "On add, compute the arrival radius by scanning the terrain "
-                            "(EBot's CalculateWayzone). 0 = use the type defaults (64/32/0)." );
 // CS:S 站立跳跃高度 57（game/shared/cstrike/cs_gamemovement.cpp:723，蹲跳是 42）
 ConVar agpb_wp_maxjump( "agpb_wp_maxjump", "57", FCVAR_GAMEDLL,
                         "Max height difference that still counts as reachable/jumpable "
@@ -316,22 +313,27 @@ void AgPB_EditToggleAllLinks( edict_t *pClient )
 }
 
 /**
- * 按 agpb_wp_autowayzone 决定要不要自动算半径（EBot 的 CalculateWayzone）。
- * 关掉的话调用方会用类型默认值（64/32/0，EBot 加点菜单那套）。
+ * 加点后的默认到达半径（自动算已删，这里固定）：
+ *   精确到达类（AVOID / LADDER / GOAL / RESCUE / CROUCH）→ 0
+ *   CAMP → 32；JUMP 起跳点 → 4；其它（普通 / T / CT）→ 64
+ * 之后用 `agpb_wp_radius` 手调。
  */
-void AgPB_EditAutoRadius( int iIndex, edict_t *pClient )
+void AgPB_EditApplyDefaultRadius( int iIndex )
 {
-	if ( !agpb_wp_autowayzone.GetBool() )
+	AgPBPath *pPath = BotWaypoints().GetMutable( iIndex );
+
+	if ( pPath == NULL )
 		return;
 
-	CAgPBWaypoints &wp = BotWaypoints();
-
-	wp.CalculateWayzone( iIndex, ( pClient != NULL ) ? pClient : AgPB_FindHost() );
-
-	const AgPBPath *pPath = wp.Get( iIndex );
-
-	if ( pPath != NULL )
-		PrintTo( pClient, "waypoint #%d wayzone radius = %d\n", iIndex, (int)pPath->radius );
+	if ( pPath->flags & ( AgPB_WP_AVOID | AgPB_WP_LADDER | AgPB_WP_GOAL |
+	                      AgPB_WP_RESCUE | AgPB_WP_CROUCH ) )
+		pPath->radius = 0;
+	else if ( pPath->flags & AgPB_WP_CAMP )
+		pPath->radius = 32;
+	else if ( pPath->flags & AgPB_WP_JUMP )
+		pPath->radius = 4;
+	else
+		pPath->radius = 64;
 }
 
 void AgPB_EditCache( edict_t *pClient )
@@ -377,22 +379,8 @@ void AgPB_EditAddType( edict_t *pClient, unsigned int uFlags, const char *pszTyp
 		return;
 	}
 
-	// 到达半径：
-	//   agpb_wp_autowayzone 1（默认）→ EBot 的 CalculateWayzone 按地形算
-	//   0 → EBot 加点菜单那套固定值（Normal/T/CT/Rescue = 64，Camp = 32，Avoid = 0）
-	if ( agpb_wp_autowayzone.GetBool() )
-	{
-		AgPB_EditAutoRadius( iIndex, pClient );
-	}
-	else if ( AgPBPath *pAdded = wp.GetMutable( iIndex ) )
-	{
-		if ( uFlags & AgPB_WP_AVOID )
-			pAdded->radius = 0;
-		else if ( uFlags & AgPB_WP_CAMP )
-			pAdded->radius = 32;
-		else
-			pAdded->radius = 64;
-	}
+	// 到达半径：固定默认值（Normal/T/CT/Rescue = 64，Camp = 32，Avoid = 0），要改用手调
+	AgPB_EditApplyDefaultRadius( iIndex );
 
 	char szFlags[192];
 	AgPB_WaypointFlagsString( wp.Get( iIndex )->flags, szFlags, sizeof( szFlags ) );
@@ -1535,47 +1523,3 @@ void AgPB_Cmd_Reach( const CCommand &args )
 	}
 }
 
-/** agpb_wp_wayzone [idx|all] —— 用 EBot 的算法重算到达半径。 */
-void AgPB_Cmd_Wayzone( const CCommand &args )
-{
-	CAgPBWaypoints &wp = BotWaypoints();
-	edict_t *pHost = AgPB_FindHost();
-
-	if ( args.ArgC() >= 2 && V_stricmp( args.Arg( 1 ), "all" ) == 0 )
-	{
-		const int nCount = wp.Count();
-
-		for ( int i = 0; i < nCount; ++i )
-			wp.CalculateWayzone( i, pHost );
-
-		PrintTo( pHost, "recomputed wayzone radius for %d waypoint(s)\n", nCount );
-		return;
-	}
-
-	int iIndex = -1;
-
-	if ( args.ArgC() >= 2 )
-	{
-		iIndex = V_atoi( args.Arg( 1 ) );
-	}
-	else
-	{
-		AgPB_RefreshHost();
-		iIndex = AgPB_EditTargetWaypoint();
-
-		if ( !wp.IsValid( iIndex ) )
-			iIndex = BotWaypointEditor().iNearest;
-	}
-
-	if ( !wp.IsValid( iIndex ) )
-	{
-		PrintTo( pHost, "usage: agpb_wp_wayzone [idx|all] (no waypoint nearby either)\n" );
-		return;
-	}
-
-	wp.CalculateWayzone( iIndex, pHost );
-
-	const AgPBPath *pPath = wp.Get( iIndex );
-
-	PrintTo( pHost, "waypoint #%d wayzone radius = %d\n", iIndex, ( pPath != NULL ) ? (int)pPath->radius : 0 );
-}
