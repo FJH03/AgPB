@@ -513,6 +513,14 @@ bool CAgPBWaypoints::IsWaypointPassable( int i, int iTeam ) const
 	return true;
 }
 
+bool CAgPBWaypoints::IsPassable( int i, int iTeam ) const
+{
+	if ( !IsValid( i ) )
+		return false;
+
+	return IsWaypointPassable( i, iTeam );
+}
+
 /**
  * 从 iFrom 走到 iTo 的代价。返回 false = 这条边不能走。
  *

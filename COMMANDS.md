@@ -65,6 +65,7 @@
 |---|---|
 | `agpb_bot_goto <idx> [wp]` | 让 bot 沿 A* 路线走过去（不给 wp = 准星指向 / 缓存点） |
 | `agpb_bot_stop <idx\|all>` | 停止行走 |
+| `agpb_bot_roam <idx\|all> [0\|1]` | **随机漫游**：没路线时随机挑一个可达点走过去，到了再挑下一个；会避开别的 bot 的目标点，正前方有队友时按序号错身让路。不加参数 = 开，`0` = 关（`agpb_bot_stop` 也会关） |
 | `agpb_bot_vel <idx> <x> <y> <z>` | **开发用**：下一 tick 直接写 `m_vecVelocity`（弹道跳原语） |
 
 ## ConVar
@@ -81,6 +82,7 @@
 | `agpb_wp_xray` | 1 | 连线穿墙可见 |
 | `agpb_wp_maxjump` | 57 | 几何判定的最大跳跃高度（CS:S 站立跳） |
 | `agpb_wp_hullmode` | 0 | 0=自动 / 1=老 CS:S 体积 / 2=CS:GO 风格体积 |
+| `agpb_camp_min` / `agpb_camp_max` | 8 / 20 | 到 CAMP 点后原地蹲守的随机时长（秒） |
 
 ## 用法速查
 

@@ -11,7 +11,10 @@
 - 路点系统可用：打点 / 连线 / 删除 / 存盘 / 换图自动重载 / A* 寻路 / 路径代价 /
   几何体检（可达性、要不要跳）。
 - 编辑器可用：HUD 中文数字菜单 + `agpb_wp_*` 命令 + 叠加层绘制（EBot 配色，上服实测）。
-- 最小导航可用：`agpb_bot_goto` 沿路点转向 / 前进、按边起跳、按点蹲行、卡住就停。
+- 最小导航可用：`agpb_bot_goto` 沿路点转向 / 前进、按边起跳、按点蹲行、卡住就停；
+  `agpb_bot_roam` 随机漫游（EBot/SyPB 式随机挑点，到了再挑；带目标分散 +
+  最简队友让行，避免一坨 bot 堵门）；到 **CAMP** 点会原地蹲守一段随机时间
+  （`agpb_camp_min`/`agpb_camp_max` 默认 8~20 秒，点带 CROUCH 就保持蹲姿）。
 - 打包 / 部署可用：`ambuild` 产出 SourceMod 目录约定的 `build/package/addons/...`
   （`PackageScript`，不压 zip）；构建命令最后用 `xcopy` 覆盖到游戏 mod 目录
   （部署目标在 AGENTS.md §2，单一出处，改一行即可）。
@@ -20,7 +23,7 @@
 - 工具：`tools\agpw_view.py`（+ `.bat`）只读查看 `.agpw` 路点图 —— 图论力导向布局、
   单向/双向边、边 flag 着色、点选节点看出入边；默认打开 deploy 配置指向的游戏目录。
 - 没做：EBot 替身层（`Entity` / `Client` / `Engine`）、真正的 `navigate` / `control` / `combat`、
-  UDP 桥、LLM 战术层。
+  UDP 桥、LLM 战术层、**梯子（爬梯行为未实现）**。
 - 已知问题：freezetime 时 bot 独占一队会触发 `Radio()` 崩溃（**未修**，见
   [`CRASH_REPORT.md`](CRASH_REPORT.md)，测试必须同队）；netvar 写入层已降级为开发工具。
 

@@ -226,6 +226,9 @@ public:
 	/** 沿路点图的实际路径代价；不可达返回 AgPB_WP_DIST_INF。 */
 	float PathDistance( int iFrom, int iTo, int iTeam = 0, int iAvoidWaypoint = -1 );
 
+	/** 这个点对某队伍能不能走（IsWaypointPassable 的公开只读入口；选目标点用，iTeam=0 不过滤）。 */
+	bool IsPassable( int i, int iTeam = 0 ) const;
+
 	/** 从文件读。地图名没设置或文件不存在都会返回 false，原因写进 Status()。 */
 	bool Load();
 	/** 写回文件（目录不存在会自动建）。 */
@@ -273,4 +276,5 @@ bool AgPB_TraceHullClear( const Vector &vStart, const Vector &vEnd, edict_t *pIg
 
 /** 这条线撞到的实体是不是门（func_door / func_door_rotating）。 */
 bool AgPB_TraceHitsDoor( const Vector &vStart, const Vector &vEnd, edict_t *pIgnore );
+
 #endif // _INCLUDE_AGPB_WAYPOINT_H_

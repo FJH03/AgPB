@@ -169,6 +169,10 @@ public:
 	/** 停止行走（清路线与输入）。 */
 	void StopRoute();
 
+	/** 随机漫游：没路线时随机挑一个可达路点走过去，到了再挑下一个（EBot/SyPB 式"瞎逛"的最小版）。 */
+	void SetRoam( bool bEnable );
+	bool IsRoaming() const { return m_bRoam; }
+
 	bool HasRoute() const { return m_vecRoute.Count() > 0; }
 	int  RouteCount() const { return m_vecRoute.Count(); }
 	int  RouteGoal() const { return m_iGoalWaypoint; }
@@ -180,6 +184,12 @@ public:
 
 private:
 	void TryJoinTeam( float flCurTime );
+
+	/** 随机挑一个可达点开一条新路线（漫游用）。 */
+	bool StartRandomRoute();
+
+	/** 漫游选点用：这个目标点附近是不是已经有别的 bot（站着或正要去）。 */
+	bool IsRoamGoalCrowded( const Vector &vGoal, float flRadius ) const;
 
 	/** 每 tick 的"走路"部分：把路线翻译成 CUserCmd。 */
 	void UpdateRoute( CGlobalVars *pGlobals, CBotCmd &cmd );
@@ -208,6 +218,16 @@ private:
 	int    m_iGoalWaypoint;
 	Vector m_vStuckAnchor;
 	float  m_flStuckCheckTime;
+
+	// 随机漫游（agpb_bot_roam）
+	bool   m_bRoam;
+	float  m_flNextRoamTime;    // 上一轮挑不到点后的重试时间
+	int    m_iLastRoamGoal;     // 别连着两次去同一个点
+
+	// 蹲守（到 CAMP 点后原地待一会）
+	float  m_flCampUntil;       // > 0 = 蹲守到这个世界时间
+	bool   m_bCampCrouch;       // 蹲守时是否按着蹲（点带 CROUCH）
+
 };
 
 class CAgPBManager

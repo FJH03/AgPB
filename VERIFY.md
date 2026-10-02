@@ -162,6 +162,10 @@ agpb_bot_goto 0
 蹲行：把 B 打在矮通道里、`agpb_wp_flag crouch`（蹲点默认半径 0，可用 `agpb_wp_radius` 核对），
 再 `agpb_bot_goto 0`：期望 bot 蹲着走进去、速度掉到 ~85、离开矮区前保持蹲姿。
 
+蹲守：把 B 打上 `camp` 标志，再 `agpb_bot_goto 0`。期望到达后控制台打印
+`camping at #N for X s`，之后 8~20 秒原地不动（点同时带 `crouch` 的话保持蹲姿）；
+结束后如果漫游还开着，会自动挑下一个点。
+
 ## 阶段 G —— 几何判定 / 体积模式
 
 > 本节的 `sv_cs_use_legacy_viewvectors` **只有 csczs（当前项目）有**；css / csgo 没有这个开关，

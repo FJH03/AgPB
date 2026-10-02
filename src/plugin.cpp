@@ -1249,7 +1249,7 @@ static void Cmd_BotStop( const CCommand &args )
 		for ( int i = 0; i < g_Bots.Count(); ++i )
 		{
 			if ( CAgPB *pBot = g_Bots.Get( i ) )
-				pBot->StopRoute();
+				pBot->SetRoam( false );     // 同时停漫游 + 清路线
 		}
 
 		META_CONPRINTF( "[AgPB] all routes stopped\n" );
@@ -1264,8 +1264,53 @@ static void Cmd_BotStop( const CCommand &args )
 		return;
 	}
 
-	pBot->StopRoute();
-	META_CONPRINTF( "[AgPB] %s: route stopped\n", pBot->Name() );
+	pBot->SetRoam( false );             // 同时停漫游 + 清路线
+	META_CONPRINTF( "[AgPB] %s: route stopped (roam off)\n", pBot->Name() );
+}
+
+/**
+ * agpb_bot_roam <idx|all> [0|1]
+ *
+ * 让 bot 自己在路点图里随机溜达：没路线时随机挑一个可达点走过去，到了再挑下一个。
+ * 不加第二个参数 = 开；`agpb_bot_stop` 也会把它关掉。
+ */
+static void Cmd_BotRoam( const CCommand &args )
+{
+	if ( args.ArgC() < 2 )
+	{
+		META_CONPRINTF( "[AgPB] usage: agpb_bot_roam <idx|all> [0|1]\n" );
+		return;
+	}
+
+	const bool bEnable = ( args.ArgC() < 3 ) ? true : ( V_atoi( args.Arg( 2 ) ) != 0 );
+
+	if ( V_stricmp( args.Arg( 1 ), "all" ) == 0 )
+	{
+		int nCount = 0;
+
+		for ( int i = 0; i < g_Bots.Count(); ++i )
+		{
+			if ( CAgPB *pBot = g_Bots.Get( i ) )
+			{
+				pBot->SetRoam( bEnable );
+				++nCount;
+			}
+		}
+
+		META_CONPRINTF( "[AgPB] roam %s for %d bot(s)\n", bEnable ? "ON" : "OFF", nCount );
+		return;
+	}
+
+	CAgPB *pBot = g_Bots.Get( V_atoi( args.Arg( 1 ) ) );
+
+	if ( pBot == NULL )
+	{
+		META_CONPRINTF( "[AgPB] invalid list index '%s' (see agpb_list)\n", args.Arg( 1 ) );
+		return;
+	}
+
+	pBot->SetRoam( bEnable );
+	META_CONPRINTF( "[AgPB] %s: roam %s\n", pBot->Name(), bEnable ? "ON" : "OFF" );
 }
 
 static ConCommand agpb_add_cmd( "agpb_add", Cmd_Add,
@@ -1349,6 +1394,8 @@ static ConCommand agpb_bot_goto_cmd( "agpb_bot_goto", Cmd_BotGoto,
                                  "Walk a bot to a waypoint: agpb_bot_goto <idx> [waypoint]", FCVAR_GAMEDLL );
 static ConCommand agpb_bot_stop_cmd( "agpb_bot_stop", Cmd_BotStop,
                                  "Stop a bot's route: agpb_bot_stop <idx|all>", FCVAR_GAMEDLL );
+static ConCommand agpb_bot_roam_cmd( "agpb_bot_roam", Cmd_BotRoam,
+                                 "Let bots wander the waypoint graph: agpb_bot_roam <idx|all> [0|1]", FCVAR_GAMEDLL );
 static ConCommand agpb_bot_vel_cmd( "agpb_bot_vel", Cmd_BotVel,
                                  "DEV: write the bot's m_vecVelocity for one tick: agpb_bot_vel <idx> <x> <y> <z>",
                                  FCVAR_GAMEDLL );

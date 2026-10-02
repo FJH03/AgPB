@@ -16,7 +16,15 @@
 #include "bot.h"
 #include "waypoint.h"
 
+#include <vstdlib/random.h>
+
 extern CGlobalVars *gpGlobals;
+
+// 蹲守时长（秒，随机区间）；EBot/SyPB 是 35~60 秒，这里默认短一点方便测试
+ConVar agpb_camp_min( "agpb_camp_min", "8", FCVAR_GAMEDLL,
+                      "Min seconds a bot camps at a CAMP waypoint." );
+ConVar agpb_camp_max( "agpb_camp_max", "20", FCVAR_GAMEDLL,
+                      "Max seconds a bot camps at a CAMP waypoint." );
 
 // ---------------------------------------------------------------------------
 // 最小导航的参数
@@ -39,6 +47,16 @@ extern CGlobalVars *gpGlobals;
 
 // 找起点时允许的最大吸附距离
 #define AgPB_ROUTE_PICK      512.0f
+
+// 随机漫游（agpb_bot_roam）：优先挑直线距离 ≥ 300 的点；挑不到可达点就 1 秒后再试
+#define AgPB_ROAM_MIN_DIST   300.0f
+#define AgPB_ROAM_RETRY      1.0f
+#define AgPB_ROAM_TRIES      16
+// 漫游选点避开别的 bot（站着的 / 正走向的），太挤就换一个点
+#define AgPB_ROAM_SPREAD     400.0f
+
+// 队友让行：正前方这个距离内站着别的 bot 就错身让路（EBot 窄道让路的简化版）
+#define AgPB_FRIEND_BLOCK_DIST 72.0f
 
 /**
  * 在"服务端本地"执行一条客户端命令。
@@ -77,6 +95,11 @@ CAgPB::CAgPB()
 	m_iGoalWaypoint = -1;
 	m_vStuckAnchor = Vector( 0.0f, 0.0f, 0.0f );
 	m_flStuckCheckTime = 0.0f;
+	m_bRoam = false;
+	m_flNextRoamTime = 0.0f;
+	m_iLastRoamGoal = -1;
+	m_flCampUntil = 0.0f;
+	m_bCampCrouch = false;
 }
 
 bool CAgPB::Create( const BotEngineContext &ctx,
@@ -243,6 +266,31 @@ void CAgPB::Think( CGlobalVars *pGlobals )
 		UpdateRoute( pGlobals, cmd );
 	}
 
+	// 蹲守：到 CAMP 点后原地待一段随机时间（保持朝向；点带 CROUCH 就蹲着）
+	if ( m_flCampUntil > 0.0f && !HasRoute() )
+	{
+		if ( pGlobals->curtime >= m_flCampUntil )
+		{
+			m_flCampUntil = 0.0f;
+			m_bCampCrouch = false;
+		}
+		else
+		{
+			// cmd.Reset() 会把视角清成 0；把当前朝向读回来，站着不乱转
+			cmd.viewangles.y = GetNetVarFloat( "m_angEyeAngles[1]", 0.0f );
+
+			if ( m_bCampCrouch )
+				cmd.buttons |= IN_DUCK;
+		}
+	}
+
+	// 随机漫游：路线走完（或没路线）就再随机挑一个点接着走（蹲守时不挑）
+	if ( m_bRoam && !HasRoute() && m_flCampUntil <= 0.0f && pGlobals->curtime >= m_flNextRoamTime )
+	{
+		if ( !StartRandomRoute() )
+			m_flNextRoamTime = pGlobals->curtime + AgPB_ROAM_RETRY;
+	}
+
 	// 【弹道跳/调试】把本 tick 的速度覆盖值写进引擎（真成员地址），
 	// 时序：这里 -> RunPlayerMove -> 引擎的 GroundMove/AirMove 在这个速度上继续算
 	// （摩擦、重力，以及 CheckJumpButton 里那个 `+=` 冲量都会叠加在它之上）。
@@ -297,6 +345,10 @@ bool CAgPB::StartRoute( int iGoalWaypoint, char *error, size_t maxlen )
 
 	StopRoute();
 
+	// 开新路线 = 放弃蹲守（比如玩家手动 agpb_bot_goto）
+	m_flCampUntil = 0.0f;
+	m_bCampCrouch = false;
+
 	if ( !IsValid() )
 	{
 		Q_strncpy( error, "bot is not valid (spawned yet?)", (int)maxlen );
@@ -347,6 +399,116 @@ bool CAgPB::StartRoute( int iGoalWaypoint, char *error, size_t maxlen )
 	return true;
 }
 
+// ---------------------------------------------------------------------------
+// 随机漫游（agpb_bot_roam）：EBot / SyPB 的"没目标就随便走"最小版
+// ---------------------------------------------------------------------------
+
+void CAgPB::SetRoam( bool bEnable )
+{
+	m_bRoam = bEnable;
+	m_flNextRoamTime = 0.0f;
+
+	// 关掉漫游时顺手把当前路线停掉，不然还剩半条路要走
+	if ( !bEnable )
+		StopRoute();
+}
+
+/**
+ * 随机挑一个可达路点走过去。
+ *
+ * 只挑 passable 的点（AVOID / 阵营不符等会被 IsWaypointPassable 挡掉），
+ * 优先挑直线距离 >= AgPB_ROAM_MIN_DIST 的；A* 走不通就换一个。
+ * 两轮都挑不到返回 false，Think 里会 1 秒后再试。
+ */
+bool CAgPB::StartRandomRoute()
+{
+	CAgPBWaypoints &wp = BotWaypoints();
+	const int nCount = wp.Count();
+
+	if ( nCount < 2 || !IsValid() || m_pInfo == NULL )
+		return false;
+
+	const Vector vPos = m_pInfo->GetAbsOrigin();
+	const int iStart = wp.FindNearest( vPos, AgPB_ROUTE_PICK );
+
+	if ( !wp.IsValid( iStart ) )
+		return false;
+
+	char szError[192];
+
+	for ( int iPass = 0; iPass < 2; ++iPass )
+	{
+		const bool bPreferFar = ( iPass == 0 );
+
+		for ( int iTry = 0; iTry < AgPB_ROAM_TRIES; ++iTry )
+		{
+			const int iGoal = RandomInt( 0, nCount - 1 );
+
+			if ( iGoal == iStart || iGoal == m_iLastRoamGoal )
+				continue;
+
+			if ( !wp.IsPassable( iGoal, m_iTeam ) )
+				continue;
+
+			const AgPBPath *pGoal = wp.Get( iGoal );
+
+			if ( pGoal == NULL )
+				continue;
+
+			if ( bPreferFar )
+			{
+				if ( ( pGoal->origin - vPos ).Length2D() < AgPB_ROAM_MIN_DIST )
+					continue;
+
+				if ( IsRoamGoalCrowded( pGoal->origin, AgPB_ROAM_SPREAD ) )
+					continue;
+			}
+
+			if ( StartRoute( iGoal, szError, sizeof( szError ) ) )
+			{
+				m_iLastRoamGoal = iGoal;
+				RouteReport( "roam: -> #%d (%d hop(s))", iGoal, RouteCount() - 1 );
+				return true;
+			}
+		}
+	}
+
+	return false;
+}
+
+bool CAgPB::IsRoamGoalCrowded( const Vector &vGoal, float flRadius ) const
+{
+	CAgPBManager &bots = AgPB_Bots();
+
+	for ( int i = 0; i < bots.Count(); ++i )
+	{
+		CAgPB *pOther = bots.Get( i );
+
+		if ( pOther == NULL || pOther == this )
+			continue;
+
+		IPlayerInfo *pOtherInfo = pOther->PlayerInfo();
+
+		if ( pOtherInfo == NULL || pOtherInfo->IsDead() )
+			continue;
+
+		// 已经有 bot 站在目标点附近
+		if ( ( pOtherInfo->GetAbsOrigin() - vGoal ).Length2D() < flRadius )
+			return true;
+
+		// 或者已经有 bot 正朝那个点走
+		if ( pOther->HasRoute() && pOther->RouteGoal() >= 0 )
+		{
+			const AgPBPath *pOtherGoal = BotWaypoints().Get( pOther->RouteGoal() );
+
+			if ( pOtherGoal != NULL && ( pOtherGoal->origin - vGoal ).Length2D() < flRadius )
+				return true;
+		}
+	}
+
+	return false;
+}
+
 void CAgPB::UpdateRoute( CGlobalVars *pGlobals, CBotCmd &cmd )
 {
 	if ( !HasRoute() || m_pInfo == NULL )
@@ -373,6 +535,11 @@ void CAgPB::UpdateRoute( CGlobalVars *pGlobals, CBotCmd &cmd )
 	const Vector vPos = m_pInfo->GetAbsOrigin();
 	const Vector vDelta = pNode->origin - vPos;
 	const float flDist2D = vDelta.Length2D();
+	const float flDist3D = vDelta.Length();
+
+	// 大高差（比如点在自己头顶）：到达判定必须带上 Z，
+	// 否则会被 2D 距离判成"已到"，直接跳过这一步（实测踩过）。
+	const bool bVerticalLeg = fabsf( vDelta.z ) > 32.0f;
 
 	// 到达判定照 EBot（navigate.cpp:643-690）：
 	//   radius >= 50 且不是跳跃边 → 进半径就算到（给"大范围的点"用）
@@ -383,7 +550,13 @@ void CAgPB::UpdateRoute( CGlobalVars *pGlobals, CBotCmd &cmd )
 
 	bool bArrived = false;
 
-	if ( flRadius >= 50.0f && !bJumpLeg )
+	if ( bVerticalLeg )
+	{
+		// 梯子 / 垂直段：只看 3D 距离（梯子上速度低，不做速度外推）
+		const float flCheck = ( flRadius > 4.0f ) ? flRadius : 4.0f;
+		bArrived = ( flDist3D < flCheck );
+	}
+	else if ( flRadius >= 50.0f && !bJumpLeg )
 	{
 		bArrived = ( flDist2D < flRadius );
 	}
@@ -431,20 +604,104 @@ void CAgPB::UpdateRoute( CGlobalVars *pGlobals, CBotCmd &cmd )
 
 		if ( m_iRouteIndex >= m_vecRoute.Count() )
 		{
-			RouteReport( "arrived at waypoint #%d (%d hop(s) walked)", m_iGoalWaypoint, m_vecRoute.Count() - 1 );
+			const int iGoal = m_iGoalWaypoint;
+			const AgPBPath *pGoal = wp.Get( iGoal );
+
+			RouteReport( "arrived at waypoint #%d (%d hop(s) walked)", iGoal, m_vecRoute.Count() - 1 );
+
+			// CAMP 点：原地蹲守一段随机时间（EBot/SyPB 到 camp 点会 PushTask(TASK_CAMP)）
+			if ( pGoal != NULL && ( pGoal->flags & AgPB_WP_CAMP ) != 0 )
+			{
+				float flMin = agpb_camp_min.GetFloat();
+				float flMax = agpb_camp_max.GetFloat();
+
+				if ( flMin < 1.0f )
+					flMin = 1.0f;
+				if ( flMax < flMin )
+					flMax = flMin;
+
+				m_flCampUntil = ( ( pGlobals != NULL ) ? pGlobals->curtime : 0.0f ) + RandomFloat( flMin, flMax );
+				m_bCampCrouch = ( ( pGoal->flags & AgPB_WP_CROUCH ) != 0 );
+
+				const float flCampFor = m_flCampUntil - ( ( pGlobals != NULL ) ? pGlobals->curtime : 0.0f );
+
+				RouteReport( "camping at #%d for %.0f s%s", iGoal, flCampFor,
+				             m_bCampCrouch ? " (crouched)" : "" );
+			}
+
 			StopRoute();
 		}
 
 		return;
 	}
 
-	// 朝下一个点转（视角会跟随 CUserCmd，已实测，见 PROGRESS.md 问题 6）
-	QAngle angTo;
-	VectorAngles( vDelta, angTo );
-	cmd.viewangles.y = angTo.y;
+	// 朝下一个点转（视角会跟随 CUserCmd，已实测，见 PROGRESS.md 问题 6）。
+	// 只用水平方向算 yaw：爬梯子时目标在正上方，水平分量≈0，
+	// 拿三维向量算出来的 yaw 会乱跳（机器人转头撞墙）；这时保持当前朝向。
+	Vector vFlat( vDelta.x, vDelta.y, 0.0f );
+
+	if ( vFlat.LengthSqr() > 1.0f )
+	{
+		QAngle angTo;
+		VectorAngles( vFlat, angTo );
+		cmd.viewangles.y = angTo.y;
+	}
+	else
+	{
+		cmd.viewangles.y = GetNetVarFloat( "m_angEyeAngles[1]", 0.0f );
+	}
 
 	// 前进（USP 跑速上限 250）
 	cmd.forwardmove = AgPB_WALK_SPEED;
+
+	// ---- 队友让行（最简版）----
+	// 最小导航没有避让：正前方站着队友时，序号大的那个错身让路，
+	// 避免一群 bot 互相堵在门口。EBot 的窄道/互锁让路
+	// （navigate.cpp:2833-2950：优先级 + 碰撞探针 + 僵持暂停）是完整版，这里是缩小版。
+	{
+		CAgPBManager &bots = AgPB_Bots();
+		CAgPB *pBlocking = NULL;
+
+		for ( int i = 0; i < bots.Count(); ++i )
+		{
+			CAgPB *pOther = bots.Get( i );
+
+			if ( pOther == NULL || pOther == this )
+				continue;
+
+			IPlayerInfo *pOtherInfo = pOther->PlayerInfo();
+
+			if ( pOtherInfo == NULL || pOtherInfo->IsDead() )
+				continue;
+
+			const Vector vTo = pOtherInfo->GetAbsOrigin() - vPos;
+
+			if ( vTo.Length2D() > AgPB_FRIEND_BLOCK_DIST || fabsf( vTo.z ) > AgPB_FRIEND_BLOCK_DIST )
+				continue;
+
+			QAngle angFace( 0.0f, cmd.viewangles.y, 0.0f );
+			Vector vFwd;
+			AngleVectors( angFace, &vFwd );
+			vFwd.z = 0.0f;
+			VectorNormalize( vFwd );
+
+			Vector vDir( vTo.x, vTo.y, 0.0f );
+			VectorNormalize( vDir );
+
+			if ( DotProduct( vFwd, vDir ) < 0.5f )     // 只看正前方 ±60°
+				continue;
+
+			pBlocking = pOther;
+			break;
+		}
+
+		// 对方 edict 序号更小 = 来得更早 → 让他：自己错身 + 减速
+		if ( pBlocking != NULL && pBlocking->Index() < m_iIndex )
+		{
+			cmd.sidemove = AgPB_WALK_SPEED * 0.6f * ( ( m_iIndex & 1 ) ? 1.0f : -1.0f );
+			cmd.forwardmove *= 0.25f;
+		}
+	}
 
 	// 蹲：EBot 的 WAYPOINT_CROUCH 意思是"必须蹲着才能到达这个点"
 	//   - 正要走向的点带 CROUCH → 一路按着蹲
