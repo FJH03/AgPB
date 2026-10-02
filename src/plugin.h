@@ -19,6 +19,7 @@
 #include <engine/iserverplugin.h>
 
 #include "version_gen.h"
+#include "game_target.h"
 
 class AgPBPlugin : public ISmmPlugin, public IMetamodListener
 {

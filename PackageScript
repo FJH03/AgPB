@@ -1,0 +1,42 @@
+# vim: set sts=2 ts=8 sw=2 tw=99 et ft=python:
+#
+# Packaging script, SourceMod / Metamod style.
+# AMBuild reads build scripts with the system locale codec (GBK here), so this
+# file must stay pure ASCII -- see AGENTS.md.
+#
+# After "ambuild" this produces build/package/:
+#   addons/AgPB/bin/win64/agpb_mm.dll
+#   addons/AgPB/waypoints/            (runtime data folder)
+#   addons/metamod/AgPB.vdf
+# The zip root is addons/, so extracting into cstrike/ deploys the plugin.
+# Run "py package.py" afterwards to create the release zip.
+import os
+
+builder.SetBuildFolder('package')
+
+BIN64_FOLDER = {
+  'windows': 'win64',
+  'linux': 'linuxsteamrt64',
+  'mac': 'osx64',
+}
+
+plugin_name = MMSPlugin.metadata['name']
+
+# Ship the vdf from configs/metamod/ (SourceMod layout: addons/ exists only in the package).
+metamod_folder = builder.AddFolder(os.path.join('addons', 'metamod'))
+builder.AddCopy(
+  os.path.join(builder.sourcePath, 'configs', 'metamod', plugin_name + '.vdf'),
+  metamod_folder)
+
+for task in MMSPlugin.binaries:
+  target = task.target
+  if target.arch == 'x86_64':
+    bin_path = os.path.join('addons', plugin_name, 'bin', BIN64_FOLDER[target.platform])
+  else:
+    bin_path = os.path.join('addons', plugin_name, 'bin')
+
+  bin_folder = builder.AddFolder(bin_path)
+  builder.AddCopy(task.binary, bin_folder)
+
+# Runtime data folder; the plugin also creates it on demand.
+builder.AddFolder(os.path.join('addons', plugin_name, 'waypoints'))

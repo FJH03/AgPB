@@ -46,11 +46,11 @@ ConVar agpb_wp_autowayzone( "agpb_wp_autowayzone", "1", FCVAR_GAMEDLL,
 ConVar agpb_wp_maxjump( "agpb_wp_maxjump", "57", FCVAR_GAMEDLL,
                         "Max height difference that still counts as reachable/jumpable "
                         "(CS:S standing jump = 57, duck jump = 42)." );
-// 玩家体积用哪套：0 = 自动（先量真人玩家的碰撞盒，再读引擎的
-// sv_cs_use_legacy_viewvectors），1 = 强制老 CS:S（62/45），2 = 强制 CS:GO 风格（72/54）
+// 玩家体积用哪套：0 = 自动（CS:CZS 量真人碰撞盒 + sv_cs_use_legacy_viewvectors；
+// CSS / CS:GO 编译期固定各自规格），1 = 强制老 CS:S（62/45），2 = 强制 CS:GO 风格（72/54）
 ConVar agpb_wp_hullmode( "agpb_wp_hullmode", "0", FCVAR_GAMEDLL,
-                         "Player hull for traces: 0=auto (read the real collision box, then "
-                         "sv_cs_use_legacy_viewvectors), 1=CS:S (62/45), 2=CS:GO style (72/54)." );
+                         "Player hull for traces: 0=auto (target default), "
+                         "1=CS:S (62/45), 2=CS:GO style (72/54)." );
 
 // 起点的最大吸附距离（EBot 一律用 75）
 #define AgPB_PICK_RANGE 75.0f

@@ -1039,8 +1039,13 @@ enum AgPBHullKind
 	AgPB_HULL_DUCK,
 };
 
-// 引擎那个开关（补丁加的）：1 = 老 CS:S 体积（62/45），0 = CS:GO 风格（72/54）
-#define AgPB_HULLMODE_CONVAR "sv_cs_use_legacy_viewvectors"
+// [game-diff] 碰撞体积规格（用户指出的第 1 条差异）：
+//   CS:CZS（当前项目）—— 引擎有 `sv_cs_use_legacy_viewvectors`，同时支持两套：
+//                        1 = 老 CS:S（62/45），0 = CS:GO 风格（72/54）；
+//   CSS / CS:GO        —— 都没有这个 convar，各自固定一套，编译期直接定死。
+#if defined( AGPB_GAME_CSCZS )
+	#define AgPB_HULLMODE_CONVAR "sv_cs_use_legacy_viewvectors"
+#endif
 
 // 当前生效的尺寸（AgPB_RefreshHullSize 里刷新）
 static float s_flHullStandZ = AgPB_HULL_STAND_Z_CSS;
@@ -1048,11 +1053,14 @@ static float s_flHullDuckZ  = AgPB_HULL_DUCK_Z_CSS;
 static float s_flNextHullRefresh = 0.0f;
 
 /**
- * 判定当前引擎用的是哪套体积（0 = 自动 / 1 = CSS / 2 = CS:GO 风格）。
+ * 判定当前用的体积规格（0 = 自动 / 1 = 老 CS:S（62/45）/ 2 = CS:GO 风格（72/54））。
  *
- * 顺序：① 直接量真人玩家的碰撞盒（最权威，62/45 与 72/54 互相不会混）；
- *       ② 引擎开关 `sv_cs_use_legacy_viewvectors`；③ 都没有就按老 CS:S 算。
- * 半秒刷一次就够（convar 改了也来得及，且不会每帧做字符串查找）。
+ * 自动模式按目标游戏走编译期分支（[game-diff]，见 game_target.h）：
+ *   CS:CZS —— ① 量真人玩家的碰撞盒；② 引擎开关 `sv_cs_use_legacy_viewvectors`；
+ *             ③ 都没有就按老 CS:S 算；
+ *   CSS    —— 固定老 CS:S 规格（62/45）；
+ *   CS:GO  —— 固定 CS:GO 规格（72/54）。
+ * convar `agpb_wp_hullmode` 仍可强制 1 / 2（调试用）。半秒刷一次就够。
  */
 static void AgPB_RefreshHullSize()
 {
@@ -1065,6 +1073,14 @@ static void AgPB_RefreshHullSize()
 
 	if ( iMode == 0 )
 	{
+#if defined( AGPB_GAME_CSS )
+		// [game-diff] CSS：没有 sv_cs_use_legacy_viewvectors，固定老 CS:S 规格
+		iMode = 1;
+#elif defined( AGPB_GAME_CSGO )
+		// [game-diff] CS:GO：没有 sv_cs_use_legacy_viewvectors，固定 CS:GO 规格
+		iMode = 2;
+#else
+		// [game-diff] CS:CZS：引擎同时支持两套碰撞规格
 		// ① 真人玩家的碰撞盒：站立 62/72、蹲着 45/54，四个值互不重叠
 		edict_t *pHost = AgPB_FindHost();
 
@@ -1097,6 +1113,7 @@ static void AgPB_RefreshHullSize()
 			else
 				iMode = 1;                  // ③ 没有这个 convar → 就按老 CS:S 的算
 		}
+#endif
 	}
 
 	if ( iMode == 2 )

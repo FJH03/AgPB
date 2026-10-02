@@ -8,9 +8,9 @@ Counter-Strike: Source（Source 1 / Win64）的 agent 控制 bot —— Metamod:
 - 玩家侧的一切（移动 / 视角 / 按键）都走 `CUserCmd`，不写服务端实体字段。
 - 现状 / 进度 / 下一步看 [`PROGRESS.md`](PROGRESS.md)。
 
-## 构建
+## 需要什么
 
-`E:\Plugins-Platform` 下需要同层放齐这几个目录：
+`E:\Plugins-Platform` 下同层放齐这几个目录：
 
 ```
 E:\Plugins-Platform\
@@ -20,43 +20,14 @@ E:\Plugins-Platform\
   AgPB\                  # 本插件
 ```
 
-```powershell
-cd E:\Plugins-Platform\AgPB
-mkdir build
-cd build
-cmd /c '"E:\vs\VC\Auxiliary\Build\vcvarsall.bat" amd64 && chcp 65001 && set PYTHONIOENCODING=utf-8 && py ../configure.py -s css --targets x86_64 --enable-optimize && ambuild'
-```
+SDK 静态库必须先编好：`hl2sdk-css\source-engine-czero\build\{tier0,vstdlib,mathlib,tier1}\*.lib`
+（Metamod:Source 自身也依赖，缺了直接 `LNK1181`）。
 
-产物：`build\agpb_mm\windows-x86_64\agpb_mm.dll`
+## 构建与部署
 
-前提：`hl2sdk-css\source-engine-czero\build\{tier0,vstdlib,mathlib,tier1}\*.lib` 必须先存在，
-否则链接失败（Metamod:Source 自身也依赖这几个库）。
-
-## 部署
-
-```
-cstrike/addons/AgPB/bin/win64/agpb_mm.dll
-cstrike/addons/metamod/AgPB.vdf
-```
-
-`AgPB.vdf`：
-
-```
-"Metamod Plugin"
-{
-	"alias"		"AgPB"
-	"file"		"addons/AgPB/bin/win64/agpb_mm"
-}
-```
-
-启动后控制台出现 `[AgPB] loaded. ...` 即部署成功。建议 `server.cfg` 里关掉引擎自带 bot：
-
-```
-bot_quota 0
-bot_quota_mode normal
-```
-
-服务器运行中 DLL 被占用，换文件必须先停服。
+命令模板、包目录、部署步骤、红线都在 [`AGENTS.md`](AGENTS.md) §2，这里不重复。
+一句话版本：`ambuild` 一条命令，产出 `build\package\addons\...`（SourceMod 目录约定，
+不压 zip），整个覆盖到游戏的 `cstrike\addons\` 即完成部署。
 
 ## 文档
 
@@ -70,5 +41,6 @@ bot_quota_mode normal
 
 ## 许可证
 
-[GPL-3.0](LICENSE)。M3 起会移植 CS-EBOT（上游 SyPB，GPL-3.0）的代码。
+[GPL-3.0](LICENSE)。M3 起移植 SyPB / CS-EBOT（GPL-3.0）的代码，基线是 SyPB，
+CS-EBOT 只作对照（僵尸模式专用 fork）。
 参考实现：[CS-EBOT](https://github.com/EfeDursun125/CS-EBOT) → [SyPB](https://github.com/CCNHsK-Dev/SyPB) → [YaPB](https://github.com/yapb/yapb)。

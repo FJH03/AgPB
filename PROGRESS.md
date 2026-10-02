@@ -12,6 +12,8 @@
   几何体检（可达性、要不要跳）/ wayzone 自动到达半径。
 - 编辑器可用：HUD 中文数字菜单 + `agpb_wp_*` 命令 + 叠加层绘制（EBot 配色，上服实测）。
 - 最小导航可用：`agpb_bot_goto` 沿路点转向 / 前进、按边起跳、按点蹲行、卡住就停。
+- 打包可用：`ambuild` 直接产出 SourceMod 目录约定的 `build/package/addons/...`
+  （`PackageScript`），拷进 `cstrike/` 即完成部署；不压 zip。
 - 没做：EBot 替身层（`Entity` / `Client` / `Engine`）、真正的 `navigate` / `control` / `combat`、
   UDP 桥、LLM 战术层。
 - 已知问题：freezetime 时 bot 独占一队会触发 `Radio()` 崩溃（**未修**，见
@@ -84,15 +86,38 @@
 | `src/wpedit.*` | 编辑器状态、动作、ConVar |
 | `src/wpdraw.*` | 叠加层绘制（EBot 配色） |
 | `addons/AgPB/waypoints/<map>.agpw` | 每张图的路点数据（换图自动读盘） |
+| `PackageScript` | AMBuild 打包脚本：组装 `build/package/addons/`（纯 ASCII） |
 
 ## 已定决策（摘要）
 
 - 不用 SourceMod；不用 `CCSBot`；不写服务端实体字段（写入层只做诊断）。
+- 多目标适配：csczs（当前）/ css / csgo；游戏差异由用户指出后逐条登记，
+  实现处用 `AGPB_GAME_*` 宏隔离（编译期硬编码，不探内存）。
+- 移植基线用 **SyPB**（通用 bot），CS-EBOT 只作实现对照（自述仅面向 ZP/ZE/Biohazard）；
+  同名文件 diff 着看，僵尸专用分支直接砍。
 - netvar 走 SendTable（零特征码）；寻路用手工路点图 + 单源 Dijkstra；不做自动连线。
 - 菜单用 `ShowMenu` usermessage，中文；控制台英文。
 - 尺寸 / 跳跃高度取 CS:S 源码并运行期判定（站立 62、蹲姿 45 或 72/54；跳 57、蹲跳 42）。
 - 替身层的 `entvars_t` 走访存属性（代理类型），不再走影子结构方案。
 - 许可证 GPL-3.0（要移植 EBot / SyPB 的代码）。
+
+## 移植对照（SyPB ↔ CS-EBOT）
+
+两边同名核心 10 个文件：`basecode` / `combat` / `control` / `engine` / `globals` /
+`interface` / `navigate` / `netmsg` / `support` / `waypoint` —— **以 SyPB 版为基线**，
+EBot 版逐个 diff，取它更新的实现（异步寻路、符号版本化等），僵尸专用分支砍掉。
+
+- EBot 独有：`ssm/`（战斗状态机：投雷 / 致盲 / 破门 / 用按钮…）、`clib`、`bot_query_hook*`、`tinythread`
+- SyPB 独有：`Experience`（经验 / 技能）、`chatlib`（聊天）—— 我们用不上
+
+## 游戏差异登记（csczs / css / csgo）
+
+> 差异以用户指出的为准，逐条登记；实现处用 `src/game_target.h` 的 `AGPB_GAME_*` 宏显式分支，
+> 代码注释标 `[game-diff]`。
+
+| # | 功能点 | csczs（当前） | css | csgo | 实现位置 |
+|---|---|---|---|---|---|
+| 1 | 玩家碰撞体积 | 有 `sv_cs_use_legacy_viewvectors 1/0`，**同时支持两套**（62/45 与 72/54） | 无此 cvar，固定 **62/45** | 无此 cvar，固定 **72/54** | `AgPB_RefreshHullSize()`（`waypoint.cpp`）`#if AGPB_GAME_*` 分支；CSS / CS:GO 编译期定死 |
 
 ## 下一步
 

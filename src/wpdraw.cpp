@@ -173,8 +173,8 @@ static void DrawTextAt( const Vector &vOrigin, int iLine, const char *pszFormat,
 
 static void DrawNode( const AgPBPath &path, bool bXray )
 {
-	// 高度用当前引擎真实的体积（站立 62/72、蹲姿 45/54，随 sv_cs_use_legacy_viewvectors 变），
-	// 不再用 GoldSrc 的 72/36
+	// 高度用当前目标生效的体积（站立 62/72、蹲姿 45/54）：CS:CZS 随
+	// sv_cs_use_legacy_viewvectors 变，CSS / CS:GO 各自固定 —— 见 game_target.h 的 [game-diff]
 	const float flHeight = ( ( path.flags & AgPB_WP_CROUCH ) != 0 )
 	                       ? AgPB_HullDuckHeight()
 	                       : AgPB_HullStandHeight();

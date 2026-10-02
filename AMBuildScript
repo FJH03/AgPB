@@ -11,10 +11,20 @@ def additionalLibs(context, binary, sdk):
   ]
 
 def additionalDefines(context, binary, sdk):
+  game_defines = {
+    'csczs': 'AGPB_GAME_CSCZS',
+    'css': 'AGPB_GAME_CSS',
+    'csgo': 'AGPB_GAME_CSGO',
+  }
+  game = (builder.options.game or 'csczs').lower()
+  if game not in game_defines:
+    raise Exception('Invalid --game "%s"; valid values: %s' % (game, ', '.join(game_defines)))
   return [
     # Source 1 SDK headers redefine C++ keywords (e.g. abstract_class),
     # so keep this in sync with the Metamod:Source core build.
     '_ALLOW_KEYWORD_MACROS',
+    # Target game switch, see src/game_target.h and AGENTS.md [game-diff] rule.
+    game_defines[game],
   ]
 
 def additionalIncludes(context, binary, sdk):
@@ -473,6 +483,7 @@ MMSPlugin.configure()
 
 BuildScripts = [
   'AMBuilder',
+  'PackageScript',
 ]
 
 builder.Build(BuildScripts, { 'MMSPlugin': MMSPlugin })

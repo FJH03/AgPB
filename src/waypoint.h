@@ -26,6 +26,8 @@
 #include <mathlib/vector.h>
 #include <utlvector.h>
 
+#include "game_target.h"
+
 class IFileSystem;
 struct edict_t;
 
@@ -45,8 +47,10 @@ struct edict_t;
 // 站立与蹲姿体积（**两套**）：game/shared/cstrike/cs_gamerules.cpp:105/121
 //     g_CSSViewVectors    站立 (-16,-16,0)..(16,16,62)  蹲姿 (…,45)   ← 老 CS:S
 //     g_CSGOViewVectors   站立 (…,72)                    蹲姿 (…,54)   ← CS:GO 风格
-//     由引擎开关 `sv_cs_use_legacy_viewvectors` 选（`GetViewVectors()` 三目：
-//     1 → g_CSSViewVectors，0 → g_CSGOViewVectors；原点都在脚下，z 从 0 起）
+//     [game-diff] 用哪套按目标游戏（game_target.h）：
+//       CS:CZS（当前项目）—— 引擎有 `sv_cs_use_legacy_viewvectors` 在两套间切
+//                            （1 → g_CSSViewVectors，0 → g_CSGOViewVectors；原点在脚下）
+//       CSS / CS:GO       —— 都没有这个 convar，各自固定一套（CSS 62/45；CS:GO 72/54）
 // 跳跃高度：game/shared/cstrike/cs_gamemovement.cpp:723-775
 //     站立 flJumpHeight = 57，蹲着（含 duckUntilOnGround）= 42
 //     起跳速度 v += sqrt(2 * 800 * h)
@@ -64,10 +68,11 @@ struct edict_t;
 /**
  * 当前生效的站立 / 蹲姿高度。
  *
- * 运行期自动判定（不写死某一套）：
- *   1. 看**真人玩家的碰撞盒**（ICollideable::OBBMins/OBBMaxs）—— 62/45 或 72/54，最权威；
- *   2. 拿不到就退到引擎那个开关 `sv_cs_use_legacy_viewvectors`（1 → CSS，0 → CS:GO 风格）；
- *   3. 想强制用 convar `agpb_wp_hullmode`（0 自动 / 1 强制 CSS / 2 强制 CS:GO）。
+ * 自动模式按目标游戏判定（实现见 waypoint.cpp 的 AgPB_RefreshHullSize()）：
+ *   CS:CZS —— 先量真人玩家的碰撞盒（ICollideable::OBBMins/OBBMaxs），拿不到再读
+ *             `sv_cs_use_legacy_viewvectors`，最后按老 CS:S；
+ *   CSS / CS:GO —— 编译期固定各自规格（不做运行期探测）。
+ * 想强制就用 convar `agpb_wp_hullmode`（0 自动 / 1 强制 CSS / 2 强制 CS:GO）。
  */
 float AgPB_HullStandHeight();
 float AgPB_HullDuckHeight();
