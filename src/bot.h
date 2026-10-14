@@ -27,6 +27,8 @@
 
 #include "netvars.h"
 
+class IServerTools;
+
 // CS:S 队伍编号（见 game/shared/cstrike/cs_shareddefs.h）
 #define AgPB_TEAM_SPECTATOR 1
 #define AgPB_TEAM_T         2
@@ -45,6 +47,7 @@ struct BotEngineContext
 		pHelpers = NULL;
 		pTrace = NULL;
 		pGameEnts = NULL;
+		pServerTools = NULL;
 	}
 
 	IBotManager         *pBotManager;
@@ -53,12 +56,15 @@ struct BotEngineContext
 	IServerPluginHelpers *pHelpers;
 	IEngineTrace        *pTrace;
 	IServerGameEnts     *pGameEnts;
+	IServerTools        *pServerTools; // Optional, read-only entity key queries.
 
 	bool IsReady() const
 	{
 		return pBotManager != NULL && pEngine != NULL && pPlayerInfoManager != NULL;
 	}
 };
+
+struct AgPBObstacle;
 
 class CAgPB
 {
@@ -182,6 +188,13 @@ public:
 	/** 行走过程的状态回显（服务器控制台）。 */
 	void RouteReport( const char *pszFormat, ... ) const;
 
+	/** ZBot-style read-only path inspection; explicit waypoint probes a single segment. */
+	bool InspectObstacle( AgPBObstacle &result, int iWaypoint = -1, bool bStuck = false,
+	                      uintp onlyHandle = (uintp)INVALID_EHANDLE_INDEX ) const;
+	void ReportObstacle( const AgPBObstacle &result ) const;
+	/** Cheat-only loadout fixture; never used by AI weapon selection. */
+	bool TestWeapon( const char *name, bool only );
+
 private:
 	void TryJoinTeam( float flCurTime );
 
@@ -193,6 +206,11 @@ private:
 
 	/** 每 tick 的"走路"部分：把路线翻译成 CUserCmd。 */
 	void UpdateRoute( CGlobalVars *pGlobals, CBotCmd &cmd );
+	void ClearBreakable();
+	bool BeginBreakable( const AgPBObstacle &obstacle, float now, bool crouch );
+	bool UpdateBreakable( CGlobalVars *pGlobals, CBotCmd &cmd );
+	void FailBreakable( const char *reason );
+	edict_t *SelectBreakableWeapon( CBotCmd &cmd, bool allowKnife ) const;
 
 	char                 m_Name[64];
 	edict_t             *m_pEdict;
@@ -218,6 +236,23 @@ private:
 	int    m_iGoalWaypoint;
 	Vector m_vStuckAnchor;
 	float  m_flStuckCheckTime;
+	float  m_flNextObstacleCheck;
+	uintp  m_uLastObstacleHandle;
+	bool   m_bLastObstacleFound;
+	uintp  m_uBreakHandle;
+	uintp  m_uBreakWeapon;
+	Vector m_vBreakHit;
+	float  m_flBreakDeadline;
+	float  m_flBreakNextAttack;
+	int    m_iBreakBestHealth;
+	int    m_iBreakClip;
+	int    m_iBreakShots;
+	int    m_iBreakNoDamageShots;
+	bool   m_bBreakCrouch;
+	bool   m_bBreakNear;
+	bool   m_bBreakRelease;
+	bool   m_bBreakKnifePending;
+	float  m_flBreakWeaponAttack;
 
 	// 随机漫游（agpb_bot_roam）
 	bool   m_bRoam;
@@ -250,6 +285,7 @@ public:
 
 	int Count() const { return m_Bots.Count(); }
 	CAgPB *Get( int listIndex );
+	void ReportNamedObstacle( const char *name ) const;
 
 private:
 	BotEngineContext m_Ctx;

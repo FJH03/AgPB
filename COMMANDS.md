@@ -8,11 +8,12 @@
 | 命令 | 说明 |
 |---|---|
 | `agpb_add [team]` | 创建 bot：1=观察者 2=T 3=CT（默认用 `agpb_team`） |
-| `agpb_team <idx> <team>` | 运行时切换队伍 |
+| `agpb_bot_team <idx> <team>` | 运行时切换队伍 |
 | `agpb_list` | 列出所有 bot（队伍 / 血量 / 武器 / 坐标） |
 | `agpb_kick <idx\|all>` | 移除 bot |
 | `agpb_netlist <bot-idx> [filter]` ｜ `agpb_netlist ent <edict-idx> [filter]` | 打印实体 SendTable 字段（名字 / 偏移 / 当前值） |
 | `agpb_nethandle <idx> <field>` | 解包 EHANDLE 并解析回实体（entry / serial / class） |
+| `agpb_obstacle_entity <targetname>` | **只读诊断**：通过公开 server tools 查询一个命名实体的位置、模型索引、碰撞组、生命值与候选分类 |
 | `agpb_ents [class-filter]` | 列出世界实体（edict 下标 / 类名 / 血量 / 坐标） |
 | `agpb_netwrite <bot-idx> <field> <value> [element]` ｜ `... ent <edict-idx> ...` | **开发 / 诊断工具**：写网络字段并打印邻字段对照；不作为 bot 的行为手段（[`PROGRESS.md`](PROGRESS.md) 问题 14） |
 
@@ -65,16 +66,34 @@
 |---|---|
 | `agpb_bot_goto <idx> [wp]` | 让 bot 沿 A* 路线走过去（不给 wp = 准星指向 / 缓存点） |
 | `agpb_bot_stop <idx\|all>` | 停止行走 |
+| `agpb_bot_obstacle <idx> [wp\|-1] [stuck=0\|1]` | **只读诊断**：按 ZBot 思路扫路径体积；默认检查当前路线，显式 wp 则从 bot 当前坐标直扫该点（不寻路）。`stuck=1` 扩大近处检测体积；停止后需显式给 wp。输出实体、碰撞组、位置、可见性与可破坏候选，未知受伤属性报 `unknown` |
 | `agpb_bot_roam <idx\|all> [0\|1]` | **随机漫游**：没路线时随机挑一个可达点走过去，到了再挑下一个；会避开别的 bot 的目标点，正前方有队友时按序号错身让路。不加参数 = 开，`0` = 关（`agpb_bot_stop` 也会关） |
 | `agpb_bot_vel <idx> <x> <y> <z>` | **开发用**：下一 tick 直接写 `m_vecVelocity`（弹道跳原语） |
+| `agpb_bot_testweapon <idx> <weapon_m4a1\|weapon_usp\|weapon_knife> [only]` | **sv_cheats 测试夹具**：仅活着且无路线的 bot 可用；公开 IBotController 创建 / 配备武器，`only` 先清空物品。仅用于构造武器测试条件，不参与 AI 决策 |
+
+行走时会自动处理可见、符合筛选的可破坏障碍：使用持有枪械瞄准 / 开火 / 换弹，近处持刀可挥刀，
+暂停移动但保留原路线，障碍消失或移出路径后自动续路。卡住时也会扩大近处探测。
+远处持刀优先换有弹枪械，只有刀则继续接近；近处超出保守近战探测距离时也尝试换枪。
+枪口 / 近战射线被玩家或其他物体挡住时不攻击；每个障碍最多处理 10 秒，连续六次攻击没有确认伤害或破坏则停止。
+失败会关闭自动行走 / 漫游并输出原因，不自动更换目标。`agpb_obstacle_debug` 只控制额外诊断，
+自动破坏不依赖它；`agpb_bot_obstacle` 本身仍是只读查询。生命值可由公开只读 key 查询补读，
+未暴露的受伤属性保持 `unknown`，候选判断不等于保证可破坏。
 
 ## ConVar
+
+可选三方假客户端兼容层：先按 [部署说明](compat/sourcemod/README.md) 构建 / 安装 SourceMod 补丁。
+
+| 命令 / ConVar | 说明 |
+|---|---|
+| `sm_agpb_guard_status` | 查询补丁 active / intact，以及空 bot、空 profile、有效原生分支的实际命中计数；进入敌队测试前必须 active=1 intact=1 |
+| `sm_agpb_fakeclient_guard` | 默认 1，开关当前 DLL 版本的 Radio 兼容补丁；有假客户端连接时拒绝关闭。卸载前先踢所有假客户端，关闭后原始崩溃风险恢复 |
 
 | ConVar | 默认 | 说明 |
 |---|---|---|
 | `agpb_enable` | 1 | 0 = 不驱动 bot（路点编辑器 / 绘制 / 菜单不受影响） |
 | `agpb_team` | 2 | `agpb_add` 不带队伍参数时用的默认队 |
 | `agpb_mode` | normal | 运行期游戏模式：`normal`（原生）/ `zombie`（ZM-ZE，行为未实现）。按图在 cfg 里切 |
+| `agpb_obstacle_debug` | 0 | 1 = 行走时每 0.25 秒输出路径障碍变化；卡住时输出扩大检测结果。只控制额外日志，自主破坏 / 续路不依赖此开关 |
 | `agpb_wp_show` | 0 | 绘制路点 |
 | `agpb_wp_labels` | 0 | 画下标 |
 | `agpb_wp_alllinks` | 1 | 画所有连线 |

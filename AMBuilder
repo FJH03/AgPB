@@ -10,6 +10,7 @@ for sdk_target in MMSPlugin.sdk_targets:
   binary.sources += [
     'src/plugin.cpp',
     'src/bot.cpp',
+    'src/obstacle.cpp',
     'src/netvars.cpp',
     'src/waypoint.cpp',
     'src/menu.cpp',

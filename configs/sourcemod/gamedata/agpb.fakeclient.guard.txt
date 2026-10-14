@@ -1,0 +1,105 @@
+// csczs Win64 server.dll, 2026-10-11. Optional compatibility layer only.
+// SHA-256 BB3C04E0BC70BE88A84CE430712BBC6F932AB2EA074CAE16DCB300F4ACA9D6B7
+// CRC gates the entire section; no offsets or signatures for any other build.
+// Radio: RVA 0x683770..0x683B83, patch at 0x683B04, cleanup 0x683B5D.
+// Cave: 0x9B4600, verified INT3 padding after the final text function;
+// no runtime-function entry overlaps its 80 bytes. No DLL file is modified.
+// Stub: null bot -> counter/cleanup; load profile; null profile -> counter/cleanup;
+// valid bot/profile -> counter/return to 0x683B0B. No stack adjustment.
+"Games"
+{
+    "#default"
+    {
+        "CRC"
+        {
+            "server"
+            {
+                "windows64" "770BAE64"
+            }
+        }
+        "Signatures"
+        {
+            "RadioAnchor"
+            {
+                "library" "server"
+                "windows64" "\x48\x8B\x44\x24\x78\x48\x8B\x80\x48\x1E\x00\x00\x48\x89\x84\x24\x98\x00\x00\x00\x48\x8B\x84\x24\x98\x00\x00\x00\x8B\x40\x6C\x89"
+            }
+            "RadioCaveAnchor"
+            {
+                "library" "server"
+                "windows64" "\x48\x83\xEC\x28\x48\x8B\x0D\x5D\x66\x50\x00\xE8\x75\x1D\x68\xFF\x48\xC7\x05\x4D\x66\x50\x00\x00\x00\x00\x00\x48\x83\xC4\x28\xC3\xCC\xCC\xCC\xCC\xCC\xCC\xCC\xCC\xCC\xCC\xCC\xCC\xCC\xCC\xCC\xCC\xCC\xCC\xCC\xCC\xCC\xCC\xCC\xCC\xCC\xCC\xCC\xCC\xCC\xCC\xCC\xCC"
+            }
+        }
+        "Addresses"
+        {
+            "RadioProfile"
+            {
+                "signature" "RadioAnchor"
+                "offset" "5"
+            }
+            "RadioCleanup"
+            {
+                "signature" "RadioAnchor"
+                "offset" "94"
+            }
+            "RadioGuardCave"
+            {
+                "signature" "RadioCaveAnchor"
+                "offset" "64"
+            }
+        }
+        "Offsets"
+        {
+            "SiteSize"
+            {
+                "windows64" "7"
+            }
+            "StubSize"
+            {
+                "windows64" "80"
+            }
+            "NullBotCounter"
+            {
+                "windows64" "64"
+            }
+            "NullProfileCounter"
+            {
+                "windows64" "68"
+            }
+            "NativeCounter"
+            {
+                "windows64" "72"
+            }
+            "NormalCountRel32"
+            {
+                "windows64" "19"
+            }
+            "ReturnRel32"
+            {
+                "windows64" "24"
+            }
+            "NullBotCountRel32"
+            {
+                "windows64" "30"
+            }
+            "NullBotExitRel32"
+            {
+                "windows64" "35"
+            }
+            "NullProfileCountRel32"
+            {
+                "windows64" "41"
+            }
+            "NullProfileExitRel32"
+            {
+                "windows64" "46"
+            }
+        }
+        "Keys"
+        {
+            "SiteOriginal" "488B80481E0000"
+            "CleanupOriginal" "488D8C24A0000000E8B7159AFF90"
+            "StubTemplate" "4885C07417488B80481E00004885C07416FF0500000000E900000000FF0500000000E900000000FF0500000000E900000000CCCCCCCCCCCCCCCCCCCCCCCCCCCC000000000000000000000000CCCCCCCC"
+        }
+    }
+}

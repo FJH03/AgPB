@@ -9,22 +9,28 @@
 #include <in_buttons.h>
 #include <const.h>
 #include <mathlib/mathlib.h>
+#include <toolframework/itoolentity.h>
 
 #include <ISmmPlugin.h>
 
 #include "plugin.h"
 #include "bot.h"
 #include "waypoint.h"
+#include "obstacle.h"
 
 #include <vstdlib/random.h>
 
 extern CGlobalVars *gpGlobals;
+extern bool AgPB_IsRoundFrozen();
 
 // 蹲守时长（秒，随机区间）；EBot/SyPB 是 35~60 秒，这里默认短一点方便测试
 ConVar agpb_camp_min( "agpb_camp_min", "8", FCVAR_GAMEDLL,
                       "Min seconds a bot camps at a CAMP waypoint." );
 ConVar agpb_camp_max( "agpb_camp_max", "20", FCVAR_GAMEDLL,
                       "Max seconds a bot camps at a CAMP waypoint." );
+
+static ConVar agpb_obstacle_debug( "agpb_obstacle_debug", "0", FCVAR_GAMEDLL,
+                                  "Log path obstacle changes using Source ZBot-style volume probes." );
 
 // ---------------------------------------------------------------------------
 // 最小导航的参数
@@ -95,6 +101,10 @@ CAgPB::CAgPB()
 	m_iGoalWaypoint = -1;
 	m_vStuckAnchor = Vector( 0.0f, 0.0f, 0.0f );
 	m_flStuckCheckTime = 0.0f;
+	m_flNextObstacleCheck = 0.0f;
+	m_uLastObstacleHandle = (uintp)INVALID_EHANDLE_INDEX;
+	m_bLastObstacleFound = false;
+	ClearBreakable();
 	m_bRoam = false;
 	m_flNextRoamTime = 0.0f;
 	m_iLastRoamGoal = -1;
@@ -182,6 +192,8 @@ bool CAgPB::SetTeam( int team )
 	}
 
 	m_iTeam = team;
+	StopRoute();
+	m_bRoam = false;
 
 	// 重新开始一轮切换流程。
 	m_bClassRequested = false;
@@ -255,10 +267,17 @@ void CAgPB::Think( CGlobalVars *pGlobals )
 	// RunPlayerMove()：武器逻辑、动画与 PostThink 都挂在
 	// CPlayerMove::RunCommand 的调用链上。
 	//
-	// 目前不下发任何输入 —— 移动 / 瞄准 / 战斗将由移植过来的
-	// control / navigate / combat 模块填充这里。
+	// Navigation and obstacle firing fill the same public command chain.
 	CBotCmd cmd;
 	cmd.Reset();
+	// Releasing movement/attack must not snap an idle bot back to world yaw 0.
+	cmd.viewangles.x = GetNetVarFloat( "m_angEyeAngles[0]", 0.0f );
+	cmd.viewangles.y = GetNetVarFloat( "m_angEyeAngles[1]", 0.0f );
+	if ( m_pInfo != NULL && m_pInfo->IsDead() && HasRoute() )
+	{
+		StopRoute();
+		m_bRoam = false;
+	}
 
 	// 有路线就走路线（最小导航）。
 	if ( HasRoute() )
@@ -334,9 +353,362 @@ void CAgPB::RouteReport( const char *pszFormat, ... ) const
 
 void CAgPB::StopRoute()
 {
+	ClearBreakable();
 	m_vecRoute.RemoveAll();
 	m_iRouteIndex = 0;
 	m_iGoalWaypoint = -1;
+	m_flNextObstacleCheck = 0.0f;
+	m_uLastObstacleHandle = (uintp)INVALID_EHANDLE_INDEX;
+	m_bLastObstacleFound = false;
+}
+
+void CAgPB::ClearBreakable()
+{
+	m_uBreakHandle = (uintp)INVALID_EHANDLE_INDEX;
+	m_uBreakWeapon = (uintp)INVALID_EHANDLE_INDEX;
+	m_vBreakHit.Init();
+	m_flBreakDeadline = m_flBreakNextAttack = 0.0f;
+	m_iBreakBestHealth = m_iBreakClip = -1;
+	m_iBreakShots = m_iBreakNoDamageShots = 0;
+	m_bBreakCrouch = m_bBreakRelease = false;
+	m_bBreakNear = false;
+	m_bBreakKnifePending = false;
+	m_flBreakWeaponAttack = 0.0f;
+}
+
+bool CAgPB::BeginBreakable( const AgPBObstacle &obstacle, float now, bool crouch )
+{
+	if ( !obstacle.found || !obstacle.breakableCandidate || !obstacle.visible ||
+	     HandleToEdict( obstacle.handle ) == NULL ) return false;
+	if ( !obstacle.nearProbe )
+	{
+		CBotCmd selection;
+		selection.Reset();
+		// ZBot keeps approaching far props if only a knife is available.
+		if ( SelectBreakableWeapon( selection, false ) == NULL && selection.weaponselect == 0 ) return false;
+	}
+	ClearBreakable();
+	m_uBreakHandle = obstacle.handle;
+	m_vBreakHit = obstacle.hitPosition;
+	m_flBreakDeadline = now + 10.0f;
+	m_iBreakBestHealth = obstacle.healthKnown ? obstacle.health : -1;
+	m_bBreakCrouch = crouch;
+	m_bBreakNear = obstacle.nearProbe;
+	ReportObstacle( obstacle );
+	RouteReport( "breaking obstacle ent=%d; preserving hop %d and goal #%d",
+	             NetVar_HandleEntry( m_uBreakHandle ), m_iRouteIndex, m_iGoalWaypoint );
+	return true;
+}
+
+void CAgPB::FailBreakable( const char *reason )
+{
+	RouteReport( "obstacle break failed: %s (ent=%d, shots=%d, goal=#%d) - stopped",
+	             reason, NetVar_HandleEntry( m_uBreakHandle ), m_iBreakShots, m_iGoalWaypoint );
+	StopRoute();
+	m_bRoam = false;
+}
+
+// SyPB pauses navigation while destroying a breakable; CS-EBOT is the
+// implementation cross-check. No zombie branches or health writes are used.
+static int ReadWeaponClip( edict_t *weapon )
+{
+	const BotNetVar *field = AgPB_FindEntityNetVar( weapon, "m_iClip1" );
+	if ( field == NULL || field->type != DPT_Int ) return -1;
+	// DT_LocalWeaponData uses SendPropIntWithMinusOneFlag: its public send
+	// proxy returns the stored int plus one. Decode it for gameplay decisions;
+	// otherwise an empty magazine (0) looks like one remaining round.
+	return AgPB_ReadNetVarInt( weapon, "m_iClip1" ) - 1;
+}
+
+static bool IsObstacleKnife( edict_t *weapon )
+{
+	IServerNetworkable *net = weapon != NULL ? weapon->GetNetworkable() : NULL;
+	const char *name = net != NULL ? net->GetClassName() : NULL;
+	return name != NULL && Q_stricmp( name, "weapon_knife" ) == 0;
+}
+
+bool CAgPB::TestWeapon( const char *name, bool only )
+{
+	if ( !IsValid() || m_pInfo == NULL || m_pInfo->IsDead() || HasRoute() ) return false;
+	// Explicit console fixture only: public bot interface creates/equips items.
+	// Autonomous selection, reload, firing and melee remain CUserCmd-only.
+	if ( only ) m_pController->RemoveAllItems( false );
+	m_pController->SetActiveWeapon( name );
+	return true;
+}
+
+edict_t *CAgPB::SelectBreakableWeapon( CBotCmd &cmd, bool allowKnife ) const
+{
+	uintp handle;
+	edict_t *active = GetNetVarHandleValue( "m_hActiveWeapon", &handle ) ? HandleToEdict( handle ) : NULL;
+	const BotNetVar *weapons = FindNetVar( "m_hMyWeapons" );
+	void *base = NetVarBase();
+	if ( allowKnife && IsObstacleKnife( active ) ) return active;
+	// A reflected clip identifies a firearm; knives/grenades have no positive clip.
+	if ( active != NULL && AgPB_FindEntityNetVar( active, "m_iClip1" ) != NULL )
+	{
+		const int clip = ReadWeaponClip( active );
+		const int ammo = AgPB_ReadNetVarInt( active, "m_iPrimaryAmmoType", -1 );
+		if ( clip > 0 || ( clip == 0 && ammo >= 0 && GetNetVarArrayInt( "m_iAmmo", ammo ) > 0 ) )
+			return active;
+	}
+	if ( base != NULL && weapons != NULL && weapons->type == DPT_Array &&
+	     weapons->elementType == DPT_Int && weapons->stride == sizeof( uintp ) )
+	{
+		for ( int i = 0; i < weapons->elements; ++i )
+		{
+			edict_t *weapon = HandleToEdict( NetVar_GetArrayHandle( base, *weapons, i ) );
+			if ( weapon == NULL ) continue;
+			const int clip = ReadWeaponClip( weapon );
+			const int ammo = AgPB_ReadNetVarInt( weapon, "m_iPrimaryAmmoType", -1 );
+			if ( clip > 0 || ( clip == 0 && ammo >= 0 && GetNetVarArrayInt( "m_iAmmo", ammo ) > 0 ) )
+			{
+				cmd.weaponselect = NetVar_HandleEntry( AgPB_RefEHandle( weapon ) );
+				return NULL; // Wait for engine switch before attacking.
+			}
+		}
+		if ( allowKnife )
+		{
+			for ( int i = 0; i < weapons->elements; ++i )
+			{
+				edict_t *weapon = HandleToEdict( NetVar_GetArrayHandle( base, *weapons, i ) );
+				if ( IsObstacleKnife( weapon ) )
+				{
+					cmd.weaponselect = NetVar_HandleEntry( AgPB_RefEHandle( weapon ) );
+					return NULL;
+				}
+			}
+		}
+	}
+	return NULL;
+}
+
+bool CAgPB::UpdateBreakable( CGlobalVars *globals, CBotCmd &cmd )
+{
+	if ( !NetVar_HandleIsValid( m_uBreakHandle ) ) return false;
+	cmd.forwardmove = cmd.sidemove = cmd.upmove = 0.0f;
+	cmd.buttons &= ~( IN_ATTACK | IN_JUMP );
+	if ( m_bBreakCrouch ) cmd.buttons |= IN_DUCK;
+	const float now = globals->curtime;
+	edict_t *target = HandleToEdict( m_uBreakHandle );
+	AgPBObstacle current;
+	AgPB_ClassifyObstacle( m_Ctx, target, current );
+	// Account for the last shot before testing for target removal: a single
+	// pistol bullet can destroy the radio during the preceding RunPlayerMove.
+	uintp observedHandle;
+	edict_t *observed = GetNetVarHandleValue( "m_hActiveWeapon", &observedHandle ) ? HandleToEdict( observedHandle ) : NULL;
+	if ( observed != NULL && observedHandle == m_uBreakWeapon )
+	{
+		if ( IsObstacleKnife( observed ) && m_bBreakKnifePending &&
+		     AgPB_ReadNetVarFloat( observed, "m_flNextPrimaryAttack" ) > m_flBreakWeaponAttack + 0.01f )
+		{
+			++m_iBreakShots;
+			++m_iBreakNoDamageShots;
+			m_bBreakKnifePending = false;
+			RouteReport( "obstacle swing confirmed: ent=%d health=%d",
+			             NetVar_HandleEntry( m_uBreakHandle ), current.healthKnown ? current.health : -1 );
+		}
+		const int observedClip = ReadWeaponClip( observed );
+		if ( observedClip >= 0 && m_iBreakClip >= 0 && observedClip < m_iBreakClip )
+		{
+			m_iBreakShots += m_iBreakClip - observedClip;
+			m_iBreakNoDamageShots += m_iBreakClip - observedClip;
+			RouteReport( "obstacle shot confirmed: ent=%d ammo=%d->%d health=%d",
+			             NetVar_HandleEntry( m_uBreakHandle ), m_iBreakClip, observedClip,
+			             current.healthKnown ? current.health : -1 );
+		}
+		m_iBreakClip = observedClip;
+	}
+	AgPBObstacle path;
+	// Check this target's geometry, not the nearest entity: a player crossing
+	// in front must pause firing rather than be mistaken for prop displacement.
+	InspectObstacle( path, -1, true, m_uBreakHandle );
+	if ( target == NULL || current.broken || ( current.healthKnown && current.health <= 0 ) ||
+	     !path.found || path.handle != m_uBreakHandle )
+	{
+		const bool destroyed = target == NULL || current.broken || ( current.healthKnown && current.health <= 0 );
+		RouteReport( "obstacle %s ent=%d after %d confirmed attacks; resuming goal #%d at hop %d",
+		             destroyed ? "destroyed/removed" : "moved out of path",
+	             NetVar_HandleEntry( m_uBreakHandle ), m_iBreakShots, m_iGoalWaypoint, m_iRouteIndex );
+		ClearBreakable();
+		m_vStuckAnchor = m_pInfo->GetAbsOrigin();
+		m_flStuckCheckTime = now + AgPB_STUCK_WINDOW;
+		return true; // One tick with attack released before resuming locomotion.
+	}
+	if ( !current.breakableCandidate )
+	{
+		FailBreakable( "target no longer a shootable candidate" );
+		return true;
+	}
+	if ( now >= m_flBreakDeadline )
+	{
+		FailBreakable( "10 second timeout" );
+		return true;
+	}
+	// Acquisition determines near/far weapon policy. The expanded active-target
+	// geometry recheck must not relabel a far prop as near and cancel switching.
+	edict_t *weapon = SelectBreakableWeapon( cmd, m_bBreakNear );
+	if ( weapon == NULL )
+	{
+		if ( cmd.weaponselect == 0 ) FailBreakable( "no usable firearm or nearby knife" );
+		return true;
+	}
+	const uintp weaponHandle = AgPB_RefEHandle( weapon );
+	bool melee = IsObstacleKnife( weapon );
+	if ( m_uBreakWeapon != weaponHandle )
+	{
+		m_bBreakKnifePending = false;
+		RouteReport( "obstacle weapon: %s (%s)", AgPB_EntityClassName( weapon ), melee ? "melee" : "firearm" );
+	}
+	const int clip = ReadWeaponClip( weapon );
+	m_uBreakWeapon = weaponHandle;
+	m_iBreakClip = clip;
+	if ( current.healthKnown && ( m_iBreakBestHealth < 0 || current.health < m_iBreakBestHealth ) )
+	{
+		m_iBreakBestHealth = current.health;
+		m_iBreakNoDamageShots = 0;
+	}
+	if ( m_iBreakNoDamageShots >= 6 && now >= m_flBreakNextAttack )
+	{
+		FailBreakable( "six attacks without confirmed damage/destruction" );
+		return true;
+	}
+	Vector offset = GetNetVarVector( "m_vecViewOffset" );
+	if ( offset.z <= 0.0f && FindNetVar( "m_vecViewOffset[2]" ) != NULL )
+		offset.Init( GetNetVarFloat( "m_vecViewOffset[0]" ), GetNetVarFloat( "m_vecViewOffset[1]" ),
+		             GetNetVarFloat( "m_vecViewOffset[2]" ) );
+	if ( offset.z <= 0.0f ) offset.z = ( m_bBreakCrouch ? AgPB_HullDuckHeight() : AgPB_HullStandHeight() ) - 4.0f;
+	const Vector eye = m_pInfo->GetAbsOrigin() + offset;
+	Vector aim = current.center;
+	if ( melee && !AgPB_ObstacleMeleeClear( m_Ctx, m_pEdict, target, eye, aim ) &&
+	     !AgPB_ObstacleMeleeClear( m_Ctx, m_pEdict, target, eye, m_vBreakHit ) )
+	{
+		// A near path hit may still be outside knife reach vertically. Prefer a
+		// firearm if owned; never slash through a player to reach the prop.
+		weapon = SelectBreakableWeapon( cmd, false );
+		if ( weapon == NULL ) return true;
+		melee = false;
+	}
+	if ( melee && !AgPB_ObstacleMeleeClear( m_Ctx, m_pEdict, target, eye, aim ) ) aim = m_vBreakHit;
+	if ( !melee && !AgPB_ObstacleAimClear( m_Ctx, m_pEdict, target, eye, aim ) )
+	{
+		aim = m_vBreakHit;
+		if ( !AgPB_ObstacleAimClear( m_Ctx, m_pEdict, target, eye, aim ) ) return true;
+	}
+	QAngle angles;
+	VectorAngles( aim - eye, angles );
+	angles.x = AngleNormalize( angles.x );
+	angles.x = clamp( angles.x, -89.0f, 89.0f );
+	angles.y = AngleNormalize( angles.y );
+	angles.z = 0.0f;
+	// Source CS firearms shoot along EyeAngles + 2 * PunchAngle
+	// (weapon_csbasegun.cpp). Compensate using the reflected current punch.
+	const Vector punch = melee ? Vector( 0, 0, 0 ) : GetNetVarVector( "m_vecPunchAngle" );
+	angles.x = clamp( AngleNormalize( angles.x - 2.0f * punch.x ), -89.0f, 89.0f );
+	angles.y = AngleNormalize( angles.y - 2.0f * punch.y );
+	cmd.viewangles = angles;
+	if ( m_bBreakRelease )
+	{
+		m_bBreakRelease = false;
+		return true;
+	}
+	if ( !melee && clip == 0 )
+	{
+		cmd.buttons |= IN_RELOAD;
+		return true;
+	}
+	// ZBot waits until facing its look-at spot and checks for friends in fire.
+	// Our strict MASK_SHOT trace includes all players, not only friends.
+	if ( now < m_flBreakNextAttack ||
+	     now < GetNetVarFloat( "m_flNextAttack" ) ||
+	     now < AgPB_ReadNetVarFloat( weapon, "m_flNextPrimaryAttack" ) ||
+	     fabsf( AngleDiff( GetNetVarFloat( "m_angEyeAngles[0]" ), angles.x ) ) > 1.0f ||
+	     fabsf( AngleDiff( GetNetVarFloat( "m_angEyeAngles[1]" ), angles.y ) ) > 1.0f ) return true;
+	cmd.buttons |= IN_ATTACK;
+	if ( melee )
+	{
+		m_flBreakWeaponAttack = AgPB_ReadNetVarFloat( weapon, "m_flNextPrimaryAttack" );
+		m_bBreakKnifePending = true;
+	}
+	m_bBreakRelease = true;
+	m_flBreakNextAttack = now + 0.2f;
+	return true;
+}
+
+bool CAgPB::InspectObstacle( AgPBObstacle &result, int iWaypoint, bool bStuck, uintp onlyHandle ) const
+{
+	result = AgPBObstacle();
+	if ( !IsValid() || m_pInfo == NULL || m_pInfo->IsDead() )
+		return false;
+
+	Vector points[32];
+	int ids[32];
+	int count = 0;
+	CAgPBWaypoints &wp = BotWaypoints();
+	if ( iWaypoint >= 0 )
+	{
+		const AgPBPath *node = wp.Get( iWaypoint );
+		if ( node == NULL )
+			return false;
+		points[count] = node->origin;
+		ids[count++] = iWaypoint;
+	}
+	else
+	{
+		for ( int i = m_iRouteIndex; i < m_vecRoute.Count() && count < 32; ++i )
+		{
+			const AgPBPath *node = wp.Get( m_vecRoute[i] );
+			if ( node == NULL )
+				break;
+			points[count] = node->origin;
+			ids[count++] = m_vecRoute[i];
+			// As in ZBot, do not inspect the other end of a ladder from below it.
+			if ( ( node->flags & AgPB_WP_LADDER ) != 0 )
+				break;
+		}
+	}
+	if ( count == 0 )
+		return false;
+
+	const Vector origin = m_pInfo->GetAbsOrigin();
+	Vector viewOffset = GetNetVarVector( "m_vecViewOffset" );
+	// SENDINFO_VECTORELEM exposes three floats, not a whole-vector property.
+	if ( viewOffset.z <= 0.0f && FindNetVar( "m_vecViewOffset[2]" ) != NULL )
+		viewOffset.Init( GetNetVarFloat( "m_vecViewOffset[0]" ), GetNetVarFloat( "m_vecViewOffset[1]" ),
+		                 GetNetVarFloat( "m_vecViewOffset[2]" ) );
+	const bool crouched = ( GetNetVarInt( "m_fFlags" ) & FL_DUCKING ) != 0;
+	if ( viewOffset.z <= 0.0f )
+		viewOffset.z = ( crouched ? AgPB_HullDuckHeight() : AgPB_HullStandHeight() ) - 4.0f;
+	return AgPB_FindPathObstacle( m_Ctx, m_pEdict, origin, origin + viewOffset,
+	                             points, ids, count, crouched, bStuck, result, onlyHandle );
+}
+
+void CAgPB::ReportObstacle( const AgPBObstacle &result ) const
+{
+	if ( !result.found )
+	{
+		RouteReport( "obstacle: none in the path probe (near 20 / far 300)" );
+		return;
+	}
+	const IServerNetworkable *net = result.entity != NULL ? result.entity->GetNetworkable() : NULL;
+	const char *classname = net != NULL ? net->GetClassName() : "world-or-static";
+	char health[32], damage[32];
+	Q_strncpy( health, "unknown", sizeof( health ) );
+	Q_strncpy( damage, "unknown", sizeof( damage ) );
+	if ( result.healthKnown )
+		Q_snprintf( health, sizeof( health ), "%d", result.health );
+	if ( result.damageKnown )
+		Q_snprintf( damage, sizeof( damage ), "%d", result.damage );
+	RouteReport( "obstacle: kind=%s ent=%d class=%s serverclass=%s group=%d wp=%d path-dist=%.1f probe=%s%s hit=(%.1f %.1f %.1f) center=(%.1f %.1f %.1f) visible=%s breakable-candidate=%s health=%s damage=%s",
+	             result.kind, result.entity != NULL ? NetVar_HandleEntry( result.handle ) : -1,
+	             classname != NULL ? classname : "unknown",
+	             result.entity != NULL ? AgPB_EntityClassName( result.entity ) : "none",
+	             result.collisionGroup, result.waypoint, result.pathDistance,
+	             result.nearProbe ? "near" : "far", result.expanded ? "/expanded" : "",
+	             result.hitPosition.x, result.hitPosition.y, result.hitPosition.z,
+	             result.center.x, result.center.y, result.center.z,
+	             result.visible ? "yes" : "no", result.breakableCandidate ? "yes" : "no",
+	             health, damage );
 }
 
 bool CAgPB::StartRoute( int iGoalWaypoint, char *error, size_t maxlen )
@@ -384,14 +756,11 @@ bool CAgPB::StartRoute( int iGoalWaypoint, char *error, size_t maxlen )
 		return false;
 	}
 
-	if ( vecPath.Count() < 2 )
-	{
-		Q_snprintf( error, (int)maxlen, "already standing on waypoint #%d", iGoalWaypoint );
-		return false;
-	}
-
+	// Nearest does not mean reached: after interruption the goal may be the
+	// nearest node while still outside its arrival radius. Walk the final
+	// approach and let UpdateRoute apply the normal arrival test.
 	m_vecRoute = vecPath;
-	m_iRouteIndex = 1;              // [0] 是脚下这个点，从第 1 段开始走
+	m_iRouteIndex = vecPath.Count() > 1 ? 1 : 0;
 	m_iGoalWaypoint = iGoalWaypoint;
 	m_vStuckAnchor = vPos;
 	m_flStuckCheckTime = ( gpGlobals != NULL ) ? ( gpGlobals->curtime + AgPB_STUCK_WINDOW ) : 0.0f;
@@ -513,6 +882,16 @@ void CAgPB::UpdateRoute( CGlobalVars *pGlobals, CBotCmd &cmd )
 {
 	if ( !HasRoute() || m_pInfo == NULL )
 		return;
+	// A round's freeze time is not failed movement. Keep the requested route
+	// and release attack until movement is enabled again.
+	if ( AgPB_IsRoundFrozen() || ( GetNetVarInt( "m_fFlags" ) & FL_FROZEN ) != 0 )
+	{
+		ClearBreakable();
+		m_vStuckAnchor = m_pInfo->GetAbsOrigin();
+		m_flStuckCheckTime = pGlobals->curtime + AgPB_STUCK_WINDOW;
+		return;
+	}
+	if ( UpdateBreakable( pGlobals, cmd ) ) return;
 
 	CAgPBWaypoints &wp = BotWaypoints();
 
@@ -644,6 +1023,7 @@ void CAgPB::UpdateRoute( CGlobalVars *pGlobals, CBotCmd &cmd )
 	{
 		QAngle angTo;
 		VectorAngles( vFlat, angTo );
+		cmd.viewangles.x = 0.0f;
 		cmd.viewangles.y = angTo.y;
 	}
 	else
@@ -751,11 +1131,47 @@ void CAgPB::UpdateRoute( CGlobalVars *pGlobals, CBotCmd &cmd )
 		cmd.buttons |= IN_DUCK;
 	}
 
-	// 卡住检测：每 AgPB_STUCK_WINDOW 秒看一次位移，没动就放弃并报坐标
+	// Acquire a visible breakable on ordinary grounded legs. Do not interrupt
+	// the engine's crouch-jump sequence; stuck recovery below may acquire on landing.
+	if ( !bJumpLeg && ( pNode->flags & AgPB_WP_LADDER ) == 0 &&
+	     ( GetNetVarInt( "m_fFlags" ) & FL_ONGROUND ) != 0 )
+	{
+		AgPBObstacle obstacle;
+		InspectObstacle( obstacle );
+		if ( BeginBreakable( obstacle, pGlobals->curtime, bCrouch ) )
+		{
+			UpdateBreakable( pGlobals, cmd );
+			return;
+		}
+	}
+
+	// Stuck recovery uses the wider near probe to catch small pushaway props.
+	// Optional lookahead diagnostics are throttled and log only identity changes.
+	if ( agpb_obstacle_debug.GetBool() && pGlobals != NULL && pGlobals->curtime >= m_flNextObstacleCheck )
+	{
+		AgPBObstacle obstacle;
+		InspectObstacle( obstacle );
+		if ( obstacle.found != m_bLastObstacleFound || obstacle.handle != m_uLastObstacleHandle )
+			ReportObstacle( obstacle );
+		m_bLastObstacleFound = obstacle.found;
+		m_uLastObstacleHandle = obstacle.handle;
+		m_flNextObstacleCheck = pGlobals->curtime + 0.25f;
+	}
+
 	if ( pGlobals != NULL && pGlobals->curtime >= m_flStuckCheckTime )
 	{
 		if ( ( vPos - m_vStuckAnchor ).Length() < AgPB_STUCK_MOVE )
 		{
+			AgPBObstacle obstacle;
+			InspectObstacle( obstacle, -1, true );
+			if ( ( GetNetVarInt( "m_fFlags" ) & FL_ONGROUND ) != 0 &&
+			     ( pNode->flags & AgPB_WP_LADDER ) == 0 &&
+			     BeginBreakable( obstacle, pGlobals->curtime, bCrouch ) )
+			{
+				UpdateBreakable( pGlobals, cmd );
+				return;
+			}
+			ReportObstacle( obstacle );
 			RouteReport( "stuck at %.0f %.0f %.0f: no progress towards waypoint #%d (dist %.0f, hop %d/%d) - stopped",
 			             vPos.x, vPos.y, vPos.z, iNode, flDist2D,
 			             m_iRouteIndex, m_vecRoute.Count() - 1 );
@@ -786,6 +1202,15 @@ void CAgPBManager::Init( const BotEngineContext &ctx, CreateInterfaceFn pServerF
 	if ( m_Ctx.pBotManager == NULL && pServerFactory != NULL )
 	{
 		m_Ctx.pBotManager = (IBotManager *)pServerFactory( INTERFACEVERSION_PLAYERBOTMANAGER, NULL );
+	}
+	if ( pServerFactory != NULL )
+	{
+		m_Ctx.pServerTools = (IServerTools *)pServerFactory( VSERVERTOOLS_INTERFACE_VERSION, NULL );
+		if ( m_Ctx.pServerTools == NULL )
+			m_Ctx.pServerTools = (IServerTools *)pServerFactory( VSERVERTOOLS_INTERFACE_VERSION_2, NULL );
+		if ( m_Ctx.pServerTools == NULL )
+			m_Ctx.pServerTools = (IServerTools *)pServerFactory( VSERVERTOOLS_INTERFACE_VERSION_1, NULL );
+		META_CONPRINTF( "[AgPB] read-only server tools: %s\n", m_Ctx.pServerTools != NULL ? "ok" : "MISSING" );
 	}
 }
 
@@ -1040,7 +1465,7 @@ edict_t *CAgPB::HandleToEdict( uintp handle ) const
 	if ( pHandleEntity == NULL )
 		return NULL;
 
-	if ( pHandleEntity->GetRefEHandle().ToInt() != (int)handle )
+	if ( (uintp)pHandleEntity->GetRefEHandle().ToInt() != handle )
 		return NULL;
 
 	return pEdict;
@@ -1127,6 +1552,27 @@ const char *AgPB_EntityClassName( edict_t *pEdict )
 // ---------------------------------------------------------------------------
 // netvar 访问：任意实体（见 bot.h 的说明）
 // ---------------------------------------------------------------------------
+
+void CAgPBManager::ReportNamedObstacle( const char *name ) const
+{
+	if ( m_Ctx.pServerTools == NULL || m_Ctx.pGameEnts == NULL ) return;
+	CBaseEntity *base = m_Ctx.pServerTools->FindEntityByName( NULL, name );
+	edict_t *entity = base != NULL ? m_Ctx.pGameEnts->BaseEntityToEdict( base ) : NULL;
+	if ( entity == NULL || entity->IsFree() )
+	{
+		META_CONPRINTF( "[AgPB] named obstacle not found: %s\n", name );
+		return;
+	}
+	AgPBObstacle result;
+	AgPB_ClassifyObstacle( m_Ctx, entity, result );
+	char origin[128];
+	origin[0] = '\0';
+	m_Ctx.pServerTools->GetKeyValue( base, "origin", origin, sizeof( origin ) );
+	META_CONPRINTF( "[AgPB] named obstacle: %s ent=%d model-index=%d origin=%s center=(%.1f %.1f %.1f) group=%d candidate=%s health=%d\n",
+	                name, NetVar_HandleEntry( result.handle ), AgPB_ReadNetVarInt( entity, "m_nModelIndex", -1 ), origin,
+	                result.center.x, result.center.y, result.center.z, result.collisionGroup,
+	                result.breakableCandidate ? "yes" : "no", result.healthKnown ? result.health : -1 );
+}
 
 void *AgPB_EntityBase( edict_t *pEdict )
 {

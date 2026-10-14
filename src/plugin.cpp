@@ -16,6 +16,7 @@
 
 #include "plugin.h"
 #include "bot.h"
+#include "obstacle.h"
 #include "waypoint.h"
 #include "menu.h"
 #include "wpdraw.h"
@@ -40,6 +41,21 @@ IFileSystem *filesystem = NULL;
 IVDebugOverlay *debugoverlay = NULL;
 
 static CAgPBManager g_Bots;
+static IGameEventManager2 *g_GameEvents = NULL;
+static bool g_RoundFrozen = false;
+
+bool AgPB_IsRoundFrozen() { return g_RoundFrozen; }
+
+class CAgPBRoundListener : public IGameEventListener2
+{
+public:
+	void FireGameEvent( IGameEvent *event )
+	{
+		if ( event != NULL )
+			g_RoundFrozen = Q_strcmp( event->GetName(), "round_start" ) == 0;
+	}
+};
+static CAgPBRoundListener g_RoundListener;
 
 CAgPBManager &AgPB_Bots()
 {
@@ -144,7 +160,7 @@ static void Cmd_SetTeam( const CCommand &args )
 {
 	if ( args.ArgC() < 3 )
 	{
-		META_CONPRINTF( "[AgPB] usage: agpb_team <idx> <1=spec|2=T|3=CT>\n" );
+		META_CONPRINTF( "[AgPB] usage: agpb_bot_team <idx> <1=spec|2=T|3=CT>\n" );
 		return;
 	}
 
@@ -1313,14 +1329,85 @@ static void Cmd_BotRoam( const CCommand &args )
 	META_CONPRINTF( "[AgPB] %s: roam %s\n", pBot->Name(), bEnable ? "ON" : "OFF" );
 }
 
+static void Cmd_BotTestWeapon( const CCommand &args )
+{
+	if ( args.ArgC() < 3 || args.ArgC() > 4 ||
+	     ( Q_stricmp( args.Arg( 2 ), "weapon_m4a1" ) != 0 &&
+	       Q_stricmp( args.Arg( 2 ), "weapon_usp" ) != 0 &&
+	       Q_stricmp( args.Arg( 2 ), "weapon_knife" ) != 0 ) ||
+	     ( args.ArgC() == 4 && Q_stricmp( args.Arg( 3 ), "only" ) != 0 ) )
+	{
+		META_CONPRINTF( "[AgPB] usage: agpb_bot_testweapon <idx> <weapon_m4a1|weapon_usp|weapon_knife> [only]\n" );
+		return;
+	}
+	CAgPB *bot = g_Bots.Get( Q_atoi( args.Arg( 1 ) ) );
+	if ( bot == NULL || !bot->TestWeapon( args.Arg( 2 ), args.ArgC() == 4 ) )
+	{
+		META_CONPRINTF( "[AgPB] loadout fixture needs a living, idle bot\n" );
+		return;
+	}
+	META_CONPRINTF( "[AgPB] test loadout requested: %s%s; AI uses CUserCmd\n",
+	                args.Arg( 2 ), args.ArgC() == 4 ? " only" : "" );
+}
+
+static void Cmd_ObstacleEntity( const CCommand &args )
+{
+	if ( args.ArgC() != 2 )
+	{
+		META_CONPRINTF( "[AgPB] usage: agpb_obstacle_entity <targetname>\n" );
+		return;
+	}
+	g_Bots.ReportNamedObstacle( args.Arg( 1 ) );
+}
+
+static ConCommand agpb_obstacle_entity_cmd( "agpb_obstacle_entity", Cmd_ObstacleEntity,
+                                          "Read-only inspection of one named obstacle via public server tools.", FCVAR_GAMEDLL );
+
+static ConCommand agpb_bot_testweapon_cmd( "agpb_bot_testweapon", Cmd_BotTestWeapon,
+                                         "Cheat-only loadout fixture for a living idle bot; optional only strips existing items.",
+                                         FCVAR_GAMEDLL | FCVAR_CHEAT );
+
+static void Cmd_BotObstacle( const CCommand &args )
+{
+	if ( args.ArgC() < 2 || args.ArgC() > 4 )
+	{
+		META_CONPRINTF( "[AgPB] usage: agpb_bot_obstacle <idx> [waypoint|-1=current-route] [stuck=0|1]\n" );
+		return;
+	}
+	CAgPB *bot = g_Bots.Get( V_atoi( args.Arg( 1 ) ) );
+	if ( bot == NULL || bot->PlayerInfo() == NULL || bot->PlayerInfo()->IsDead() )
+	{
+		META_CONPRINTF( "[AgPB] obstacle probe needs a valid, living bot\n" );
+		return;
+	}
+	const int waypoint = args.ArgC() >= 3 ? V_atoi( args.Arg( 2 ) ) : -1;
+	if ( waypoint < -1 || ( waypoint >= 0 && !BotWaypoints().IsValid( waypoint ) ) )
+	{
+		META_CONPRINTF( "[AgPB] invalid waypoint %d\n", waypoint );
+		return;
+	}
+	if ( waypoint == -1 && !bot->HasRoute() )
+	{
+		META_CONPRINTF( "[AgPB] bot has no route; specify a waypoint for a direct probe\n" );
+		return;
+	}
+	const bool stuck = args.ArgC() >= 4 && V_atoi( args.Arg( 3 ) ) != 0;
+	AgPBObstacle obstacle;
+	bot->InspectObstacle( obstacle, waypoint, stuck );
+	bot->ReportObstacle( obstacle );
+}
+
+static ConCommand agpb_bot_obstacle_cmd( "agpb_bot_obstacle", Cmd_BotObstacle,
+                                       "Read-only ZBot-style obstacle probe: agpb_bot_obstacle <idx> [waypoint|-1] [stuck=0|1]", FCVAR_GAMEDLL );
+
 static ConCommand agpb_add_cmd( "agpb_add", Cmd_Add,
                                 "Create an AgPB bot. [team]", FCVAR_GAMEDLL );
 static ConCommand agpb_kick_cmd( "agpb_kick", Cmd_Kick,
                                  "Remove bot(s): agpb_kick <idx|all>", FCVAR_GAMEDLL );
 static ConCommand agpb_list_cmd( "agpb_list", Cmd_List,
                                  "List all AgPB bots.", FCVAR_GAMEDLL );
-static ConCommand agpb_team_cmd( "agpb_team", Cmd_SetTeam,
-                                 "Switch a bot's team: agpb_team <idx> <1=spec|2=T|3=CT>", FCVAR_GAMEDLL );
+static ConCommand agpb_bot_team_cmd( "agpb_bot_team", Cmd_SetTeam,
+                                 "Switch a bot's team: agpb_bot_team <idx> <1=spec|2=T|3=CT>", FCVAR_GAMEDLL );
 static ConCommand agpb_netlist_cmd( "agpb_netlist", Cmd_NetList,
                                  "Dump a netvar table: agpb_netlist <bot-idx|ent <edict>> [name-filter]", FCVAR_GAMEDLL );
 static ConCommand agpb_nethandle_cmd( "agpb_nethandle", Cmd_NetHandle,
@@ -1423,6 +1510,14 @@ bool AgPBPlugin::Load( PluginId id, ISmmAPI *ismm, char *error, size_t maxlen, b
 	GET_V_IFACE_ANY( GetServerFactory, gameents, IServerGameEnts, INTERFACEVERSION_SERVERGAMEENTS );
 
 	gpGlobals = ismm->GetCGlobals();
+	GET_V_IFACE_CURRENT( GetEngineFactory, g_GameEvents, IGameEventManager2, INTERFACEVERSION_GAMEEVENTSMANAGER2 );
+	if ( !g_GameEvents->AddListener( &g_RoundListener, "round_start", true ) ||
+	     !g_GameEvents->AddListener( &g_RoundListener, "round_freeze_end", true ) )
+	{
+		g_GameEvents->RemoveListener( &g_RoundListener );
+		Q_strncpy( error, "could not register navigation round events", (int)maxlen );
+		return false;
+	}
 
 	g_SMAPI->AddListener( this, this );
 
@@ -1474,6 +1569,8 @@ bool AgPBPlugin::Load( PluginId id, ISmmAPI *ismm, char *error, size_t maxlen, b
 
 bool AgPBPlugin::Unload( char *error, size_t maxlen )
 {
+	if ( g_GameEvents != NULL ) g_GameEvents->RemoveListener( &g_RoundListener );
+	g_RoundFrozen = false;
 	SH_REMOVE_HOOK_MEMFUNC( IServerGameDLL, GameFrame, server, this, &AgPBPlugin::Hook_GameFrame, true );
 	SH_REMOVE_HOOK_MEMFUNC( IServerGameClients, ClientDisconnect, gameclients, this, &AgPBPlugin::Hook_ClientDisconnect, true );
 	SH_REMOVE_HOOK_MEMFUNC( IServerGameClients, ClientCommand, gameclients, this, &AgPBPlugin::Hook_ClientCommand, false );
@@ -1503,6 +1600,7 @@ void AgPBPlugin::AllPluginsLoaded()
 
 void AgPBPlugin::OnLevelShutdown()
 {
+	g_RoundFrozen = false;
 	// 换图会销毁所有 edict，先清掉本地记录，避免悬挂指针。
 	g_Bots.RemoveAll();
 }
