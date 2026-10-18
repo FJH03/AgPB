@@ -32,6 +32,7 @@ AgPBObstacle::AgPBObstacle()
 	handle = (uintp)INVALID_EHANDLE_INDEX;
 	hitPosition.Init();
 	center.Init();
+	aimPosition.Init();
 	pathDistance = 0.0f;
 	waypoint = -1;
 	collisionGroup = -1;
@@ -113,8 +114,8 @@ static void Classify( const BotEngineContext &ctx, AgPBObstacle &result )
 	result.damageKnown = ReadInt( result.entity, "m_takedamage", result.damage );
 	if ( !result.healthKnown )
 		result.healthKnown = ReadKeyInt( ctx, result.entity, "health", result.health );
-	const bool brush = Q_stricmp( name, "func_breakable" ) == 0 ||
-	                   Q_stricmp( name, "func_breakable_surf" ) == 0;
+	const bool surface = Q_stricmp( name, "func_breakable_surf" ) == 0;
+	const bool brush = Q_stricmp( name, "func_breakable" ) == 0 || surface;
 	const bool physics = Q_stricmp( name, "prop_physics" ) == 0 ||
 	                     Q_stricmp( name, "prop_physics_multiplayer" ) == 0 ||
 	                     Q_stricmp( name, "prop_physics_override" ) == 0;
@@ -127,13 +128,17 @@ static void Classify( const BotEngineContext &ctx, AgPBObstacle &result )
 	                          result.collisionGroup == COLLISION_GROUP_NONE;
 	int broken = 0;
 	result.broken = ReadInt( result.entity, "m_bIsBroken", broken ) && broken != 0;
+	// CBreakableSurface::TraceAttack breaks an intact pane independently of
+	// its health. Only m_bIsBroken confirms that surface is already shattered.
+	if ( !surface && ( brush || physics ) && result.healthKnown && result.health <= 0 )
+		result.broken = true;
 	int physicsMode = 0, minDamage = 0;
 	const bool nonSolidPhysics = Q_stricmp( name, "prop_physics_multiplayer" ) == 0 &&
 		ReadKeyInt( ctx, result.entity, "physicsmode", physicsMode ) && physicsMode != kSolidPhysicsMode;
 	const bool largeDamageRequired = ReadKeyInt( ctx, result.entity, "minhealthdmg", minDamage ) && minDamage >= 50;
 	result.breakableCandidate = ( brush || physics ) && groupAllowed && !result.broken &&
 		!nonSolidPhysics && !largeDamageRequired &&
-		( !result.healthKnown || ( result.health > 0 && result.health <= 200 ) ) &&
+		( !result.healthKnown || ( ( surface || result.health > 0 ) && result.health <= 200 ) ) &&
 		( !result.damageKnown || result.damage == DAMAGE_YES );
 }
 
@@ -201,15 +206,41 @@ bool AgPB_ObstacleMeleeClear( const BotEngineContext &ctx, edict_t *self, edict_
 		ctx.pGameEnts->BaseEntityToEdict( trace.m_pEnt ) == target;
 }
 
+static bool SelectObstacleAimPoint( const BotEngineContext &ctx, edict_t *self,
+                                    const Vector &eye, const Ray_t &ray,
+                                    ICollideable *collide, AgPBObstacle &candidate )
+{
+	candidate.aimPosition = candidate.center;
+	if ( AgPB_ObstacleAimClear( ctx, self, candidate.entity, eye, candidate.aimPosition ) )
+		return true;
+
+	candidate.aimPosition = candidate.hitPosition;
+	if ( AgPB_ObstacleAimClear( ctx, self, candidate.entity, eye, candidate.aimPosition ) )
+		return true;
+
+	// A swept-hull endpos is its reference origin, not the contact point. Move
+	// its center into the target's local bounds to find a nearby surface point.
+	// OBB bounds only propose an aim point: the bullet trace must still hit the
+	// actual entity first, including for non-box collision models.
+	Vector localPoint, closestPoint;
+	VectorITransform( candidate.hitPosition - ray.m_StartOffset,
+	                  collide->CollisionToWorldTransform(), localPoint );
+	CalcClosestPointOnAABB( collide->OBBMins(), collide->OBBMaxs(), localPoint, closestPoint );
+	VectorTransform( closestPoint, collide->CollisionToWorldTransform(), candidate.aimPosition );
+	return AgPB_ObstacleAimClear( ctx, self, candidate.entity, eye, candidate.aimPosition );
+}
+
 // EnumerateEntities uses the same solid-edict spatial partition as Source ZBot.
 // Enumeration order is unspecified: clip each candidate and select the first
 // actual intersection along the segment, rather than the first enumeration hit.
 class CObstacleEnumerator : public IEntityEnumerator
 {
 public:
-	CObstacleEnumerator( const BotEngineContext &ctx, IHandleEntity *ignore,
-	                     const Ray_t &ray, AgPBObstacle &result, uintp onlyHandle )
-		: m_Ctx( ctx ), m_Ignore( ignore ), m_Ray( ray ), m_Result( result ), m_Fraction( 1.0f ), m_OnlyHandle( onlyHandle ) {}
+	CObstacleEnumerator( const BotEngineContext &ctx, edict_t *self, const Vector &eye,
+	                     const Ray_t &ray, AgPBObstacle &result, uintp onlyHandle, bool breakablesOnly )
+		: m_Ctx( ctx ), m_Self( self ), m_Ignore( EntityHandle( self ) ), m_Eye( eye ),
+		  m_Ray( ray ), m_Result( result ), m_Fraction( 1.0f ),
+		  m_OnlyHandle( onlyHandle ), m_BreakablesOnly( breakablesOnly ) {}
 
 	bool EnumEntity( IHandleEntity *entity )
 	{
@@ -246,32 +277,47 @@ public:
 		if ( edict == NULL || edict->IsFree() || AgPB_RefEHandle( edict ) != handle )
 			return true;
 
-		m_Fraction = fraction;
-		m_Result.found = true;
-		m_Result.entity = edict;
-		m_Result.handle = handle;
-		m_Result.collisionGroup = collide->GetCollisionGroup();
-		m_Result.hitPosition = trace.endpos;
+		AgPBObstacle candidate;
+		candidate.found = true;
+		candidate.entity = edict;
+		candidate.handle = handle;
+		candidate.collisionGroup = collide->GetCollisionGroup();
+		candidate.hitPosition = trace.endpos;
 		VectorTransform( ( collide->OBBMins() + collide->OBBMaxs() ) * 0.5f,
-		                 collide->CollisionToWorldTransform(), m_Result.center );
+		                 collide->CollisionToWorldTransform(), candidate.center );
+		if ( m_BreakablesOnly )
+		{
+			// As in ZBot's CBotBreakableEnumerator, filter before accepting a
+			// candidate. Also skip unsafe shots instead of losing later targets.
+			Classify( m_Ctx, candidate );
+			if ( !candidate.breakableCandidate ||
+			     !SelectObstacleAimPoint( m_Ctx, m_Self, m_Eye, m_Ray, collide, candidate ) )
+				return true;
+			candidate.visible = true;
+		}
+		m_Fraction = fraction;
+		m_Result = candidate;
 		return true;
 	}
 
 	float Fraction() const { return m_Fraction; }
 private:
 	const BotEngineContext &m_Ctx;
+	edict_t *m_Self;
 	IHandleEntity *m_Ignore;
+	const Vector &m_Eye;
 	const Ray_t &m_Ray;
 	AgPBObstacle &m_Result;
 	float m_Fraction;
 	uintp m_OnlyHandle;
+	bool m_BreakablesOnly;
 };
 
 static bool ScanPath( const BotEngineContext &ctx, edict_t *self,
                       const Vector &origin, const Vector &eye,
                       const Vector *points, const int *ids, int count,
                       float distance, bool crouched, bool expanded,
-                      AgPBObstacle &result, uintp onlyHandle )
+                      AgPBObstacle &result, uintp onlyHandle, bool breakablesOnly )
 {
 	IHandleEntity *ignore = EntityHandle( self );
 	Vector start = origin;
@@ -298,24 +344,29 @@ static bool ScanPath( const BotEngineContext &ctx, edict_t *self,
 		const Vector end = start + delta * ( segment / length );
 		Ray_t ray;
 		ray.Init( start, end, mins, maxs );
-		CObstacleEnumerator enumerator( ctx, ignore, ray, result, onlyHandle );
+		CObstacleEnumerator enumerator( ctx, self, eye, ray, result, onlyHandle, breakablesOnly );
 		ctx.pTrace->EnumerateEntities( ray, false, &enumerator );
 
-		// Do not report a prop on the far side of a wall or static model.
-		CTraceFilterWorldAndPropsOnly worldFilter;
-		trace_t worldTrace;
-		ctx.pTrace->TraceRay( ray, MASK_PLAYERSOLID, &worldFilter, &worldTrace );
-		const float worldFraction = worldTrace.startsolid || worldTrace.allsolid ? 0.0f : worldTrace.fraction;
 		float fraction = enumerator.Fraction();
-		if ( !NetVar_HandleIsValid( onlyHandle ) && worldTrace.DidHit() && ( !result.found || worldFraction < fraction ) )
+		// Diagnostics report the first movement obstruction. Breakable selection
+		// uses the verified bullet line instead: a sill below a visible window
+		// must not replace that window with a world-hull hit.
+		if ( !breakablesOnly )
 		{
-			result.found = true;
-			result.entity = NULL;
-			result.handle = (uintp)INVALID_EHANDLE_INDEX;
-			result.hitPosition = worldTrace.endpos;
-			result.center = worldTrace.endpos;
-			result.collisionGroup = -1;
-			fraction = worldFraction;
+			CTraceFilterWorldAndPropsOnly worldFilter;
+			trace_t worldTrace;
+			ctx.pTrace->TraceRay( ray, MASK_PLAYERSOLID, &worldFilter, &worldTrace );
+			const float worldFraction = worldTrace.startsolid || worldTrace.allsolid ? 0.0f : worldTrace.fraction;
+			if ( !NetVar_HandleIsValid( onlyHandle ) && worldTrace.DidHit() && ( !result.found || worldFraction < fraction ) )
+			{
+				result.found = true;
+				result.entity = NULL;
+				result.handle = (uintp)INVALID_EHANDLE_INDEX;
+				result.hitPosition = worldTrace.endpos;
+				result.center = worldTrace.endpos;
+				result.collisionGroup = -1;
+				fraction = worldFraction;
+			}
 		}
 
 		if ( result.found )
@@ -324,17 +375,20 @@ static bool ScanPath( const BotEngineContext &ctx, edict_t *self,
 			result.waypoint = ids != NULL ? ids[i] : -1;
 			result.nearProbe = distance == kNearDistance;
 			result.expanded = expanded || contact;
-			Classify( ctx, result );
+			if ( !breakablesOnly )
+			{
+				Classify( ctx, result );
 
-			Ray_t sight;
-			sight.Init( eye, result.center );
-			CObstacleTraceFilter sightFilter( ignore );
-			trace_t sightTrace;
-			ctx.pTrace->TraceRay( sight, MASK_SHOT, &sightFilter, &sightTrace );
-			edict_t *hit = sightTrace.m_pEnt != NULL && ctx.pGameEnts != NULL
-				? ctx.pGameEnts->BaseEntityToEdict( sightTrace.m_pEnt ) : NULL;
-			result.visible = !sightTrace.startsolid && !sightTrace.allsolid &&
-				( sightTrace.fraction >= 1.0f || ( result.entity != NULL && hit == result.entity ) );
+				Ray_t sight;
+				sight.Init( eye, result.center );
+				CObstacleTraceFilter sightFilter( ignore );
+				trace_t sightTrace;
+				ctx.pTrace->TraceRay( sight, MASK_SHOT, &sightFilter, &sightTrace );
+				edict_t *hit = sightTrace.m_pEnt != NULL && ctx.pGameEnts != NULL
+					? ctx.pGameEnts->BaseEntityToEdict( sightTrace.m_pEnt ) : NULL;
+				result.visible = !sightTrace.startsolid && !sightTrace.allsolid &&
+					( sightTrace.fraction >= 1.0f || ( result.entity != NULL && hit == result.entity ) );
+			}
 			return true;
 		}
 		walked += segment;
@@ -353,8 +407,25 @@ bool AgPB_FindPathObstacle( const BotEngineContext &ctx, edict_t *self,
 	     points == NULL || count <= 0 )
 		return false;
 	if ( ScanPath( ctx, self, origin, eye, points, ids, count,
-	               kNearDistance, crouched, stuck, result, onlyHandle ) )
+	               kNearDistance, crouched, stuck, result, onlyHandle, false ) )
 		return true;
 	return ScanPath( ctx, self, origin, eye, points, ids, count,
-	                 kFarDistance, crouched, false, result, onlyHandle );
+	                 kFarDistance, crouched, false, result, onlyHandle, false );
+}
+
+bool AgPB_FindPathBreakable( const BotEngineContext &ctx, edict_t *self,
+                            const Vector &origin, const Vector &eye,
+                            const Vector *points, const int *ids, int count,
+                            bool crouched, bool stuck, AgPBObstacle &result )
+{
+	result = AgPBObstacle();
+	if ( ctx.pTrace == NULL || ctx.pEngine == NULL || ctx.pGameEnts == NULL ||
+	     self == NULL || points == NULL || count <= 0 )
+		return false;
+	const uintp anyHandle = (uintp)INVALID_EHANDLE_INDEX;
+	if ( ScanPath( ctx, self, origin, eye, points, ids, count,
+	               kNearDistance, crouched, stuck, result, anyHandle, true ) )
+		return true;
+	return ScanPath( ctx, self, origin, eye, points, ids, count,
+	                 kFarDistance, crouched, false, result, anyHandle, true );
 }

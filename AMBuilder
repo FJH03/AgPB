@@ -17,6 +17,10 @@ for sdk_target in MMSPlugin.sdk_targets:
     'src/wpdraw.cpp',
     'src/wpedit.cpp',
     'src/game_mode.cpp',
+    'src/tasks.cpp',
+    'src/objectives.cpp',
+    'src/bot_tasks.cpp',
+    'src/bot_objective_actions.cpp',
   ]
 
   nodes = builder.Add(binary)

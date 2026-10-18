@@ -21,6 +21,7 @@ struct AgPBObstacle
 	uintp handle;
 	Vector hitPosition;
 	Vector center;
+	Vector aimPosition;         // FindPathBreakable: a point with a verified shot to this entity.
 	float pathDistance;
 	int waypoint;
 	int collisionGroup;
@@ -31,7 +32,7 @@ struct AgPBObstacle
 	int health;
 	bool damageKnown;
 	int damage;
-	bool broken;
+	bool broken;                // Surface: m_bIsBroken; ordinary brush/prop: also known health <= 0.
 	bool breakableCandidate;     // Not proof that bullets can destroy it.
 	const char *kind;
 };
@@ -52,5 +53,15 @@ bool AgPB_FindPathObstacle( const BotEngineContext &ctx, edict_t *self,
                            const Vector *points, const int *ids, int count,
                            bool crouched, bool stuck, AgPBObstacle &result,
                            uintp onlyHandle = (uintp)INVALID_EHANDLE_INDEX );
+
+// Find a breakable candidate with a clear shot, near first and then farther along
+// the route. Non-breakable/occluded entities do not end the search. A window sill
+// may block the movement hull without blocking the shot. Success sets visible
+// and aimPosition; firing must recheck the shot each tick. Use FindPathObstacle
+// with onlyHandle for active-target geometry checks, even while its shot is blocked.
+bool AgPB_FindPathBreakable( const BotEngineContext &ctx, edict_t *self,
+                            const Vector &origin, const Vector &eye,
+                            const Vector *points, const int *ids, int count,
+                            bool crouched, bool stuck, AgPBObstacle &result );
 
 #endif

@@ -26,6 +26,7 @@
 #include <engine/IEngineTrace.h>
 
 #include "netvars.h"
+#include "tasks.h"
 
 class IServerTools;
 
@@ -174,6 +175,10 @@ public:
 
 	/** 停止行走（清路线与输入）。 */
 	void StopRoute();
+	void SetAutonomous( bool enable );
+	bool IsAutonomous() const { return m_bAutonomous; }
+	void ResetTaskSystem();
+	void ReportTasks() const;
 
 	/** 随机漫游：没路线时随机挑一个可达路点走过去，到了再挑下一个（EBot/SyPB 式"瞎逛"的最小版）。 */
 	void SetRoam( bool bEnable );
@@ -190,7 +195,8 @@ public:
 
 	/** ZBot-style read-only path inspection; explicit waypoint probes a single segment. */
 	bool InspectObstacle( AgPBObstacle &result, int iWaypoint = -1, bool bStuck = false,
-	                      uintp onlyHandle = (uintp)INVALID_EHANDLE_INDEX ) const;
+	                      uintp onlyHandle = (uintp)INVALID_EHANDLE_INDEX,
+	                      bool breakableOnly = false ) const;
 	void ReportObstacle( const AgPBObstacle &result ) const;
 	/** Cheat-only loadout fixture; never used by AI weapon selection. */
 	bool TestWeapon( const char *name, bool only );
@@ -206,6 +212,20 @@ private:
 
 	/** 每 tick 的"走路"部分：把路线翻译成 CUserCmd。 */
 	void UpdateRoute( CGlobalVars *pGlobals, CBotCmd &cmd );
+	bool BuildRoute( int goal, char *error, size_t maxlen );
+	void ClearRoute();
+	void UpdateTasks( CGlobalVars *globals, CBotCmd &cmd );
+	void PlanNormalTask( CGlobalVars *globals, bool urgentOnly = false );
+	bool ExecuteObjectiveTask( CGlobalVars *globals, CBotCmd &cmd );
+	bool NavigateTaskTo( const Vector &position, int preferredWaypoint, float interactionRange,
+	                     CGlobalVars *globals, CBotCmd &cmd );
+	void CompleteCurrentTask( const char *reason, bool failed = false );
+	bool TaskAimAt( edict_t *target, const Vector &point, CBotCmd &cmd ) const;
+	edict_t *FindOwnedWeapon( const char *classname ) const;
+	void ResetTaskUse();
+	bool CanWalkToTaskPosition( const Vector &position, bool crouch ) const;
+	int PickTaskWaypoint( const Vector &position, unsigned int requiredFlags = 0 ) const;
+	void ResetRouteProgress( float now );
 	void ClearBreakable();
 	bool BeginBreakable( const AgPBObstacle &obstacle, float now, bool crouch );
 	bool UpdateBreakable( CGlobalVars *pGlobals, CBotCmd &cmd );
@@ -234,8 +254,10 @@ private:
 	CUtlVector<int> m_vecRoute;
 	int    m_iRouteIndex;
 	int    m_iGoalWaypoint;
-	Vector m_vStuckAnchor;
+	float  m_flRouteProgressDistance;
 	float  m_flStuckCheckTime;
+	float  m_flStuckRecoveryUntil;
+	bool   m_bRouteArrived;
 	float  m_flNextObstacleCheck;
 	uintp  m_uLastObstacleHandle;
 	bool   m_bLastObstacleFound;
@@ -253,15 +275,23 @@ private:
 	bool   m_bBreakRelease;
 	bool   m_bBreakKnifePending;
 	float  m_flBreakWeaponAttack;
+	std::uint64_t m_uBreakTaskToken;
+	AgPBTaskStack m_Tasks;
+	bool m_bAutonomous;
+	bool m_bWasAlive;
+	std::uint64_t m_uObservedTaskToken;
+	std::uint64_t m_uRouteTaskToken;
+	float m_flNextTaskPlan;
+	float m_flTaskActionStarted;
+	float m_flNextTaskUse;
+	uintp m_uLastTaskUseHandle;
+	uintp m_uDeclinedObjectiveHandle;
+	float m_flObjectiveRetryAfter;
 
 	// 随机漫游（agpb_bot_roam）
 	bool   m_bRoam;
 	float  m_flNextRoamTime;    // 上一轮挑不到点后的重试时间
 	int    m_iLastRoamGoal;     // 别连着两次去同一个点
-
-	// 蹲守（到 CAMP 点后原地待一会）
-	float  m_flCampUntil;       // > 0 = 蹲守到这个世界时间
-	bool   m_bCampCrouch;       // 蹲守时是否按着蹲（点带 CROUCH）
 
 };
 
@@ -282,6 +312,7 @@ public:
 	void RemoveByEdict( edict_t *pEdict );
 
 	void ThinkAll( CGlobalVars *pGlobals );
+	void ResetAllTasks();
 
 	int Count() const { return m_Bots.Count(); }
 	CAgPB *Get( int listIndex );

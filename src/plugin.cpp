@@ -21,6 +21,7 @@
 #include "menu.h"
 #include "wpdraw.h"
 #include "wpedit.h"
+#include "objectives.h"
 
 AgPBPlugin g_AgPBPlugin;
 
@@ -51,8 +52,20 @@ class CAgPBRoundListener : public IGameEventListener2
 public:
 	void FireGameEvent( IGameEvent *event )
 	{
-		if ( event != NULL )
-			g_RoundFrozen = Q_strcmp( event->GetName(), "round_start" ) == 0;
+		if ( event == NULL ) return;
+		const char *name = event->GetName();
+		if ( Q_strcmp( name, "round_start" ) == 0 )
+		{
+			g_RoundFrozen = true;
+			BotObjectives().OnRoundStart();
+			g_Bots.ResetAllTasks();
+		}
+		else if ( Q_strcmp( name, "round_freeze_end" ) == 0 ) g_RoundFrozen = false;
+		else if ( Q_strcmp( name, "round_end" ) == 0 )
+		{
+			g_RoundFrozen = true;
+			g_Bots.ResetAllTasks();
+		}
 	}
 };
 static CAgPBRoundListener g_RoundListener;
@@ -1400,6 +1413,51 @@ static void Cmd_BotObstacle( const CCommand &args )
 static ConCommand agpb_bot_obstacle_cmd( "agpb_bot_obstacle", Cmd_BotObstacle,
                                        "Read-only ZBot-style obstacle probe: agpb_bot_obstacle <idx> [waypoint|-1] [stuck=0|1]", FCVAR_GAMEDLL );
 
+static void Cmd_BotAuto( const CCommand &args )
+{
+	if ( args.ArgC() < 2 )
+	{
+		META_CONPRINTF( "[AgPB] usage: agpb_bot_auto <idx|all> [0|1]\n" ); return;
+	}
+	const bool all = Q_stricmp( args.Arg( 1 ), "all" ) == 0;
+	const bool enabled = args.ArgC() < 3 || V_atoi( args.Arg( 2 ) ) != 0;
+	for ( int i = 0; i < g_Bots.Count(); ++i )
+		if ( all || i == V_atoi( args.Arg( 1 ) ) )
+		{
+			g_Bots.Get( i )->SetAutonomous( enabled );
+			META_CONPRINTF( "[AgPB] %s: normal tasks %s\n", g_Bots.Get( i )->Name(), enabled ? "enabled" : "disabled" );
+		}
+}
+
+static void Cmd_BotTasks( const CCommand &args )
+{
+	const bool all = args.ArgC() < 2 || Q_stricmp( args.Arg( 1 ), "all" ) == 0;
+	for ( int i = 0; i < g_Bots.Count(); ++i )
+		if ( all || i == V_atoi( args.Arg( 1 ) ) ) g_Bots.Get( i )->ReportTasks();
+}
+
+static void Cmd_Objectives( const CCommand &args )
+{
+	const AgPBObjectiveSnapshot &world = BotObjectives().Snapshot();
+	META_CONPRINTF( "[AgPB] objectives: map-flags=%d round=%u sites=%d rescues=%d hostages=%d bomb-state=%d bomb-ent=%d owner=%d pos=%s (%.1f %.1f %.1f) blow-time=%.2f\n",
+		world.mapFlags, world.roundEpoch, world.bombSites.Count(), world.rescueZones.Count(), world.hostages.Count(),
+		(int)world.bomb.state, NetVar_HandleEntry( world.bomb.handle ), NetVar_HandleEntry( world.bomb.owner ),
+		world.bomb.positionKnown ? "known" : "unknown", world.bomb.position.x, world.bomb.position.y,
+		world.bomb.position.z, world.bomb.blowTimeKnown ? world.bomb.blowTime : -1.0f );
+	for ( int i = 0; i < world.hostages.Count(); ++i )
+	{
+		const AgPBObjectiveHostage &h = world.hostages[i];
+		META_CONPRINTF( "[AgPB] hostage ent=%d alive=%s rescued=%s leader=%s/%d pos=(%.1f %.1f %.1f)\n",
+			NetVar_HandleEntry( h.handle ), h.aliveKnown ? ( h.alive ? "yes" : "no" ) : "unknown",
+			h.rescuedKnown ? ( h.rescued ? "yes" : "no" ) : "unknown", h.leaderKnown ? "known" : "unknown",
+			NetVar_HandleEntry( h.leader ), h.position.x, h.position.y, h.position.z );
+	}
+}
+
+static ConCommand agpb_bot_auto_cmd( "agpb_bot_auto", Cmd_BotAuto, "Enable normal-mode task autonomy: <idx|all> [0|1].", FCVAR_GAMEDLL );
+static ConCommand agpb_bot_tasks_cmd( "agpb_bot_tasks", Cmd_BotTasks, "Show active and suspended tasks: [idx|all].", FCVAR_GAMEDLL );
+static ConCommand agpb_objectives_cmd( "agpb_objectives", Cmd_Objectives, "Read-only normal objective snapshot.", FCVAR_GAMEDLL );
+
 static ConCommand agpb_add_cmd( "agpb_add", Cmd_Add,
                                 "Create an AgPB bot. [team]", FCVAR_GAMEDLL );
 static ConCommand agpb_kick_cmd( "agpb_kick", Cmd_Kick,
@@ -1512,7 +1570,8 @@ bool AgPBPlugin::Load( PluginId id, ISmmAPI *ismm, char *error, size_t maxlen, b
 	gpGlobals = ismm->GetCGlobals();
 	GET_V_IFACE_CURRENT( GetEngineFactory, g_GameEvents, IGameEventManager2, INTERFACEVERSION_GAMEEVENTSMANAGER2 );
 	if ( !g_GameEvents->AddListener( &g_RoundListener, "round_start", true ) ||
-	     !g_GameEvents->AddListener( &g_RoundListener, "round_freeze_end", true ) )
+	     !g_GameEvents->AddListener( &g_RoundListener, "round_freeze_end", true ) ||
+	     !g_GameEvents->AddListener( &g_RoundListener, "round_end", true ) )
 	{
 		g_GameEvents->RemoveListener( &g_RoundListener );
 		Q_strncpy( error, "could not register navigation round events", (int)maxlen );
@@ -1600,6 +1659,7 @@ void AgPBPlugin::AllPluginsLoaded()
 
 void AgPBPlugin::OnLevelShutdown()
 {
+	BotObjectives().Reset();
 	g_RoundFrozen = false;
 	// 换图会销毁所有 edict，先清掉本地记录，避免悬挂指针。
 	g_Bots.RemoveAll();
