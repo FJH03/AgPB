@@ -1,0 +1,73 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>AgPW 3D 路点工具</title>
+  <link rel="stylesheet" href="viewer.css">
+  <script type="importmap">{"imports":{"three":"./vendor/three.module.js"}}</script>
+</head>
+<body>
+  <header>
+    <div class="brand"><span class="brand-icon">⌖</span><div><h1>AgPW <span>3D 路点工具</span></h1><p id="scene-name">正在读取场景…</p></div></div>
+    <div class="header-right"><span class="readonly">路点编辑</span><span id="document-state" class="document-state">未载入</span><button id="save-waypoints" disabled>保存</button><button id="save-as" disabled>另存为</button><button id="import-agpw" class="primary">导入 AGPW</button><input id="import-file" type="file" accept=".agpw" hidden><button id="reload" title="重新读取当前路点">重新加载</button></div>
+  </header>
+  <main>
+    <aside class="controls panel">
+      <section>
+        <h2>视图</h2>
+        <div class="button-grid"><button id="fit-waypoints">聚焦路点 <kbd>F</kbd></button><button id="fit-map">查看全图 <kbd>G</kbd></button></div>
+        <button id="view-mode" class="wide" aria-pressed="false">切换俯视 <kbd>T</kbd></button>
+        <button id="fly-mode" class="wide" aria-pressed="false" disabled>自由飞行（可穿墙） <kbd>V</kbd></button>
+        <p id="fly-lock-status" class="hint fly-lock-status" role="status" hidden></p>
+        <label class="range-label fly-speed-label" for="fly-speed">飞行速度 <output id="fly-speed-value">240 单位/秒</output></label>
+        <input id="fly-speed" type="range" min="40" max="1600" value="240" step="20" disabled>
+        <p class="hint fly-help">V 进入 / 退出自由飞行。点击画面接管鼠标，Esc 释放鼠标；操作面板后点回画面即可继续。未锁定时可左键拖动。WASD 移动，Q 下降 / E 上升，Shift 加速。</p>
+        <label class="check"><input id="show-textures" type="checkbox" checked> 显示基础贴图</label>
+        <label class="check"><input id="show-models" type="checkbox" checked> 显示地图物件</label>
+        <label class="check"><input id="show-labels" type="checkbox"> 显示路点编号</label>
+        <label class="check"><input id="xray" type="checkbox" checked> 路点穿墙显示</label>
+        <label class="range-label" for="opacity">地图不透明度 <output id="opacity-value">100%</output></label>
+        <input id="opacity" type="range" min="5" max="100" value="100" step="5">
+      </section>
+      <section>
+        <h2>高度切片 <span class="small">Z 轴</span></h2>
+        <p class="hint">隐藏此高度以上的地图和路点，查看室内或较低楼层。</p>
+        <label class="range-label" for="slice">最高显示高度 <output id="slice-value">全部</output></label>
+        <input id="slice" type="range" min="0" max="1" value="1" step="1">
+        <div class="slice-ticks"><span id="slice-min">—</span><button id="slice-reset" class="text-button">显示全部</button><span id="slice-max">—</span></div>
+      </section>
+      <section>
+        <h2>定位路点</h2>
+        <form id="locate-form" class="locate"><input id="locate-id" type="number" min="0" step="1" placeholder="编号，从 0 开始" aria-label="路点编号"><button type="submit">定位</button></form>
+        <p id="locate-message" class="hint" role="status"></p>
+      </section>
+      <section class="legend">
+        <h2>连线</h2>
+        <p class="hint">每个方向分别画箭头，双向连接并排显示。</p>
+        <div><i style="--swatch:#e05252"></i>JUMP <i style="--swatch:#4a7fd4"></i>DOUBLE</div>
+        <div><i style="--swatch:#3fa34d"></i>VISIBLE <i style="--swatch:#8a8a8a"></i>普通</div>
+      </section>
+      <details class="help"><summary>操作说明</summary><p id="source-note">点击“导入 AGPW”选择路点文件，工具按文件中的地图名寻找对应地图。</p><p>环绕视角：左键拖动旋转 · Shift + 左键拖动平移 · 滚轮缩放。俯视模式左键平移。单击路点查看属性和连接；点击连接编号可跳转。</p><p>F 聚焦路点 · G 全图 · T 切换俯视 · V 进入 / 退出自由飞行 · [ / ] 调整切片 · Esc 释放鼠标／环绕时取消选择。</p><p>仅显示基础贴图；材质的透明、颜色和其他特效均忽略。关闭“显示基础贴图”可查看灰模。地图按文件的静态状态显示；游戏中的移动、破坏与脚本状态仍需在游戏里验证。地图、位置与连线只读；半径和 Flags 可编辑，保存时由你选择目标文件。</p></details>
+    </aside>
+    <div id="viewport" aria-label="地图和路点三维视图">
+      <div id="canvas-host"></div><div id="labels"></div><div id="fly-crosshair" aria-hidden="true" hidden></div>
+      <div id="empty-state" class="stage-message empty-state" hidden><span class="empty-icon">⌖</span><h2>导入 AGPW 路点文件</h2><p>按路点文件中的地图名查找 BSP 地图。<br>找不到对应地图时会直接显示错误。</p><button id="empty-import" class="primary">选择 .agpw 文件</button></div>
+      <div id="import-error" class="import-error" role="alert" hidden><strong>导入失败</strong><p id="import-error-text"></p><p id="import-error-note"></p></div>
+      <div id="loading" class="stage-message"><span class="spinner"></span><strong id="loading-text">正在读取地图…</strong><p>首次载入需要解析地图、物件和基础贴图。</p></div>
+      <div id="fatal" class="stage-message error" hidden><strong>无法打开预览</strong><p id="fatal-text"></p></div>
+      <div class="stage-top"><span id="mode-badge">透视 · Z 向上</span><span id="slice-badge" hidden></span></div>
+      <div id="camera-readout" class="camera-readout" hidden><span id="camera-position"></span><span id="camera-direction"></span></div>
+      <div class="stage-bottom"><span id="scene-stats">—</span><span id="axis-note">X / Y 平面 · Z 高度</span></div>
+    </div>
+    <aside class="inspector panel">
+      <section class="edit-history"><h2>路点编辑 <span class="small">位置与连线只读</span></h2><div class="button-grid"><button id="undo-edit" disabled title="Ctrl+Z">撤销</button><button id="redo-edit" disabled title="Ctrl+Y">重做</button></div><button id="download-copy" class="wide" disabled title="下载当前路点副本，不写入原文件，也不清除未保存标记">下载副本</button><p id="editor-message" class="hint" role="status">选择路点后可修改半径和 Flags。</p></section>
+      <section id="selection"><h2>路点详情</h2><div class="empty-selection"><span>⌖</span><p>点击地图中的路点<br>查看坐标、属性与方向连接</p></div></section>
+      <section class="diagnostics"><details id="warnings-details"><summary>资源与提示 <span id="warning-count" class="count">0</span></summary><p class="hint">缺失的模型以橙色标记提示；无边界数据时，标记不代表物件实际大小。</p><ul id="warnings"></ul></details></section>
+      <section class="map-info"><h2>场景信息</h2><dl id="map-info"></dl></section>
+    </aside>
+  </main>
+  <footer><span id="status" role="status">正在初始化…</span><span>AgPW · 独立路点辅助工具</span></footer>
+  <script type="module" src="viewer.js"></script>
+</body>
+</html>
