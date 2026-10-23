@@ -224,7 +224,7 @@ py -B .\waypoint-workflow\verify_clearance.py (Join-Path $sessionDir 'clearance-
 
 ## 交付与收尾
 
-- `agpb_wp_save` / `load`后再次compare；只有author变化时才显式`--allow-author-change`。2D核对拓扑，3D核对几何与层次，使用`tools/agpw_view.py`及`tools/agpw_view3d.py`，各自能力见工具说明。
+- `agpb_wp_save` / `load`后再次compare；只有author变化时才显式`--allow-author-change`。使用`tools/agpw_view3d.py`核对路点方向、地图几何与层次，能力范围见[3D工具说明](../tools/agpw_view3d_README.md)。
 - 交付包含AGPW、人工计划、分区覆盖、实走 / 目标结果、未通过项和版本哈希。`audit_waypoints.py verify-bundle <manifest> --agpw <文件> --bsp <文件> --dll <文件>`核对清单与部署；只有全图实际覆盖和所需行为通过才能对应结项。
 - 停止写入后再整理证据。先`agpb_reg_clear`并确认存活点控对象恢复，再踢bot、释放真人按键、关闭本轮noclip，恢复并独立读回记录过的设置，卸载本轮加载的disabled夹具并停止日志。关闭日志 / quit可能没有END；核对实际进程和唯一退出标记，未知退出码保留未知。
 - 清理文件按AGENTS及本轮用户授权执行；TEMP和两个游戏junction是临时映射，正式AGPW不在清理范围。无需重写已冻结的历史交付包。

@@ -217,7 +217,6 @@ csczs / normal、de_dust2；AGPW、BSP 与手工计划未改。普通行为继�
 | [`waypoint-workflow/README.md`](waypoint-workflow/README.md) | 路点工作流的统一说明入口，含原生控制台、TGA、人工计划与版本绑定验收 |
 | [`combat-tests/README.md`](combat-tests/README.md) | 独立战斗验证、难度采样、对手短测与战斗证据离线复核；战斗专用脚本及夹具集中在此目录 |
 | [`tools/agpw_view3d_README.md`](tools/agpw_view3d_README.md) | 独立 3D 查看 / radius 与 flags 编辑；位置、连线与动态碰撞不在支持范围 |
-| `tools/agpw_view.py` / `tools/agpw_view.bat` | 只读 2D 路点图查看 |
 
 构建涉及头文件时必须确保消费者重编；新增 cpp 加入 AMBuilder，构建脚本保持 ASCII。
 
@@ -229,7 +228,12 @@ csczs / normal、de_dust2；AGPW、BSP 与手工计划未改。普通行为继�
 |---|---|---|---|---|
 | 站立 / 蹲姿体积高度 | 随 `sv_cs_use_legacy_viewvectors` 支持 62/45 与 72/54 | 编译期固定 62/45 | 编译期固定 72/54 | `AgPB_RefreshHullSize()`（`src/waypoint.cpp`） |
 
-## 当前可清理的会话资料
+## 当前可清理资料与停用工具
 
-临时资料与 junction 只列完整路径，由用户自行删除；见最新 M3b 冻结包的 `cleanup-paths.txt`。
+临时资料与 junction 只列完整路径，由用户自行删除；见最新 M3c 冻结包的 `cleanup-paths.txt`。
 正式 AGPW、源计划及交付包保留；未执行文件删除。
+
+独立 2D 路点工具已从维护入口和制作流程移除；以下遗留文件待用户自行删除：
+
+- `E:\Plugins-Platform\AgPB\tools\agpw_view.py`
+- `E:\Plugins-Platform\AgPB\tools\agpw_view.bat`

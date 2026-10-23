@@ -40,7 +40,7 @@ _TEXTURE_CACHE_LOCK = threading.Lock()
 
 
 def deployment_dir():
-    """Use the same AGENTS.md destination as the independent 2D tool."""
+    """Read the deployment destination from AGENTS.md."""
     requirements = ROOT / 'AGENTS.md'
     if requirements.is_file():
         match = re.search(r'部署目标[：:]\s*`([^`]+)`', requirements.read_text(encoding='utf-8'))

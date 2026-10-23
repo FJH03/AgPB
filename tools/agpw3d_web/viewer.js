@@ -13,7 +13,7 @@ const WP_FLAGS = [
 ];
 const PATH_FLAGS = [[1, 'JUMP'], [2, 'DOUBLE'], [4, 'VISIBLE']];
 const FLAG_BITS = Object.fromEntries(WP_FLAGS.map(([bit, name]) => [name, bit]));
-// Match the existing 2D tool and wpdraw.cpp exactly.
+// Match the in-game waypoint colors in wpdraw.cpp exactly.
 const NODE_COLORS = [
   ['CAMP', '#00FFFF'], ['GOAL', '#8000FF'], ['LADDER', '#804000'],
   ['RESCUE', '#FFFFFF'], ['AVOID', '#FF0000'], ['FALLCHECK', '#808080'],
