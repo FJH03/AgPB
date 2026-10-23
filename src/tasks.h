@@ -22,6 +22,7 @@ enum class AgPBTaskId
 {
 	Normal,
 	MoveToPosition,
+	Investigate,
 	Camp,
 	Pause,
 	DestroyBreakable,
@@ -42,6 +43,7 @@ namespace AgPBTaskPriority
 	constexpr float Pause = 36.0f;
 	constexpr float Camp = 37.0f;
 	constexpr float MoveToPosition = 50.0f;
+	constexpr float Investigate = 55.0f;
 	constexpr float AgentIntention = 60.0f;
 	constexpr float Objective = 89.0f;
 	constexpr float DestroyBreakable = 100.0f;
@@ -62,6 +64,7 @@ struct AgPBTask
 	float deadline;               // Absolute game time; <= 0 means no expiry.
 	bool canResume;               // Keep this task when a higher desire interrupts it.
 	std::uint64_t token;          // Stack-owned identity; never set by callers.
+	std::uint64_t parentToken;    // 0 = independent goal; otherwise execution for this exact owner.
 };
 
 enum class AgPBTaskState
@@ -88,14 +91,19 @@ public:
 	bool Contains( AgPBTaskId id ) const;
 	AgPBTaskState State( std::uint64_t token ) const;
 
+	// Local tasks use SyPB desire arbitration. A live AgentIntention owns the
+	// top-level goal regardless of local desire; its DestroyBreakable child may
+	// execute without changing that goal. No other task may have a parent.
 	// One entry per ID, as in SyPB. An identical push preserves the token;
 	// a changed payload replaces it and invalidates pending completions.
-	// Returns 0 when a nonresumable low-desire request is discarded.
+	// Returns 0 for an invalid/stale parent or a discarded nonresumable task.
 	std::uint64_t Push( const AgPBTask &task );
 
 	// Complete only the active task with this exact token. Stale completions
 	// cannot finish a replacement task of the same ID.
 	bool Complete( std::uint64_t token );
+	// Removing, replacing, completing or expiring an owner also removes its
+	// execution children before arbitration can select another goal.
 	bool Remove( AgPBTaskId id );
 	bool RemoveToken( std::uint64_t token );
 	// Renew an existing finite lease without replacing its identity or priority.
@@ -106,6 +114,9 @@ public:
 
 private:
 	void Select();
+	bool HasValidParent( const AgPBTask &task ) const;
+	void RemoveChildren( std::uint64_t token );
+	void RemoveOrphanChildren();
 	std::uint64_t NextToken();
 
 	std::vector<AgPBTask> m_tasks;

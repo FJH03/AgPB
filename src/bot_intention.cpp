@@ -1,8 +1,8 @@
-// AgPB optional agent waypoint intentions. GPL-3.0-only.
-// SyPB-derived local task arbitration remains in charge of navigation/actions;
-// CS-EBOT's absolute process deadlines were compared. An external agent only
-// leases one waypoint goal. Local objectives, escape, combat and clearing keep
-// their existing priorities and CUserCmd execution paths.
+// AgPB leased high-level agent intentions. GPL-3.0-only.
+// The LLM+harness owns the top-level goal while its lease is valid. SyPB-derived
+// local navigation, combat and execution children carry it out with CUserCmd;
+// local goal selection resumes when the lease ends. CS-EBOT's absolute process
+// deadlines were compared; no engine-bot behavior core is used.
 #include <tier1/strtools.h>
 #include <cmath>
 #include "plugin.h"
@@ -36,8 +36,8 @@ bool CAgPB::SetAgentIntent( bool camp, int waypoint, float ttl, char *error, siz
     if ( m_AgentIntent.token != 0 && m_AgentIntent.camp == camp && m_AgentIntent.waypoint == waypoint &&
          m_Tasks.RenewDeadline( m_AgentIntent.token, deadline ) )
     {
-        // A heartbeat must not replace the task token, clear its hop, reset
-        // arrival or disturb a currently active higher-priority objective.
+        // A heartbeat preserves goal ownership, its route and any execution
+        // child currently clearing the route for this exact lease.
         m_AgentIntent.deadline = deadline;
         Q_strncpy( m_AgentIntent.reason, "renewed", sizeof( m_AgentIntent.reason ) );
         return true;
@@ -67,16 +67,23 @@ bool CAgPB::SetAgentIntent( bool camp, int waypoint, float ttl, char *error, siz
 void CAgPB::ClearAgentIntent( const char *reason )
 {
     const std::uint64_t token = m_AgentIntent.token;
-    const bool active = token != 0 && m_Tasks.Current().token == token;
+    const AgPBTask current = m_Tasks.Current();
+    const bool active = token != 0 && ( current.token == token || current.parentToken == token );
     const bool ownsRoute = token != 0 && m_uRouteTaskToken == token;
+    const AgPBTask *breakable = m_Tasks.Find( AgPBTaskId::DestroyBreakable );
+    const std::uint64_t childToken = token != 0 && breakable != NULL && breakable->parentToken == token ?
+        breakable->token : 0;
+    const bool ownsCombat = token != 0 && ( m_uCombatOwnerToken == token ||
+        ( childToken != 0 && m_uCombatOwnerToken == childToken ) );
     AgentIntentState empty;
     Q_strncpy( empty.reason, reason != NULL ? reason : "cleared", sizeof( empty.reason ) );
     m_AgentIntent = empty;
     if ( token == 0 ) return;
-    // ClearRoute also removes the breakable child that belongs to this route.
-    // A suspended lease must never cancel an objective's different route.
+    // Route and combat state belong to the exact lease or its execution child.
+    // RemoveToken atomically removes any remaining child before local fallback.
     if ( ownsRoute ) ClearRoute();
-    if ( ownsRoute || m_uCombatOwnerToken == token ) ClearCombat( "agent-released" );
+    else if ( childToken != 0 && m_uBreakTaskToken == childToken ) ClearBreakable();
+    if ( ownsRoute || ownsCombat ) ClearCombat( "agent-released" );
     m_Tasks.RemoveToken( token );
     if ( active || ownsRoute )
         m_flNextTaskPlan = gpGlobals != NULL ? gpGlobals->curtime : 0.0f;
@@ -104,17 +111,19 @@ void CAgPB::UpdateAgentIntent( CGlobalVars *globals )
     const AgPBTaskState state = m_Tasks.State( m_AgentIntent.token );
     if ( state == AgPBTaskState::Missing )
     { ClearAgentIntent( "task-ended" ); return; }
-    // A local objective may move a camping bot away. Resume by navigating
-    // back through the same authored graph, rather than camping at that new spot.
-    if ( state == AgPBTaskState::Suspended ) m_AgentIntent.arrived = false;
+    // Suspended here means a child is executing for this same goal. Independent
+    // local tasks cannot preempt it, so preserve arrival and route ownership.
 }
 
 void CAgPB::ReportAgentIntent() const
 {
     const float now = gpGlobals != NULL ? gpGlobals->curtime : 0.0f;
     const AgPBTaskState taskState = m_Tasks.State( m_AgentIntent.token );
+    const bool clearing = m_AgentIntent.token != 0 &&
+        m_Tasks.Current().parentToken == m_AgentIntent.token;
     const char *state = m_AgentIntent.token == 0 ? "none" :
         now >= m_AgentIntent.deadline ? "expired" :
+        clearing ? "clearing" :
         taskState == AgPBTaskState::Suspended ? "suspended" :
         taskState == AgPBTaskState::Missing ? "ended" :
         m_AgentIntent.arrived ? "camping" : "active";

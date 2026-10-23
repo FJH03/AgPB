@@ -54,6 +54,8 @@ class FakeSender:
             assert command.startswith("agpb_agent_intent 2 7 12 camp 60 ")
             self.token, self.deadline = 42, 100 + self.clock.now + 3
             log = snapshot(self.token, self.deadline)
+        if self.scenario == "clearing" and self.token:
+            log = log.replace("state=active", "state=clearing")
         return {"command":command,"log":log,"stdout":log,"offline_fake":True}
     def close(self): self.closed = True
 
@@ -99,6 +101,13 @@ class AgentClientTests(unittest.TestCase):
         self.assertEqual(summary["last_accepted_lease"]["token"],42)
         self.assertEqual(len(sender.commands),4)
         self.assertFalse(summary["automatic_clear"])
+
+    def test_clearance_child_keeps_lease_renewing(self):
+        code,sender,summary = self.run_client("clearing")
+        self.assertEqual(code,0)
+        self.assertEqual(summary["renewals"],2)
+        self.assertEqual(summary["last_accepted_lease"]["state"],"clearing")
+        self.assertEqual(summary["last_accepted_lease"]["token"],42)
 
     def test_stop_scope_replacement_and_transport_error(self):
         for scenario,expected in (("stop",1),("scope",1),("replacement",0),("error",1)):

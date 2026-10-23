@@ -23,7 +23,9 @@
  *
  * CS-EBOT's source/ssm/ssm.cpp was cross-checked: its remembered process
  * retains an absolute deadline. This implementation keeps SyPB's desire
- * arbitration and allows more than one suspended normal-mode task.
+ * arbitration and allows more than one suspended normal-mode task. AgPB's
+ * agent authority is a separate goal arbitration layer; local execution
+ * children do not acquire authority over their owning goal.
  * AgPB adaptation: GPL-3.0-only.
  */
 #include "tasks.h"
@@ -59,7 +61,7 @@ bool SamePayload( const AgPBTask &a, const AgPBTask &b )
 		a.position[1] == b.position[1] &&
 		a.position[2] == b.position[2] &&
 		a.hasPosition == b.hasPosition && a.deadline == b.deadline &&
-		a.canResume == b.canResume;
+		a.canResume == b.canResume && a.parentToken == b.parentToken;
 }
 }
 
@@ -73,7 +75,8 @@ AgPBTask::AgPBTask()
 	  hasPosition( false ),
 	  deadline( 0.0f ),
 	  canResume( true ),
-	  token( 0 )
+	  token( 0 ),
+	  parentToken( 0 )
 {
 }
 
@@ -83,6 +86,7 @@ const char *AgPBTaskName( AgPBTaskId id )
 	{
 	case AgPBTaskId::Normal: return "normal";
 	case AgPBTaskId::MoveToPosition: return "move_to_position";
+	case AgPBTaskId::Investigate: return "investigate";
 	case AgPBTaskId::Camp: return "camp";
 	case AgPBTaskId::Pause: return "pause";
 	case AgPBTaskId::DestroyBreakable: return "destroy_breakable";
@@ -161,27 +165,88 @@ std::uint64_t AgPBTaskStack::NextToken()
 	return m_nextToken;
 }
 
-void AgPBTaskStack::Select()
+bool AgPBTaskStack::HasValidParent( const AgPBTask &task ) const
 {
-	std::size_t best = 0;
-	for ( std::size_t i = 1; i < m_tasks.size(); ++i )
+	if ( task.parentToken == 0 )
+		return true;
+	if ( task.id != AgPBTaskId::DestroyBreakable )
+		return false;
+	for ( const AgPBTask &parent : m_tasks )
 	{
-		if ( m_tasks[i].desire > m_tasks[best].desire ||
-			( m_tasks[i].desire == m_tasks[best].desire &&
-			  m_tasks[i].token > m_tasks[best].token ) )
-			best = i;
+		if ( parent.token == task.parentToken && parent.parentToken == 0 &&
+			parent.id != AgPBTaskId::DestroyBreakable )
+			return true;
 	}
-	const std::uint64_t chosen = m_tasks[best].token;
+	return false;
+}
 
-	// SyPB discards tasks marked !canContinue on a priority change. Keep
-	// resumable tasks as suspended entries; a nonresumable loser is discarded.
+void AgPBTaskStack::RemoveChildren( std::uint64_t token )
+{
+	m_tasks.erase( std::remove_if( m_tasks.begin() + 1, m_tasks.end(),
+		[token]( const AgPBTask &task ) { return task.parentToken == token; } ),
+		m_tasks.end() );
+}
+
+void AgPBTaskStack::RemoveOrphanChildren()
+{
 	for ( std::size_t i = 1; i < m_tasks.size(); )
 	{
-		if ( m_tasks[i].token != chosen && !m_tasks[i].canResume )
+		if ( !HasValidParent( m_tasks[i] ) )
 			m_tasks.erase( m_tasks.begin() + i );
 		else
 			++i;
 	}
+}
+
+void AgPBTaskStack::Select()
+{
+	RemoveOrphanChildren();
+	std::size_t best = 0;
+	const AgPBTask *agent = Find( AgPBTaskId::AgentIntention );
+	if ( agent != nullptr )
+	{
+		// Goal authority is independent of SyPB's local desire scale. Only an
+		// execution child of this exact lease may run in place of its owner.
+		const std::uint64_t owner = agent->token;
+		bool childSelected = false;
+		for ( std::size_t i = 1; i < m_tasks.size(); ++i )
+		{
+			if ( m_tasks[i].token == owner && !childSelected )
+				best = i;
+			if ( m_tasks[i].parentToken != owner )
+				continue;
+			if ( !childSelected || m_tasks[i].desire > m_tasks[best].desire ||
+				( m_tasks[i].desire == m_tasks[best].desire &&
+				  m_tasks[i].token > m_tasks[best].token ) )
+				best = i;
+			childSelected = true;
+		}
+	}
+	else
+	{
+		for ( std::size_t i = 1; i < m_tasks.size(); ++i )
+		{
+			if ( m_tasks[i].desire > m_tasks[best].desire ||
+				( m_tasks[i].desire == m_tasks[best].desire &&
+				  m_tasks[i].token > m_tasks[best].token ) )
+				best = i;
+		}
+	}
+	const std::uint64_t chosen = m_tasks[best].token;
+	const std::uint64_t parent = m_tasks[best].parentToken;
+
+	// SyPB discards tasks marked !canContinue on a priority change. Keep
+	// resumable tasks as suspended entries; a nonresumable loser is discarded.
+	// A running child suspends its owner for execution, so keep that owner even
+	// when it would normally be discarded on a different goal's interruption.
+	for ( std::size_t i = 1; i < m_tasks.size(); )
+	{
+		if ( m_tasks[i].token != chosen && m_tasks[i].token != parent && !m_tasks[i].canResume )
+			m_tasks.erase( m_tasks.begin() + i );
+		else
+			++i;
+	}
+	RemoveOrphanChildren();
 
 	for ( std::size_t i = 0; i < m_tasks.size(); ++i )
 	{
@@ -198,14 +263,19 @@ void AgPBTaskStack::Select()
 std::uint64_t AgPBTaskStack::Push( const AgPBTask &request )
 {
 	AgPBTask task = Normalize( request );
-	for ( AgPBTask &existing : m_tasks )
+	if ( !HasValidParent( task ) )
+		return 0;
+	for ( std::size_t i = 0; i < m_tasks.size(); ++i )
 	{
+		AgPBTask &existing = m_tasks[i];
 		if ( existing.id != task.id )
 			continue;
 		if ( SamePayload( existing, task ) )
 			return existing.token;
+		const std::uint64_t replaced = existing.token;
 		task.token = NextToken();
 		existing = task;
+		RemoveChildren( replaced );
 		Select();
 		return State( task.token ) == AgPBTaskState::Missing ? 0 : task.token;
 	}
@@ -224,9 +294,13 @@ bool AgPBTaskStack::Complete( std::uint64_t token )
 		AgPBTask normal;
 		normal.token = NextToken();
 		Current() = normal;
+		RemoveChildren( token );
 	}
 	else
+	{
 		m_tasks.erase( m_tasks.begin() + m_currentIndex );
+		RemoveChildren( token );
+	}
 	Select();
 	return true;
 }
@@ -239,7 +313,9 @@ bool AgPBTaskStack::Remove( AgPBTaskId id )
 	{
 		if ( m_tasks[i].id == id )
 		{
+			const std::uint64_t token = m_tasks[i].token;
 			m_tasks.erase( m_tasks.begin() + i );
+			RemoveChildren( token );
 			Select();
 			return true;
 		}
@@ -256,6 +332,7 @@ bool AgPBTaskStack::RemoveToken( std::uint64_t token )
 		if ( m_tasks[i].token == token )
 		{
 			m_tasks.erase( m_tasks.begin() + i );
+			RemoveChildren( token );
 			Select();
 			return true;
 		}
@@ -282,6 +359,7 @@ bool AgPBTaskStack::Expire( float now )
 		[now]( const AgPBTask &task ) {
 			return task.deadline > 0.0f && now >= task.deadline;
 		} ), m_tasks.end() );
+	RemoveOrphanChildren();
 	if ( m_tasks.size() == oldSize )
 		return false;
 	Select();

@@ -1,9 +1,11 @@
-// AgPB minimum normal-mode combat. GPL-3.0-only.
+// AgPB SyPB normal-mode combat with read-only Source physics checks. GPL-3.0-only.
 //
 // Behavior is adapted from SyPB source/combat.cpp ResetCheckEnemy,
 // LookupEnemy, GetAimPosition, FocusEnemy and FireWeapon, with the matching
 // CS-EBOT source/combat.cpp target/visibility/firing paths compared. Zombie
-// branches, wall shooting, pursuit and weapon tactics are not included.
+// branches and hidden-target acquisition are not included. Source-verified
+// penetration checks apply only to a currently visually sensed enemy. Last-observed
+// memory and bounded authored-waypoint investigation live in bot_search.cpp.
 // Source SDK code is used only to verify public interfaces and weapon rules.
 //
 // Copyright (c) 2003-2023, by HsK-Dev Blog.
@@ -35,6 +37,10 @@
 #include <cfloat>
 #include <worldsize.h>
 #include <vstdlib/random.h>
+#include <filesystem.h>
+#include <tier1/KeyValues.h>
+#include <mathlib/IceKey.H>
+#include <vphysics_interface.h>
 #include "plugin.h"
 #include "bot.h"
 #include "game_mode.h"
@@ -42,16 +48,21 @@
 #include "obstacle.h"
 #include "waypoint.h"
 #include "combat_skill.h"
+#include "combat_visibility.h"
+#include "bullet_penetration.h"
 
 extern CGlobalVars *gpGlobals;
 extern bool AgPB_IsRoundFrozen();
+extern IFileSystem *filesystem;
+extern IPhysicsSurfaceProps *AgPB_SurfaceProps();
+extern unsigned int AgPB_MapSerial();
 
 ConVar agpb_combat( "agpb_combat", "1", FCVAR_GAMEDLL,
     "Enable local SyPB normal-mode combat; 0 preserves navigation-only baselines." );
 ConVar agpb_difficulty( "agpb_difficulty", "3", FCVAR_GAMEDLL,
     "SyPB creation difficulty: 0=skill1-29, 1=30-49, 2=50-79, 3=80-99, 4=100." );
 static ConVar agpb_combat_debug( "agpb_combat_debug", "0", FCVAR_GAMEDLL,
-    "Log minimum-combat target acquisition and release." );
+    "Log combat target changes and bounded bullet feasibility decisions." );
 
 namespace {
 bool ReadVector( edict_t *entity, const char *name, Vector &value )
@@ -120,10 +131,11 @@ int WeaponClip( edict_t *weapon )
 class CombatTraceFilter : public CTraceFilter
 {
 public:
-    explicit CombatTraceFilter( IHandleEntity *self ) : m_Self( self ) {}
-    bool ShouldHitEntity( IHandleEntity *entity, int ) { return entity != m_Self; }
+    explicit CombatTraceFilter( IHandleEntity *self, IHandleEntity *ignore = NULL ) : m_Self( self ), m_Ignore( ignore ) {}
+    bool ShouldHitEntity( IHandleEntity *entity, int ) { return entity != m_Self && entity != m_Ignore; }
 private:
     IHandleEntity *m_Self;
+    IHandleEntity *m_Ignore;
 };
 
 bool FirstHit( const BotEngineContext &ctx, edict_t *self, edict_t *target,
@@ -144,24 +156,305 @@ bool FirstHit( const BotEngineContext &ctx, edict_t *self, edict_t *target,
         ctx.pGameEnts->BaseEntityToEdict( hit.m_pEnt ) == target;
 }
 
-bool FireRayAllowed( const BotEngineContext &ctx, edict_t *self, edict_t *target,
-                     const Vector &eye, const Vector &direction )
+bool VisibleSpot( const BotEngineContext &ctx, edict_t *self, edict_t *target,
+                  const Vector &eye, const Vector &point )
+{
+    Vector direction = point - eye;
+    return point.IsValid() && VectorNormalize( direction ) >= 0.01f &&
+        FirstHit( ctx, self, target, eye, point + direction * 8.0f );
+}
+
+// Physics below mirrors only the verified current game source, never its AI.
+// cs_player_shared.cpp FireBullet/TraceToExit/GetMaterialParameters and
+// fx_cs_shared.cpp supply the rules; all entity/material queries remain public.
+static const unsigned int BulletTraceMask = MASK_SOLID | CONTENTS_DEBRIS | CONTENTS_HITBOX;
+
+IHandleEntity *EntityHandle( edict_t *entity )
+{
+    IServerNetworkable *network = entity != NULL && !entity->IsFree() && entity->GetUnknown() != NULL
+        ? entity->GetNetworkable() : NULL;
+    return network != NULL ? network->GetEntityHandle() : NULL;
+}
+
+KeyValues *LoadBulletScript( const char *name )
+{
+#if defined( AGPB_GAME_CSCZS )
+    // [game-diff] The current CSCZS source's script format and ICE key are
+    // verified in weapon_parse.cpp and cs_gamerules.h. Other target sources
+    // have not been verified for this read-only penetration estimator.
+    if ( filesystem == NULL ) return NULL;
+    KeyValues *data = new KeyValues( "WeaponDatafile" );
+    char path[128]; V_snprintf( path, sizeof( path ), "scripts/%s.txt", name );
+    if ( data->LoadFromFile( filesystem, path, "MOD" ) ) return data;
+    V_snprintf( path, sizeof( path ), "scripts/%s.ctx", name );
+    FileHandle_t file = filesystem->Open( path, "rb", "MOD" );
+    if ( file == FILESYSTEM_INVALID_HANDLE ) { data->deleteThis(); return NULL; }
+    const int size = filesystem->Size( file );
+    CUtlVector<unsigned char> buffer;
+    if ( size <= 0 || size > 1024 * 1024 ) { filesystem->Close( file ); data->deleteThis(); return NULL; }
+    buffer.SetCount( size + 1 );
+    const int read = filesystem->Read( buffer.Base(), size, file );
+    filesystem->Close( file );
+    if ( read != size ) { data->deleteThis(); return NULL; }
+    IceKey ice( 0 ); ice.set( (const unsigned char *)"d7NSuLq2" );
+    const int blockSize = ice.blockSize();
+    if ( blockSize != 8 ) { data->deleteThis(); return NULL; }
+    for ( int at = 0; at + blockSize <= size; at += blockSize )
+    {
+        unsigned char decoded[8]; ice.decrypt( buffer.Base() + at, decoded );
+        V_memcpy( buffer.Base() + at, decoded, sizeof( decoded ) );
+    }
+    buffer[size] = 0;
+    if ( data->LoadFromBuffer( path, (const char *)buffer.Base(), filesystem, "MOD" ) ) return data;
+    data->deleteThis();
+#else
+    (void)name;
+#endif
+    return NULL;
+}
+
+bool ReadBulletProfile( edict_t *weapon, AgPBBullet::Profile &profile, const char **ammo = NULL )
+{
+    if ( ammo != NULL ) *ammo = "unknown";
+    const char *name = weapon != NULL ? weapon->GetClassName() : NULL;
+    if ( name == NULL || Q_strnicmp( name, "weapon_", 7 ) != 0 || Q_strlen( name ) >= 64 ) return false;
+    struct CachedProfile { char name[64], ammo[64]; bool valid; AgPBBullet::Profile profile; };
+    static CUtlVector<CachedProfile> cache;
+    static unsigned int mapSerial = 0;
+    if ( mapSerial != AgPB_MapSerial() ) { cache.RemoveAll(); mapSerial = AgPB_MapSerial(); }
+    int index = -1;
+    for ( int i = 0; i < cache.Count(); ++i ) if ( Q_stricmp( cache[i].name, name ) == 0 ) { index = i; break; }
+    if ( index < 0 )
+    {
+        CachedProfile entry;
+        V_strncpy( entry.name, name, sizeof( entry.name ) ); V_strncpy( entry.ammo, "unknown", sizeof( entry.ammo ) ); entry.valid = false;
+        KeyValues *data = LoadBulletScript( name );
+        if ( data != NULL )
+        {
+            struct AmmoName { const char *name; AgPBBullet::Ammo type; };
+            const AmmoName names[] = {
+                { "BULLET_PLAYER_50AE", AgPBBullet::Ammo::AE50 }, { "BULLET_PLAYER_762MM", AgPBBullet::Ammo::MM762 },
+                { "BULLET_PLAYER_556MM", AgPBBullet::Ammo::MM556 }, { "BULLET_PLAYER_556MM_BOX", AgPBBullet::Ammo::MM556 },
+                { "BULLET_PLAYER_338MAG", AgPBBullet::Ammo::Mag338 }, { "BULLET_PLAYER_9MM", AgPBBullet::Ammo::MM9 },
+                { "BULLET_PLAYER_BUCKSHOT", AgPBBullet::Ammo::Buckshot }, { "BULLET_PLAYER_45ACP", AgPBBullet::Ammo::ACP45 },
+                { "BULLET_PLAYER_357SIG", AgPBBullet::Ammo::Sig357 }, { "BULLET_PLAYER_57MM", AgPBBullet::Ammo::MM57 }
+            };
+            const char *ammoName = data->GetString( "primary_ammo", "None" );
+            V_strncpy( entry.ammo, ammoName, sizeof( entry.ammo ) );
+            AgPBBullet::Ammo ammo = AgPBBullet::Ammo::Unknown;
+            for ( const AmmoName &known : names ) if ( Q_stricmp( ammoName, known.name ) == 0 ) { ammo = known.type; break; }
+            const AgPBBullet::AmmoParameters parameters = AgPBBullet::AmmoProfile( ammo );
+            entry.profile.power = parameters.power; entry.profile.penetrationDistance = parameters.distance;
+            entry.profile.count = data->GetInt( "Penetration", 1 ); entry.profile.damage = float( data->GetInt( "Damage", 42 ) );
+            entry.profile.range = data->GetFloat( "Range", 8192.0f ); entry.profile.rangeModifier = data->GetFloat( "RangeModifier", 0.98f );
+            entry.valid = ammo != AgPBBullet::Ammo::Unknown && entry.profile.count >= 0 && entry.profile.count <= 16 &&
+                std::isfinite( entry.profile.range ) && entry.profile.range > 0.0f && entry.profile.range <= MAX_TRACE_LENGTH &&
+                std::isfinite( entry.profile.damage ) && entry.profile.damage > 0.0f &&
+                std::isfinite( entry.profile.rangeModifier ) && entry.profile.rangeModifier > 0.0f && entry.profile.rangeModifier <= 1.0f;
+            data->deleteThis();
+        }
+        index = cache.AddToTail( entry );
+        if ( agpb_combat_debug.GetBool() )
+            META_CONPRINTF( "[AgPB] penetration profile %s: %s range=%.0f damage=%.1f count=%d power=%.1f distance=%.0f\n",
+                name, entry.valid ? "loaded" : "unavailable", entry.profile.range, entry.profile.damage,
+                entry.profile.count, entry.profile.power, entry.profile.penetrationDistance );
+    }
+    if ( ammo != NULL ) *ammo = cache[index].ammo;
+    if ( !cache[index].valid ) return false;
+    profile = cache[index].profile;
+    const BotNetVar *modeField = AgPB_FindEntityNetVar( weapon, "m_weaponMode" );
+    if ( modeField == NULL || modeField->type != DPT_Int ) return false;
+    const bool secondary = AgPB_ReadNetVarInt( weapon, "m_weaponMode", 0 ) != 0;
+    if ( secondary )
+    {
+        // Glock PrimaryAttack passes Primary_Mode even in burst setting;
+        // its later scheduled FireBurst rounds own the secondary18/.9 change.
+        if ( NamedWeapon( weapon, "weapon_m4a1" ) ) profile.rangeModifier = 0.95f;
+        else if ( NamedWeapon( weapon, "weapon_usp" ) ) profile.damage = 30.0f;
+    }
+    return true;
+}
+
+void TraceBulletSegment( const BotEngineContext &ctx, edict_t *self, const Vector &start,
+                         const Vector &end, trace_t &trace )
+{
+    CombatTraceFilter filter( EntityHandle( self ) );
+    Ray_t ray; ray.Init( start, end );
+    ctx.pTrace->TraceRay( ray, BulletTraceMask, &filter, &trace );
+    // Match FireBullet's public ClipTraceToPlayers step for hitboxes extending
+    // outside collision bounds. No target search/memory is refreshed here.
+    Vector direction = end - start;
+    const float length = VectorNormalize( direction );
+    Ray_t playerRay; playerRay.Init( start, end + direction * 40.0f );
+    for ( int i = 1; gpGlobals != NULL && i <= gpGlobals->maxClients; ++i )
+    {
+        edict_t *player = ctx.pEngine->PEntityOfEntIndex( i );
+        if ( player == NULL || player == self || player->IsFree() ) continue;
+        IPlayerInfo *info = ctx.pPlayerInfoManager->GetPlayerInfo( player );
+        IHandleEntity *handle = EntityHandle( player );
+        if ( info == NULL || !info->IsPlayer() || !info->IsConnected() || info->IsDead() || handle == NULL ) continue;
+        const Vector center = info->GetAbsOrigin() + ( info->GetPlayerMins() + info->GetPlayerMaxs() ) * 0.5f;
+        const float along = DotProduct( center - start, direction );
+        if ( along < 0.0f || along > length + 40.0f ||
+             ( center - start - direction * along ).LengthSqr() > 60.0f * 60.0f ) continue;
+        trace_t playerTrace;
+        ctx.pTrace->ClipRayToEntity( playerRay, BulletTraceMask, handle, &playerTrace );
+        // The player clip ray is40 units longer. Compare physical distances
+        // and restore the primary fraction so extension normalization cannot
+        // promote a player just behind an opaque wall ahead of that wall.
+        if ( AgPBCombatVisibility::PlayerClipIsCloser( playerTrace.fraction, length + 40.0f, trace.fraction, length ) )
+        { playerTrace.fraction *= ( length + 40.0f ) / length; trace = playerTrace; }
+    }
+}
+
+bool SurfaceMaterial( IPhysicsSurfaceProps *properties, const trace_t &trace, int &material )
+{
+    if ( properties == NULL || trace.surface.surfaceProps < 0 ||
+         trace.surface.surfaceProps >= properties->SurfacePropCount() ) return false;
+    const surfacedata_t *surface = properties->GetSurfaceData( trace.surface.surfaceProps );
+    if ( surface == NULL ) return false;
+    material = surface->game.material;
+    return true;
+}
+
+struct BulletReadback
+{
+    uintp owner = (uintp)INVALID_EHANDLE_INDEX, target = (uintp)INVALID_EHANDLE_INDEX;
+    const char *reason = "none";
+    bool allowed = false, requireTarget = false, knownProfile = false;
+    int walls = 0, enterMaterial = 0, exitMaterial = 0;
+    float thickness = 0.0f, damage = 0.0f, observedAt = -1.0f, nextLog = 0.0f;
+};
+static BulletReadback s_BulletReadback[MAX_EDICTS];
+
+bool ProbeBullet( const BotEngineContext &ctx, edict_t *self, edict_t *target,
+                  const Vector &eye, const Vector &direction, const AgPBBullet::Profile *profile,
+                  bool requireTarget, float targetFarDepth )
+{
+    AgPBBullet::State bullet;
+    if ( profile != NULL ) bullet = AgPBBullet::State( *profile );
+    else bullet.range = float( MAX_TRACE_LENGTH );
+    IPhysicsSurfaceProps *properties = AgPB_SurfaceProps();
+    const int selfIndex = ctx.pEngine->IndexOfEdict( self );
+    BulletReadback result;
+    result.owner = AgPB_RefEHandle( self ); result.target = AgPB_RefEHandle( target );
+    result.requireTarget = requireTarget; result.knownProfile = profile != NULL;
+    auto finish = [&]( bool allowed, const char *reason ) {
+        result.allowed = allowed; result.reason = reason; result.damage = profile != NULL ? bullet.damage : -1.0f;
+        result.observedAt = gpGlobals != NULL ? gpGlobals->curtime : 0.0f;
+        if ( selfIndex >= 1 && selfIndex < MAX_EDICTS )
+        {
+            const BulletReadback old = s_BulletReadback[selfIndex];
+            result.nextLog = old.nextLog;
+            if ( agpb_combat_debug.GetBool() && ( result.walls > 0 || !allowed ) &&
+                 result.observedAt >= old.nextLog && ( old.owner != result.owner || old.allowed != allowed || old.reason != reason ) )
+            {
+                META_CONPRINTF( "[AgPB] bullet probe ent=%d target=%d path=%s result=%s reason=%s walls=%d material=%c/%c thickness=%.2f base-damage=%.2f\n",
+                    selfIndex, ctx.pEngine->IndexOfEdict( target ), requireTarget ? "ideal" : "command",
+                    allowed ? "allowed" : "blocked", reason, result.walls,
+                    result.enterMaterial >= 32 && result.enterMaterial < 127 ? result.enterMaterial : '?',
+                    result.exitMaterial >= 32 && result.exitMaterial < 127 ? result.exitMaterial : '?', result.thickness, result.damage );
+                result.nextLog = result.observedAt + 1.0f;
+            }
+            s_BulletReadback[selfIndex] = result;
+        }
+        return allowed;
+    };
+    Vector start = eye;
+    // Script count is bounded to16; one additional impact/clear segment is
+    // sufficient, including Source's special count0 grate continuation.
+    const int surfaceBudget = profile != NULL ? MIN( profile->count + 2, 18 ) : 1;
+    for ( int surface = 0; surface < surfaceBudget; ++surface )
+    {
+        if ( !std::isfinite( bullet.range ) || bullet.range <= 0.0f ) return finish( false, "range-exhausted" );
+        const Vector end = start + direction * bullet.range;
+        trace_t hit; TraceBulletSegment( ctx, self, start, end, hit );
+        if ( hit.startsolid || hit.allsolid || !hit.endpos.IsValid() ) return finish( false, "solid-start" );
+        if ( profile != NULL && hit.fraction < 1.0f && !AgPBBullet::ApplyImpact( bullet, hit.fraction ) ) return finish( false, "damage-exhausted" );
+        edict_t *entity = hit.m_pEnt != NULL ? ctx.pGameEnts->BaseEntityToEdict( hit.m_pEnt ) : NULL;
+        if ( entity == target ) return finish( true, result.walls > 0 ? "penetration-reaches-target" : "direct-target" );
+        if ( entity != NULL )
+        {
+            const int index = ctx.pEngine->IndexOfEdict( entity );
+            if ( gpGlobals != NULL && index >= 1 && index <= gpGlobals->maxClients ) return finish( false, "other-player" );
+        }
+        if ( hit.fraction >= 1.0f ) return finish( !requireTarget && DotProduct( end - eye, direction ) >= targetFarDepth, "clear-miss" );
+        const bool world = entity != NULL && ctx.pEngine->IndexOfEdict( entity ) == 0;
+        if ( !requireTarget && world && AgPBCombatVisibility::ShotAllowed( true, false,
+             AgPBCombatVisibility::RayHit::World, DotProduct( hit.endpos - eye, direction ), targetFarDepth ) )
+            return finish( true, "world-behind-target" );
+        if ( profile == NULL || properties == NULL ) return finish( false, "penetration-data-unavailable" );
+        int enterMaterial;
+        if ( !SurfaceMaterial( properties, hit, enterMaterial ) ) return finish( false, "entry-material-unavailable" );
+        result.enterMaterial = enterMaterial;
+        // The source probes in 24-unit steps while distance<=128 (therefore
+        // its last possible probe is 144), then reverse-traces the exact exit.
+        Vector freePoint; bool exited = false;
+        for ( float distance = 0.0f; distance <= 128.0f; )
+        {
+            distance += 24.0f; freePoint = hit.endpos + direction * distance;
+            if ( ( ctx.pTrace->GetPointContents( freePoint ) & MASK_SOLID ) == 0 ) { exited = true; break; }
+        }
+        if ( !exited ) return finish( false, "no-exit-within-probe-budget" );
+        Ray_t reverse; reverse.Init( freePoint, hit.endpos );
+        trace_t exit;
+        CombatTraceFilter all( NULL ); ctx.pTrace->TraceRay( reverse, BulletTraceMask, &all, &exit );
+        if ( exit.m_pEnt != hit.m_pEnt && exit.m_pEnt != NULL )
+        {
+            edict_t *blocker = ctx.pGameEnts->BaseEntityToEdict( exit.m_pEnt );
+            IHandleEntity *ignore = EntityHandle( blocker );
+            if ( ignore == NULL ) return finish( false, "exit-blocker-unavailable" );
+            CombatTraceFilter skip( ignore ); ctx.pTrace->TraceRay( reverse, BulletTraceMask, &skip, &exit );
+        }
+        int exitMaterial;
+        if ( exit.startsolid || exit.allsolid || exit.fraction >= 1.0f || !exit.endpos.IsValid() ||
+             !SurfaceMaterial( properties, exit, exitMaterial ) ) return finish( false, "exit-material-unavailable" );
+        const float thickness = ( exit.endpos - hit.endpos ).Length();
+        result.thickness = thickness; result.exitMaterial = exitMaterial;
+        if ( !AgPBBullet::Penetrate( bullet, thickness, enterMaterial, ( hit.contents & CONTENTS_GRATE ) != 0, exitMaterial ) )
+            return finish( false, "material-thickness-or-ammo-budget" );
+        ++result.walls; start = exit.endpos;
+    }
+    return finish( false, "surface-budget-exhausted" );
+}
+
+bool CanReachAimPoint( const BotEngineContext &ctx, edict_t *self, edict_t *target, edict_t *weapon,
+                       const Vector &eye, const Vector &point, bool allowPenetration )
+{
+    Vector direction = point - eye;
+    if ( VectorNormalize( direction ) < 0.01f ) return false;
+    if ( !allowPenetration ) return VisibleSpot( ctx, self, target, eye, point );
+    // Actual bullet mask includes grates. A clear visual MASK_SHOT ray alone
+    // is not proof that this weapon can traverse a railing.
+    CombatTraceFilter filter( EntityHandle( self ) );
+    Ray_t ray; ray.Init( eye, point + direction * 8.0f );
+    trace_t direct; ctx.pTrace->TraceRay( ray, BulletTraceMask, &filter, &direct );
+    if ( !direct.startsolid && !direct.allsolid && direct.m_pEnt != NULL &&
+         ctx.pGameEnts->BaseEntityToEdict( direct.m_pEnt ) == target ) return true;
+    AgPBBullet::Profile profile;
+    const bool known = ReadBulletProfile( weapon, profile );
+    return ProbeBullet( ctx, self, target, eye, direction, known ? &profile : NULL, true, 0.0f );
+}
+
+bool FireRayAllowed( const BotEngineContext &ctx, edict_t *self, edict_t *target, edict_t *weapon,
+                     const Vector &eye, const Vector &direction, const Vector &idealPoint )
 {
     if ( ctx.pTrace == NULL || ctx.pGameEnts == NULL || ctx.pEngine == NULL ||
-         self == NULL || self->IsFree() || self->GetUnknown() == NULL ) return false;
-    IServerNetworkable *network = self->GetNetworkable();
-    if ( network == NULL || network->GetEntityHandle() == NULL ) return false;
-    CombatTraceFilter filter( network->GetEntityHandle() );
-    Ray_t ray; ray.Init( eye, eye + direction * float( MAX_TRACE_LENGTH ) );
-    trace_t hit;
-    ctx.pTrace->TraceRay( ray, MASK_SHOT, &filter, &hit );
-    if ( hit.startsolid || hit.allsolid ) return false;
-    if ( hit.m_pEnt == NULL ) return hit.fraction >= 1.0f;
-    edict_t *entity = ctx.pGameEnts->BaseEntityToEdict( hit.m_pEnt );
-    // Preserve SyPB low-skill misses. A clear/world-hit miss is permitted
-    // only while the target is separately visible; any unrelated entity,
-    // including a friendly behind the target, blocks this entire long ray.
-    return entity == target || ( entity != NULL && ctx.pEngine->IndexOfEdict( entity ) == 0 );
+         ctx.pPlayerInfoManager == NULL || EntityHandle( self ) == NULL || target == NULL ||
+         !direction.IsValid() || !eye.IsValid() || !CanReachAimPoint( ctx, self, target, weapon, eye, idealPoint, true ) ) return false;
+    IPlayerInfo *info = ctx.pPlayerInfoManager->GetPlayerInfo( target );
+    if ( info == NULL ) return false;
+    const Vector origin = info->GetAbsOrigin(), mins = info->GetPlayerMins(), maxs = info->GetPlayerMaxs();
+    if ( !origin.IsValid() || !mins.IsValid() || !maxs.IsValid() ) return false;
+    Vector shotDirection = direction;
+    if ( VectorNormalize( shotDirection ) < 0.01f ) return false;
+    const Vector center = origin + ( mins + maxs ) * 0.5f, half = ( maxs - mins ) * 0.5f;
+    const float farDepth = DotProduct( center - eye, shotDirection ) +
+        fabsf( shotDirection.x ) * half.x + fabsf( shotDirection.y ) * half.y + fabsf( shotDirection.z ) * half.z;
+    if ( !std::isfinite( farDepth ) || farDepth <= 0.0f ) return false;
+    AgPBBullet::Profile profile;
+    const bool known = ReadBulletProfile( weapon, profile );
+    return ProbeBullet( ctx, self, target, eye, shotDirection, known ? &profile : NULL, false, farDepth );
 }
 }
 
@@ -214,6 +507,7 @@ void CAgPB::SetCombat( bool enable )
     m_bBreakKnifePending = false;
     if ( m_uBreakTaskToken != 0 ) m_bBreakRelease = true;
     ClearCombat( enable ? "enabled" : "disabled" );
+    ResetSearch();
     // The next command starts with released attack; a partially settled route
     // must still satisfy a full uninterrupted navigation settling interval.
     m_flRouteSettleSince = -1.0f;
@@ -243,30 +537,48 @@ bool CAgPB::IsCombatEnemy( edict_t *target, int expectedUserId ) const
 
 bool CAgPB::CombatAimPoint( edict_t *target, const Vector &eye, Vector &point, bool requireViewCone, unsigned int *visibility ) const
 {
+    using namespace AgPBCombatVisibility;
+    if ( visibility != NULL ) *visibility = 0;
     IPlayerInfo *info = m_Ctx.pPlayerInfoManager->GetPlayerInfo( target );
     if ( info == NULL ) return false;
     const Vector origin = info->GetAbsOrigin(), mins = info->GetPlayerMins(), maxs = info->GetPlayerMaxs();
-    if ( !origin.IsValid() || !mins.IsValid() || !maxs.IsValid() ) return false;
+    if ( !origin.IsValid() || !mins.IsValid() || !maxs.IsValid() ||
+         maxs.x <= mins.x || maxs.y <= mins.y || maxs.z <= mins.z ) return false;
     const Vector body = origin + ( mins + maxs ) * 0.5f;
-    if ( visibility != NULL ) *visibility = 0;
     if ( requireViewCone && !InsideViewCone( *this, eye, body ) ) return false;
     Vector headOffset;
-    const Vector head = ViewOffset( target, headOffset ) ? origin + headOffset : body;
-    const Vector spots[] = { body, head };
+    const bool headKnown = ViewOffset( target, headOffset );
+    Vector spots[SpotCount];
+    spots[Body] = body; spots[Head] = headKnown ? origin + headOffset : body;
+    // Bounded partial-body proxies use only public collision bounds/view
+    // offset. A sample is useful only when its own MASK_SHOT trace first hits
+    // this target; bounds alone never imply an exposed hitbox.
+    const float height = maxs.z - mins.z;
+    const float width = MIN( maxs.x - mins.x, maxs.y - mins.y ) * 0.5f;
+    const Vector feet = origin + Vector( ( mins.x + maxs.x ) * 0.5f, ( mins.y + maxs.y ) * 0.5f, mins.z );
+    Vector side( -( body - eye ).y, ( body - eye ).x, 0.0f );
+    if ( VectorNormalize( side ) < 0.01f ) side.Init( 1.0f, 0.0f, 0.0f );
+    spots[UpperBody] = feet + Vector( 0, 0, height * 0.70f );
+    spots[LeftShoulder] = feet + Vector( 0, 0, height * 0.72f ) + side * width * 0.80f;
+    spots[RightShoulder] = feet + Vector( 0, 0, height * 0.72f ) - side * width * 0.80f;
+    spots[LeftTorso] = feet + Vector( 0, 0, height * 0.48f ) + side * width * 0.80f;
+    spots[RightTorso] = feet + Vector( 0, 0, height * 0.48f ) - side * width * 0.80f;
+    spots[LowerBody] = feet + Vector( 0, 0, height * 0.28f );
+    spots[LeftLeg] = feet + Vector( 0, 0, height * 0.16f ) + side * width * 0.35f;
+    spots[RightLeg] = feet + Vector( 0, 0, height * 0.16f ) - side * width * 0.35f;
     unsigned int visible = 0;
-    for ( int i = 0; i < 2; ++i )
-    {
-        Vector direction = spots[i] - eye;
-        if ( VectorNormalize( direction ) < 0.01f ) continue;
-        if ( FirstHit( m_Ctx, m_pEdict, target, eye, spots[i] + direction * 8.0f ) ) visible |= 1u << i;
-    }
-    if ( visibility != NULL ) *visibility = visible;
-    if ( visible != 0 )
-    {
-        point = ( visible & 1u ) != 0 ? body : head;
-        return true;
-    }
-    return false;
+    if ( VisibleSpot( m_Ctx, m_pEdict, target, eye, spots[Body] ) ) visible |= Bit( Body );
+    if ( headKnown && VisibleSpot( m_Ctx, m_pEdict, target, eye, spots[Head] ) ) visible |= Bit( Head );
+    // Center/head remain the cheap common path. Only probe partial body when
+    // its center is covered, retaining the first proven fallback position.
+    if ( ( visible & Bit( Body ) ) == 0 )
+        for ( int i = UpperBody; i < SpotCount; ++i )
+            if ( VisibleSpot( m_Ctx, m_pEdict, target, eye, spots[i] ) ) { visible |= Bit( i ); break; }
+    if ( visibility != NULL ) *visibility = Summary( visible );
+    const int selected = SelectSpot( visible, false );
+    if ( selected < 0 ) return false;
+    point = spots[selected];
+    return true;
 }
 
 edict_t *CAgPB::CurrentCombatWeapon( uintp &handle, bool &knife, int &clip, int &reserve ) const
@@ -343,6 +655,10 @@ bool CAgPB::UpdateCombat( CGlobalVars *globals, CBotCmd &cmd )
          !intent || frozen || !IsAlive() )
     {
         ClearCombat( frozen ? "frozen" : !intent ? "stopped" : "disabled" );
+        // Freeze only releases the command overlay. Observation TTL remains
+        // real game time; lifecycle/mode/stop and combat disable clear memory.
+        if ( !m_bCombatEnabled || !agpb_combat.GetBool() || AgPB_GameMode() != AgPB_MODE_NORMAL ||
+             !intent || !IsAlive() ) ResetSearch();
         return false;
     }
     // Keep the existing local objective fallback running during a fight;
@@ -381,14 +697,22 @@ bool CAgPB::UpdateCombat( CGlobalVars *globals, CBotCmd &cmd )
     edict_t *target = hadEnemy ? HandleToEdict( m_uCombatEnemy ) : NULL;
     Vector point;
     unsigned int visibility = 0;
-    if ( hadEnemy && ( !IsCombatEnemy( target, m_iCombatEnemyUserId ) ||
+    const bool validTarget = !hadEnemy || IsCombatEnemy( target, m_iCombatEnemyUserId );
+    if ( hadEnemy && ( !validTarget ||
          !CombatAimPoint( target, eye, point, false, &visibility ) ||
          ( knife && !AgPB_ObstacleMeleeClear( m_Ctx, m_pEdict, target, eye, point ) ) ) )
     {
         PauseCombatOwner( globals );
         if ( agpb_combat_debug.GetBool() ) RouteReport( "combat released ent=%d; route goal=#%d hop=%d owner=%llu",
             NetVar_HandleEntry( m_uCombatEnemy ), m_iGoalWaypoint, m_iRouteIndex, (unsigned long long)m_uRouteTaskToken );
+        if ( !validTarget )
+        {
+            if ( AgPBSearch::SameIdentity( m_Search.visual, m_uCombatEnemy, m_iCombatEnemyUserId ) ) m_Search.visual.valid = false;
+            if ( AgPBSearch::SameIdentity( m_Search.sound, m_uCombatEnemy, m_iCombatEnemyUserId ) ) m_Search.sound.valid = false;
+        }
         ClearCombat( "target-lost" );
+        cmd.buttons &= ~( IN_ATTACK | IN_ATTACK2 | IN_RELOAD | IN_USE );
+        UpdateEnemyMemoryLook( globals, cmd );
         // Exactly one released command before either navigation, obstacle
         // attack or another enemy can own the command chain.
         return true;
@@ -424,6 +748,9 @@ bool CAgPB::UpdateCombat( CGlobalVars *globals, CBotCmd &cmd )
             NetVar_HandleEntry( m_uCombatEnemy ), m_iCombatEnemyUserId, m_iGoalWaypoint, m_iRouteIndex,
             (unsigned long long)m_uRouteTaskToken );
     }
+    // Update only after this tick proved an actual target spot in LOS. Gaze/search use this
+    // snapshot after loss; neither follows the hidden target nor authorizes fire.
+    RememberVisibleEnemy( target, point, now );
     m_flCombatActualReaction = 0.0f;
     PauseCombatOwner( globals );
     if ( m_uCombatWeapon != weaponHandle )
@@ -437,15 +764,26 @@ bool CAgPB::UpdateCombat( CGlobalVars *globals, CBotCmd &cmd )
     IPlayerInfo *enemyInfo = m_Ctx.pPlayerInfoManager->GetPlayerInfo( target );
     const Vector enemyOrigin = enemyInfo->GetAbsOrigin();
     const Vector enemyMins = enemyInfo->GetPlayerMins(), enemyMaxs = enemyInfo->GetPlayerMaxs();
-    const Vector body = enemyOrigin + ( enemyMins + enemyMaxs ) * 0.5f;
+    // SyPB GetAimPosition's any-visible-bit branch can select an occluded
+    // head and makes its head-only fallback unreachable. Preserve its skill /
+    // AWP preference only among individually viable regions. A covered head
+    // requires verified weapon/material penetration; otherwise retain the
+    // actual visible body/side/leg fallback, or a head-only observation.
+    const bool preferHead = AgPBCombatSkill::AimAtHead( m_iCombatSkill, RandomInt( 30, 80 ),
+        NamedWeapon( weapon, "weapon_awp" ), enemyInfo->GetHealth() );
     Vector headOffset;
-    const Vector head = ViewOffset( target, headOffset ) ? enemyOrigin + headOffset : body;
-    // Preserve GetAimPosition's head-selection test, including its AWP health
-    // exception. Visibility is independently checked before any aim error.
-    if ( visibility != 0 && AgPBCombatSkill::AimAtHead( m_iCombatSkill, RandomInt( 30, 80 ),
-         NamedWeapon( weapon, "weapon_awp" ), enemyInfo->GetHealth() ) ) point = head;
-    else point = body;
-    if ( AgPB_ReadNetVarInt( target, "m_fFlags" ) & FL_DUCKING ) point.z -= 1.0f;
+    if ( preferHead && ViewOffset( target, headOffset ) )
+    {
+        const Vector head = enemyOrigin + headOffset;
+        const bool headReachable = CanReachAimPoint( m_Ctx, m_pEdict, target, weapon, eye, head, !knife );
+        if ( AgPBCombatVisibility::SelectPreferredSpot( visibility, preferHead, headReachable ) == AgPBCombatVisibility::Head && headReachable ) point = head;
+    }
+    if ( AgPB_ReadNetVarInt( target, "m_fFlags" ) & FL_DUCKING )
+    {
+        const Vector adjusted = point - Vector( 0, 0, 1.0f );
+        if ( VisibleSpot( m_Ctx, m_pEdict, target, eye, adjusted ) ) point = adjusted;
+    }
+    const Vector idealPoint = point;
     if ( AgPBCombatSkill::HasAimNoise( m_iCombatSkill ) )
         for ( int axis = 0; axis < 3; ++axis )
             point[axis] += AgPBCombatSkill::RelativeNoise( enemyMins[axis], enemyMaxs[axis], RandomFloat( 0.0f, 1.0f ) );
@@ -515,12 +853,12 @@ bool CAgPB::UpdateCombat( CGlobalVars *globals, CBotCmd &cmd )
     }
     Vector fireDirection;
     AngleVectors( QAngle( view.pitch + 2.0f * punch.x, view.yaw + 2.0f * punch.y, 0 ), &fireDirection );
-    // Body/head visibility was revalidated before aim noise. Preserve missed
-    // shots without allowing an actual ray through an unrelated player/prop.
+    // Revalidate the exact ideal route separately from skill noise/recoil.
+    // Cover requires material/thickness/ammo feasibility, never just world-hit.
     const bool clearFire = knife
         ? FirstHit( m_Ctx, m_pEdict, target, eye, eye + fireDirection * 40.0f ) &&
           AgPB_ObstacleMeleeClear( m_Ctx, m_pEdict, target, eye, point )
-        : FireRayAllowed( m_Ctx, m_pEdict, target, eye, fireDirection );
+        : FireRayAllowed( m_Ctx, m_pEdict, target, weapon, eye, fireDirection, idealPoint );
     if ( !clearFire ) { m_pszCombatState = "fire-blocked"; return true; }
     cmd.buttons |= IN_ATTACK;
     ++m_uCombatAttackCommands;
@@ -532,6 +870,7 @@ bool CAgPB::UpdateCombat( CGlobalVars *globals, CBotCmd &cmd )
 
 void CAgPB::ReportCombat() const
 {
+    const float now = gpGlobals != NULL ? gpGlobals->curtime : 0.0f;
     edict_t *target = HandleToEdict( m_uCombatEnemy );
     RouteReport( "combat v=1 enabled=%d global=%d state=%s enemy=0x%llX ent=%d userid=%d enemyhp=%d weapon=0x%llX clip=%d aimerror=%.3f attackcmds=%u shots=%u release=%d task=%s token=%llu owner=%llu routeowner=%llu goal=%d hop=%d node=%d",
         m_bCombatEnabled ? 1 : 0, agpb_combat.GetBool() ? 1 : 0, m_pszCombatState,
@@ -547,4 +886,22 @@ void CAgPB::ReportCombat() const
         m_iCombatDifficulty, m_iCombatSkill, AgPBCombatSkill::Bucket( m_iCombatSkill ), row.minReaction, row.maxReaction,
         m_flCombatIdealReaction, m_flCombatActualReaction, m_flCombatSurpriseUntil, m_flCombatRearCheckAt,
         m_bCombatPerfectAim ? 1 : 0, row.recoilAmount, m_flCombatFirePause );
+    uintp heldHandle = (uintp)INVALID_EHANDLE_INDEX;
+    edict_t *held = GetNetVarHandleValue( "m_hActiveWeapon", &heldHandle ) ? HandleToEdict( heldHandle ) : NULL;
+    AgPBBullet::Profile profile; const char *ammo = "unknown";
+    const bool known = ReadBulletProfile( held, profile, &ammo );
+    RouteReport( "weapon ballistics: known=%d class=%s ammo=%s handle=0x%llX mode=%d surfaces=%s power=%.2f penetration-distance=%.1f count=%d base-damage=%.2f range=%.1f range-modifier=%.4f",
+        known ? 1 : 0, held != NULL ? held->GetClassName() : "none", ammo, (unsigned long long)heldHandle,
+        held != NULL ? AgPB_ReadNetVarInt( held, "m_weaponMode", -1 ) : -1, AgPB_SurfaceProps() != NULL ? "ok" : "unavailable",
+        profile.power, profile.penetrationDistance, profile.count, profile.damage, profile.range, profile.rangeModifier );
+    if ( m_iIndex >= 1 && m_iIndex < MAX_EDICTS && s_BulletReadback[m_iIndex].owner == AgPB_RefEHandle( m_pEdict ) )
+    {
+        const BulletReadback &probe = s_BulletReadback[m_iIndex];
+        RouteReport( "bullet estimate: path=%s allowed=%d reason=%s target=0x%llX profile=%d age=%.2f walls=%d material=%c/%c thickness=%.2f remaining-base-damage=%.2f",
+            probe.requireTarget ? "ideal" : "command", probe.allowed ? 1 : 0, probe.reason, (unsigned long long)probe.target,
+            probe.knownProfile ? 1 : 0, now - probe.observedAt, probe.walls,
+            probe.enterMaterial >= 32 && probe.enterMaterial < 127 ? probe.enterMaterial : '?',
+            probe.exitMaterial >= 32 && probe.exitMaterial < 127 ? probe.exitMaterial : '?', probe.thickness, probe.damage );
+    }
+    ReportSearch();
 }

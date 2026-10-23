@@ -27,6 +27,8 @@
 
 #include "netvars.h"
 #include "tasks.h"
+#include "local_planner.h"
+#include "search_policy.h"
 
 class IServerTools;
 
@@ -179,7 +181,7 @@ public:
 	void SetAutonomous( bool enable );
 	bool IsAutonomous() const { return m_bAutonomous; }
 	void ResetTaskSystem( const char *reason = "reset" );
-	// Optional agent supplies a bounded waypoint intention; local AI keeps ownership.
+	// Valid high-level intentions own the goal; local execution handles its subactions.
 	bool SetAgentIntent( bool camp, int waypoint, float ttl, char *error, size_t maxlen );
 	void ClearAgentIntent( const char *reason = "cleared" );
 	void ReportAgentIntent() const;
@@ -189,6 +191,8 @@ public:
 	void SetCombat( bool enable );
 	bool IsCombatEnabled() const { return m_bCombatEnabled; }
 	void ReportCombat() const;
+	void ReportSearch() const;
+	void OnPerceptionEvent( edict_t *source, const Vector &eventOrigin, float now, float radius, float ttl );
 	bool SetSkill( int skill );
 	bool SetDifficulty( int difficulty );
 	int Skill() const { return m_iCombatSkill; }
@@ -241,6 +245,16 @@ private:
 	bool TaskAimAt( edict_t *target, const Vector &point, CBotCmd &cmd ) const;
 	edict_t *FindOwnedWeapon( const char *classname ) const;
 	void ResetTaskUse();
+	void ResetAutonomy( float now );
+	bool PlanAutonomousPatrol( CGlobalVars *globals );
+	bool ShouldCampAtGoal( int waypoint, float now ) const;
+	void RememberAutonomyGoal( int waypoint, float now );
+	void UpdateIdleLook( CGlobalVars *globals, CBotCmd &cmd );
+	void ResetSearch();
+	void RememberVisibleEnemy( edict_t *target, const Vector &point, float now );
+	bool PlanEnemyInvestigation( CGlobalVars *globals );
+	bool UpdateEnemyInvestigation( CGlobalVars *globals, CBotCmd &cmd );
+	bool UpdateEnemyMemoryLook( CGlobalVars *globals, CBotCmd &cmd );
 	bool CanWalkToTaskPosition( const Vector &position, bool crouch ) const;
 	int PickTaskWaypoint( const Vector &position, unsigned int requiredFlags = 0 ) const;
 	void ResetRouteProgress( float now );
@@ -311,6 +325,8 @@ private:
 	float  m_flBreakWeaponAttack;
 	std::uint64_t m_uBreakTaskToken;
 	AgPBTaskStack m_Tasks;
+	AgPBLocalPlannerState m_Autonomy;
+	AgPBSearch::State m_Search;
 	bool m_bAutonomous;
 	bool m_bWasAlive;
 	std::uint64_t m_uObservedTaskToken;

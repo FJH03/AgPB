@@ -178,11 +178,10 @@ static void DrawNode( const AgPBPath &path, bool bXray )
 	const float flHeight = ( ( path.flags & AgPB_WP_CROUCH ) != 0 )
 	                       ? AgPB_HullDuckHeight()
 	                       : AgPB_HullStandHeight();
-	const float flHalf   = flHeight * 0.5f;
 
-	const Vector vBottom = path.origin - Vector( 0.0f, 0.0f, flHalf );
-	const Vector vSplit  = path.origin - Vector( 0.0f, 0.0f, flHalf - flHeight * 0.75f );
-	const Vector vTop    = path.origin + Vector( 0.0f, 0.0f, flHalf );
+	const Vector vBottom = path.origin;
+	const Vector vSplit  = path.origin + Vector( 0.0f, 0.0f, flHeight * 0.75f );
+	const Vector vTop    = path.origin + Vector( 0.0f, 0.0f, flHeight );
 
 	const AgPBColor basic = NodeBasicColor( path.flags );
 
@@ -362,9 +361,7 @@ void AgPB_DrawWaypoints( edict_t *pViewer )
 	if ( wp.IsValid( iNearest ) )
 	{
 		const AgPBPath *pNear = wp.Get( iNearest );
-		const Vector vCenter = ( ( pNear->flags & AgPB_WP_CROUCH ) != 0 )
-		                       ? pNear->origin
-		                       : pNear->origin - Vector( 0.0f, 0.0f, 18.0f );
+		const Vector vCenter = pNear->origin + Vector( 0.0f, 0.0f, 1.0f );
 
 		AgPBColor radiusColor;
 		radiusColor.r = 0; radiusColor.g = 0; radiusColor.b = 255;
@@ -409,14 +406,17 @@ void AgPB_DrawWaypoints( edict_t *pViewer )
 	}
 
 	// ---- 缓存点 / 准星指向点：从点拉一条线到你（EBot 的箭头） ---------
-	const Vector vViewer = ed.bHostValid ? ed.vHostEye : Vector( 0.0f, 0.0f, 0.0f );
+	Vector viewForward, viewRight, viewUp;
+	AngleVectors( ed.angHostView, &viewForward, &viewRight, &viewUp );
+	// Keep the connector in front of the near plane and off the eye ray.
+	const Vector vViewer = ed.vHostEye + viewForward * 24.0f + viewRight * 10.0f - viewUp * 8.0f;
 
 	if ( ed.bHostValid && wp.IsValid( ed.iCache ) )
 	{
 		AgPBColor cacheColor;
 		cacheColor.r = 255; cacheColor.g = 255; cacheColor.b = 0;
 
-		DrawLine( wp.Get( ed.iCache )->origin, vViewer, cacheColor, true );
+		DrawLine( LinkPointOf( *wp.Get( ed.iCache ) ), vViewer, cacheColor, true );
 	}
 
 	if ( ed.bHostValid && wp.IsValid( ed.iFacing ) )
@@ -424,7 +424,11 @@ void AgPB_DrawWaypoints( edict_t *pViewer )
 		AgPBColor facingColor;
 		facingColor.r = 255; facingColor.g = 255; facingColor.b = 255;
 
-		DrawLine( wp.Get( ed.iFacing )->origin, vViewer, facingColor, true );
+		const Vector target = LinkPointOf( *wp.Get( ed.iFacing ) );
+		DrawLine( target, vViewer, facingColor, true );
+		DrawLine( target - Vector( 5, 0, 0 ), target + Vector( 5, 0, 0 ), facingColor, true );
+		DrawLine( target - Vector( 0, 5, 0 ), target + Vector( 0, 5, 0 ), facingColor, true );
+		DrawTextAt( wp.Get( ed.iFacing )->origin + Vector( 0, 0, 84 ), 2, "TARGET #%d", ed.iFacing );
 	}
 }
 

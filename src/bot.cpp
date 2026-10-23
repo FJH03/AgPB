@@ -427,6 +427,7 @@ bool CAgPB::BeginBreakable( const AgPBObstacle &obstacle, float now, bool crouch
 	task.id = AgPBTaskId::DestroyBreakable;
 	task.desire = AgPBTaskPriority::DestroyBreakable;
 	task.entityHandle = obstacle.handle;
+	task.parentToken = m_uRouteTaskToken;
 	task.hasEntity = true;
 	task.canResume = false;
 	m_uBreakTaskToken = m_Tasks.Push( task );
@@ -451,9 +452,11 @@ void CAgPB::FailBreakable( const char *reason )
 {
 	RouteReport( "obstacle break failed: %s (ent=%d, shots=%d, goal=#%d) - stopped",
 	             reason, NetVar_HandleEntry( m_uBreakHandle ), m_iBreakShots, m_iGoalWaypoint );
+	const bool agentOwned = m_AgentIntent.token != 0 && m_uRouteTaskToken == m_AgentIntent.token;
 	ClearRoute();
 	m_bRoam = false;
-	CompleteCurrentTask( reason, true );
+	if ( agentOwned ) ClearAgentIntent( "route-failed" );
+	else CompleteCurrentTask( reason, true );
 }
 
 // SyPB pauses navigation while destroying a breakable; CS-EBOT is the

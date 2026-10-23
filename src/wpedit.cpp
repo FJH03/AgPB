@@ -210,38 +210,32 @@ void AgPB_RefreshHost()
 
 	ed.iNearest = wp.FindNearest( ed.vHostOrigin, AgPB_PICK_RANGE );
 
-	// 准星指向的点：水平角差最小 + 通视（EBot GetFacingIndex 的简化版）
+	// Pick the displayed foot-origin pillar in full 3D, not its floor point.
+	// Xray selection follows xray drawing; normal mode still requires LOS.
+	Vector forward; AngleVectors( angView, &forward ); VectorNormalize( forward );
 	int iBest = -1;
-	float flBestDiff = AgPB_FACING_RANGE;
-
+	float bestError = tanf( DEG2RAD( AgPB_FACING_RANGE ) );
+	float bestDepth = 4096.0f;
+	const float flat = forward.x * forward.x + forward.y * forward.y;
 	for ( int i = 0; i < wp.Count(); ++i )
 	{
 		const AgPBPath *pPath = wp.Get( i );
-
-		if ( pPath == NULL || i == ed.iNearest )
-			continue;
-
-		const Vector vTo = pPath->origin - ed.vHostEye;
-
-		if ( vTo.LengthSqr() > ( 500.0f * 500.0f ) )
-			continue;
-
-		QAngle angTo;
-		VectorAngles( vTo, angTo );
-
-		float flDiff = AngleDiff( angTo.y, angView.y );
-
-		if ( flDiff < 0.0f )
-			flDiff = -flDiff;
-
-		if ( flDiff > flBestDiff )
-			continue;
-
-		if ( !AgPB_TraceClear( ed.vHostEye, pPath->origin, pHost ) )
-			continue;
-
-		iBest = i;
-		flBestDiff = flDiff;
+		if ( pPath == NULL || i == ed.iNearest || !pPath->origin.IsValid() ) continue;
+		const float height = ( pPath->flags & AgPB_WP_CROUCH ) != 0 ? AgPB_HullDuckHeight() : AgPB_HullStandHeight();
+		const Vector offset = pPath->origin - ed.vHostEye;
+		const float along = flat > 0.00001f ?
+			( offset.x * forward.x + offset.y * forward.y ) / flat :
+			DotProduct( offset + Vector( 0, 0, height * 0.5f ), forward );
+		Vector point = pPath->origin;
+		point.z = clamp( ed.vHostEye.z + forward.z * along, point.z + 2.0f, point.z + height );
+		const Vector delta = point - ed.vHostEye;
+		const float depth = DotProduct( delta, forward );
+		if ( depth <= 1.0f || delta.LengthSqr() > 4096.0f * 4096.0f ) continue;
+		const float error = ( delta - forward * depth ).Length() / depth;
+		if ( error > bestError + 0.00001f ||
+		     ( fabsf( error - bestError ) <= 0.00001f && depth >= bestDepth ) ) continue;
+		if ( !agpb_wp_xray.GetBool() && !AgPB_TraceClear( ed.vHostEye, point, pHost ) ) continue;
+		iBest = i; bestError = error; bestDepth = depth;
 	}
 
 	ed.iFacing = iBest;

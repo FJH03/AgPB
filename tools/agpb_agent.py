@@ -150,13 +150,13 @@ def main(argv=None):
                 state = parse_state(send(READ_STATE), args.userid)
                 if state["identity"] != identity:
                     raise ValueError("Bot identity, map, round or team changed; renewal stopped")
-                if state["state"] not in ("active", "suspended", "camping") or not same_lease(state, owned):
+                if state["state"] not in ("active", "suspended", "camping", "clearing") or not same_lease(state, owned):
                     summary["reason"] = "Lease ended/replaced/renewed by another writer; left untouched"
                     break
             command = "agpb_agent_intent %d %d %d %s %d %.3f" % (
                 state["mapserial"], state["round"], args.userid, args.mode, args.waypoint, args.ttl)
             accepted = parse_state(send(command), args.userid, need_header=False)
-            if accepted["state"] not in ("active", "suspended", "camping") or accepted["token"] == 0 or \
+            if accepted["state"] not in ("active", "suspended", "camping", "clearing") or accepted["token"] == 0 or \
                accepted["mode"] != args.mode or accepted["wp"] != args.waypoint or \
                (accepted["mapserial"], accepted["round"]) != (identity[1], identity[2]) or \
                (accepted["lease-map"], accepted["lease-round"]) != (identity[1], identity[2]):

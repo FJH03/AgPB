@@ -13,6 +13,7 @@
 #include <filesystem.h>
 #include <engine/IEngineTrace.h>
 #include <engine/ivdebugoverlay.h>
+#include <vphysics_interface.h>
 
 #include "plugin.h"
 #include "bot.h"
@@ -41,6 +42,9 @@ CGlobalVars *gpGlobals = NULL;
 IFileSystem *filesystem = NULL;
 IVDebugOverlay *debugoverlay = NULL;
 
+static IPhysicsSurfaceProps *g_SurfaceProps = NULL;
+IPhysicsSurfaceProps *AgPB_SurfaceProps() { return g_SurfaceProps; }
+
 static CAgPBManager g_Bots;
 static IGameEventManager2 *g_GameEvents = NULL;
 static bool g_RoundFrozen = false;
@@ -67,6 +71,26 @@ public:
 		{
 			g_RoundFrozen = true;
 			g_Bots.ResetAllTasks( "round-end" );
+		}
+		else if ( Q_strcmp( name, "weapon_fire" ) == 0 || Q_strcmp( name, "player_footstep" ) == 0 )
+		{
+			if ( engine == NULL || playerinfomanager == NULL || gpGlobals == NULL || g_RoundFrozen ) return;
+			const int userId = event->GetInt( "userid" );
+			edict_t *source = NULL;
+			IPlayerInfo *info = NULL;
+			for ( int i = 1; i <= gpGlobals->maxClients; ++i )
+			{
+				edict_t *candidate = engine->PEntityOfEntIndex( i );
+				if ( candidate == NULL || candidate->IsFree() ) continue;
+				IPlayerInfo *player = playerinfomanager->GetPlayerInfo( candidate );
+				if ( player != NULL && player->IsConnected() && player->GetUserID() == userId )
+				{ source = candidate; info = player; break; }
+			}
+			if ( source == NULL || info == NULL ) return;
+			const Vector snapshot = info->GetAbsOrigin();
+			const bool shot = Q_strcmp( name, "weapon_fire" ) == 0;
+			for ( int i = 0; i < g_Bots.Count(); ++i )
+				g_Bots.Get( i )->OnPerceptionEvent( source, snapshot, gpGlobals->curtime, shot ? 1400.0f : 600.0f, shot ? 4.0f : 2.5f );
 		}
 	}
 };
@@ -1759,10 +1783,17 @@ bool AgPBPlugin::Load( PluginId id, ISmmAPI *ismm, char *error, size_t maxlen, b
 	GET_V_IFACE_ANY( GetServerFactory, gameents, IServerGameEnts, INTERFACEVERSION_SERVERGAMEENTS );
 
 	gpGlobals = ismm->GetCGlobals();
+	// Optional public material data for read-only bullet-path estimates.
+	CreateInterfaceFn physicsFactory = ismm->GetPhysicsFactory();
+	g_SurfaceProps = physicsFactory != NULL ? static_cast<IPhysicsSurfaceProps *>(
+		physicsFactory( VPHYSICS_SURFACEPROPS_INTERFACE_VERSION, NULL ) ) : NULL;
+	META_CONPRINTF( "[AgPB] bullet surface properties: %s\n", g_SurfaceProps != NULL ? "ok" : "unavailable" );
 	GET_V_IFACE_CURRENT( GetEngineFactory, g_GameEvents, IGameEventManager2, INTERFACEVERSION_GAMEEVENTSMANAGER2 );
 	if ( !g_GameEvents->AddListener( &g_RoundListener, "round_start", true ) ||
 	     !g_GameEvents->AddListener( &g_RoundListener, "round_freeze_end", true ) ||
-	     !g_GameEvents->AddListener( &g_RoundListener, "round_end", true ) )
+	     !g_GameEvents->AddListener( &g_RoundListener, "round_end", true ) ||
+	     !g_GameEvents->AddListener( &g_RoundListener, "weapon_fire", true ) ||
+	     !g_GameEvents->AddListener( &g_RoundListener, "player_footstep", true ) )
 	{
 		g_GameEvents->RemoveListener( &g_RoundListener );
 		Q_strncpy( error, "could not register navigation round events", (int)maxlen );
@@ -1827,6 +1858,7 @@ bool AgPBPlugin::Unload( char *error, size_t maxlen )
 
 	g_Bots.RemoveAll();
 	g_Bots.Shutdown();
+	g_SurfaceProps = NULL;
 
 	return true;
 }
