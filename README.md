@@ -2,7 +2,7 @@
 
 Counter-Strike: Source（Source 1 / Win64）的 agent 控制 bot —— Metamod:Source 插件。
 核心不依赖 SourceMod，也不用引擎自带的 `CCSBot`：外部 agent 下高层意图，插件逐 tick 生成 `CUserCmd`。
-当前引擎的三方假客户端兼容修复另有可选 [SourceMod 补丁](compat/sourcemod/README.md)。
+当前引擎的三方假客户端使用可选SourceMod补丁，适用范围和启停见[兼容约束](CRASH_REPORT.md)。
 
 - 假客户端用 `server.dll` 的 `BotManager001` 创建，**不带任何 AI**；`RunPlayerMove` 与引擎
   驱动真人玩家是同一条路径，不需要特征码、硬编码偏移，也不链接 `server.dll`。
@@ -35,11 +35,11 @@ SDK 静态库必须先编好：`hl2sdk-css\source-engine-czero\build\{tier0,vstd
 | 文件 | 内容 |
 |---|---|
 | [`AGENTS.md`](AGENTS.md) | 硬性要求：构建 / 部署红线、项目铁律、编码约定 |
-| [`PROGRESS.md`](PROGRESS.md) | 现状、里程碑、问题→解决、坑、下一步 |
+| [`PROGRESS.md`](PROGRESS.md) | 当前状态、待验收事项与下一步 |
 | [`COMMANDS.md`](COMMANDS.md) | 控制台命令 / ConVar / 路点编辑器用法 |
+| [`waypoint-workflow/README.md`](waypoint-workflow/README.md) | 路点制作、原生控制台/TGA、实走与真实目标验收的统一入口 |
 | [`VERIFY.md`](VERIFY.md) | A–G 基线回归、主线阶段验收标准与兼容补丁验证；执行顺序与状态见 PROGRESS |
-| [`CRASH_REPORT.md`](CRASH_REPORT.md) | freezetime 的 `Radio()` 原始根因与复现；修复 / 验证状态见 PROGRESS |
-| [`compat/sourcemod/README.md`](compat/sourcemod/README.md) | 可选三方假客户端兼容补丁的版本限制、构建 / 部署与关闭步骤 |
+| [`CRASH_REPORT.md`](CRASH_REPORT.md) | 当前Radio兼容补丁的适用范围、部署及启停约束 |
 
 ## 许可证
 

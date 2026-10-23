@@ -20,6 +20,7 @@
 #include "waypoint.h"
 #include "obstacle.h"
 #include "objectives.h"
+#include "route_control.h"
 
 #include <vstdlib/random.h>
 
@@ -103,6 +104,8 @@ CAgPB::CAgPB()
 	m_flStuckCheckTime = 0.0f;
 	m_flStuckRecoveryUntil = 0.0f;
 	m_bRouteArrived = false;
+	m_flRouteSettleSince = -1.0f;
+	m_bRouteLegAirborne = false;
 	m_flNextObstacleCheck = 0.0f;
 	m_uLastObstacleHandle = (uintp)INVALID_EHANDLE_INDEX;
 	m_bLastObstacleFound = false;
@@ -113,6 +116,7 @@ CAgPB::CAgPB()
 	m_flNextTaskPlan = m_flTaskActionStarted = m_flNextTaskUse = 0.0f;
 	m_uLastTaskUseHandle = m_uDeclinedObjectiveHandle = (uintp)INVALID_EHANDLE_INDEX;
 	m_flObjectiveRetryAfter = 0.0f;
+	ResetBombEscape();
 	ClearBreakable();
 	m_bRoam = false;
 	m_flNextRoamTime = 0.0f;
@@ -346,6 +350,8 @@ void CAgPB::ClearRoute()
 	m_uLastObstacleHandle = (uintp)INVALID_EHANDLE_INDEX;
 	m_bLastObstacleFound = false;
 	m_bRouteArrived = false;
+	m_flRouteSettleSince = -1.0f;
+	m_bRouteLegAirborne = false;
 	m_uRouteTaskToken = 0;
 	ResetRouteProgress( 0.0f );
 }
@@ -432,8 +438,7 @@ static int ReadWeaponClip( edict_t *weapon )
 
 static bool IsObstacleKnife( edict_t *weapon )
 {
-	IServerNetworkable *net = weapon != NULL ? weapon->GetNetworkable() : NULL;
-	const char *name = net != NULL ? net->GetClassName() : NULL;
+	const char *name = weapon != NULL && !weapon->IsFree() ? weapon->GetClassName() : NULL;
 	return name != NULL && Q_stricmp( name, "weapon_knife" ) == 0;
 }
 
@@ -703,8 +708,8 @@ void CAgPB::ReportObstacle( const AgPBObstacle &result ) const
 		RouteReport( "obstacle: none in the path probe (near 20 / far 300)" );
 		return;
 	}
-	const IServerNetworkable *net = result.entity != NULL ? result.entity->GetNetworkable() : NULL;
-	const char *classname = net != NULL ? net->GetClassName() : "world-or-static";
+	const char *classname = result.entity != NULL && !result.entity->IsFree()
+		? result.entity->GetClassName() : "world-or-static";
 	char health[32], damage[32];
 	Q_strncpy( health, "unknown", sizeof( health ) );
 	Q_strncpy( damage, "unknown", sizeof( damage ) );
@@ -839,6 +844,27 @@ static bool CanWalkToRouteStart( IEngineTrace *trace, IHandleEntity *self,
 // SyPB/CS-EBOT account for motion when approaching precise waypoints. Limit
 // prediction to one command interval: looking 0.1-0.3 seconds ahead consumes
 // corners and takeoff points before the bot has physically reached them.
+static bool ReadRouteVelocity( const CAgPB &bot, Vector &velocity )
+{
+	const void *base = bot.NetVarBase();
+	if ( base == NULL ) return false;
+	const BotNetVar *field = bot.FindNetVar( "m_vecVelocity" );
+	if ( field != NULL )
+	{
+		if ( field->type != DPT_Vector ) return false;
+		velocity = NetVar_GetVector( base, *field );
+		return velocity.IsValid();
+	}
+	const char *names[] = { "m_vecVelocity[0]", "m_vecVelocity[1]", "m_vecVelocity[2]" };
+	for ( int i = 0; i < 3; ++i )
+	{
+		field = bot.FindNetVar( names[i] );
+		if ( field == NULL || field->type != DPT_Float ) return false;
+		velocity[i] = NetVar_GetFloat( base, *field );
+	}
+	return velocity.IsValid();
+}
+
 static bool RouteNodeReached( const AgPBPath &node, const Vector &position, const Vector &velocity,
                               bool entry, bool takeoff, bool jumpLeg, bool grounded, float interval )
 {
@@ -868,7 +894,8 @@ bool CAgPB::CanWalkToTaskPosition( const Vector &position, bool crouch ) const
 {
 	if ( m_pInfo == NULL || m_Ctx.pTrace == NULL ||
 	     ( GetNetVarInt( "m_fFlags" ) & FL_ONGROUND ) == 0 ) return false;
-	IServerNetworkable *network = m_pEdict->GetNetworkable();
+	IServerNetworkable *network = m_pEdict != NULL && !m_pEdict->IsFree() && m_pEdict->GetUnknown() != NULL
+		? m_pEdict->GetNetworkable() : NULL;
 	return network != NULL && CanWalkToRouteStart( m_Ctx.pTrace, network->GetEntityHandle(),
 		m_pInfo->GetAbsOrigin(), position, crouch, GetNetVarFloat( "m_flStepSize", 18.0f ) );
 }
@@ -917,7 +944,8 @@ bool CAgPB::BuildRoute( int iGoalWaypoint, char *error, size_t maxlen )
 		return false;
 	}
 	const Vector vPos = m_pInfo->GetAbsOrigin();
-	IServerNetworkable *network = m_pEdict->GetNetworkable();
+	IServerNetworkable *network = m_pEdict != NULL && !m_pEdict->IsFree() && m_pEdict->GetUnknown() != NULL
+		? m_pEdict->GetNetworkable() : NULL;
 	IHandleEntity *self = network != NULL ? network->GetEntityHandle() : NULL;
 	const float stepSize = GetNetVarFloat( "m_flStepSize", 18.0f );
 	if ( self == NULL || !vPos.IsValid() )
@@ -1090,6 +1118,7 @@ void CAgPB::UpdateRoute( CGlobalVars *pGlobals, CBotCmd &cmd )
 	{
 		ClearBreakable();
 		ResetRouteProgress( pGlobals->curtime );
+		m_flRouteSettleSince = -1.0f;
 		return;
 	}
 	if ( UpdateBreakable( pGlobals, cmd ) ) return;
@@ -1122,6 +1151,19 @@ void CAgPB::UpdateRoute( CGlobalVars *pGlobals, CBotCmd &cmd )
 		( nextLegFlags & AgPB_PATH_JUMP ) != 0;
 	const bool bEntry = m_iRouteIndex == 0;
 	const bool bGrounded = ( GetNetVarInt( "m_fFlags" ) & FL_ONGROUND ) != 0;
+	const bool bTerminal = m_iRouteIndex + 1 == m_vecRoute.Count();
+	Vector velocity;
+	if ( !ReadRouteVelocity( *this, velocity ) )
+	{
+		RouteReport( "route aborted: finite reflected velocity unavailable" );
+		ClearRoute();
+		return;
+	}
+	if ( !bGrounded ) m_bRouteLegAirborne = true;
+	// Do not brake a jump in flight or cancel its takeoff. The final landing
+	// must occur on the authored height before terminal feedback takes over.
+	const bool bLandedJumpLeg = AgPBTerminal::LandedJump( bJumpLeg, m_bRouteLegAirborne, bGrounded, vDelta.z );
+	const bool bTerminalControl = bTerminal && bGrounded && ( !bJumpLeg || bLandedJumpLeg );
 	// A jump's altitude changes are not progress towards its landing. Only
 	// grounded distance reductions refresh the jump leg's movement budget.
 	const float progressDistance = ( pNode->flags & AgPB_WP_LADDER ) != 0 ? vDelta.Length() : flDist2D;
@@ -1129,19 +1171,36 @@ void CAgPB::UpdateRoute( CGlobalVars *pGlobals, CBotCmd &cmd )
 	{
 		if ( m_flRouteProgressDistance < 0.0f )
 			m_flRouteProgressDistance = progressDistance;
-		else if ( m_flRouteProgressDistance - progressDistance >= AgPB_STUCK_MOVE )
+		else if ( m_flRouteProgressDistance - progressDistance >= ( bTerminal ? 0.25f : AgPB_STUCK_MOVE ) )
 		{
 			m_flRouteProgressDistance = progressDistance;
 			m_flStuckCheckTime = pGlobals->curtime + AgPB_STUCK_WINDOW;
 			m_flStuckRecoveryUntil = 0.0f;
 		}
 	}
-	const bool bArrived = RouteNodeReached( *pNode, vPos, GetNetVarVector( "m_vecVelocity" ),
+	bool bArrived = false;
+	if ( bTerminal )
+	{
+		const bool stable = bTerminalControl &&
+			AgPBTerminal::ControlPositionInside( vDelta.x, vDelta.y, vDelta.z, (float)pNode->radius, bGrounded ) &&
+			AgPBTerminal::CanSettle(
+			vDelta.x, vDelta.y, vDelta.z, (float)pNode->radius, bGrounded,
+			velocity.x, velocity.y, velocity.z );
+		if ( !stable ) m_flRouteSettleSince = -1.0f;
+		else
+		{
+			if ( m_flRouteSettleSince < 0.0f ) m_flRouteSettleSince = pGlobals->curtime;
+			bArrived = pGlobals->curtime - m_flRouteSettleSince >= AgPBTerminal::StableSeconds;
+		}
+	}
+	else bArrived = RouteNodeReached( *pNode, vPos, velocity,
 		bEntry, bTakeoff, bJumpLeg, bGrounded, pGlobals->interval_per_tick );
 
 	if ( bArrived )
 	{
 		++m_iRouteIndex;
+		m_flRouteSettleSince = -1.0f;
+		m_bRouteLegAirborne = false;
 		ResetRouteProgress( pGlobals->curtime );
 
 		if ( m_iRouteIndex >= m_vecRoute.Count() )
@@ -1184,6 +1243,28 @@ void CAgPB::UpdateRoute( CGlobalVars *pGlobals, CBotCmd &cmd )
 		// Very small wish speeds cannot overcome Source's stop-speed friction.
 		// Keep a walking-speed floor; crouch movement is already slow enough.
 		cmd.forwardmove = MIN( cmd.forwardmove, MAX( 100.0f, flDist2D * 4.0f ) );
+	}
+
+	// A completed jump may land slightly short of its small authored radius.
+	// Align on the ground rather than restarting the same jump. Intermediate
+	// nodes still advance immediately when reached; only the final node settles.
+	if ( bTerminalControl || bLandedJumpLeg )
+	{
+		static ConVarRef acceleration( "sv_accelerate" );
+		static ConVarRef friction( "sv_friction" );
+		static ConVarRef stopSpeed( "sv_stopspeed" );
+		const bool inside = AgPBTerminal::ControlPositionInside( vDelta.x, vDelta.y, vDelta.z,
+			(float)pNode->radius, bGrounded );
+		const AgPBTerminal::Wish wish = AgPBTerminal::ComputeWish( vDelta.x, vDelta.y,
+			velocity.x, velocity.y, pGlobals->interval_per_tick,
+			acceleration.IsValid() ? acceleration.GetFloat() : 5.0f,
+			friction.IsValid() ? friction.GetFloat() : 4.0f,
+			stopSpeed.IsValid() ? stopSpeed.GetFloat() : 100.0f, AgPB_WALK_SPEED, inside );
+		Vector forward, right;
+		AngleVectors( QAngle( 0, cmd.viewangles.y, 0 ), &forward, &right, NULL );
+		const Vector worldWish( wish.x, wish.y, 0 );
+		cmd.forwardmove = DotProduct( worldWish, forward );
+		cmd.sidemove = DotProduct( worldWish, right );
 	}
 
 	// ---- 队友让行（最简版）----
@@ -1291,7 +1372,7 @@ void CAgPB::UpdateRoute( CGlobalVars *pGlobals, CBotCmd &cmd )
 	// 3) 我们**绝不能**在跳跃边/空中按 IN_DUCK —— 那会把引擎这套自动序列取消掉（:166-171）
 	if ( bJumpLeg )
 	{
-		if ( bGrounded && m_flStuckRecoveryUntil == 0.0f )
+		if ( bGrounded && !bLandedJumpLeg && m_flStuckRecoveryUntil == 0.0f )
 			cmd.buttons |= IN_JUMP;
 	}
 	else if ( bCrouch )
@@ -1613,7 +1694,7 @@ edict_t *CAgPB::HandleToEdict( uintp handle ) const
 		return NULL;
 
 	edict_t *pEdict = m_Ctx.pEngine->PEntityOfEntIndex( entry );
-	if ( pEdict == NULL || pEdict->IsFree() )
+	if ( pEdict == NULL || pEdict->IsFree() || pEdict->GetUnknown() == NULL )
 		return NULL;
 
 	// 权威校验：拿引擎自己维护的 ref ehandle 整值比对。
@@ -1700,7 +1781,7 @@ void CAgPB::SetVelocityOverride( const Vector &vVelocity )
 
 const char *AgPB_EntityClassName( edict_t *pEdict )
 {
-	if ( pEdict == NULL )
+	if ( pEdict == NULL || pEdict->IsFree() || pEdict->GetUnknown() == NULL )
 		return NULL;
 
 	IServerNetworkable *pNet = pEdict->GetNetworkable();
@@ -1890,7 +1971,7 @@ Vector AgPB_ReadNetVarVector( edict_t *pEdict, const char *pszName )
 
 uintp AgPB_RefEHandle( edict_t *pEdict )
 {
-	if ( pEdict == NULL )
+	if ( pEdict == NULL || pEdict->IsFree() || pEdict->GetUnknown() == NULL )
 		return (uintp)INVALID_EHANDLE_INDEX;
 
 	IServerNetworkable *pNet = pEdict->GetNetworkable();

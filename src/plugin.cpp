@@ -1439,11 +1439,13 @@ static void Cmd_BotTasks( const CCommand &args )
 static void Cmd_Objectives( const CCommand &args )
 {
 	const AgPBObjectiveSnapshot &world = BotObjectives().Snapshot();
-	META_CONPRINTF( "[AgPB] objectives: map-flags=%d round=%u sites=%d rescues=%d hostages=%d bomb-state=%d bomb-ent=%d owner=%d pos=%s (%.1f %.1f %.1f) blow-time=%.2f\n",
+	META_CONPRINTF( "[AgPB] objectives: map-flags=%d round=%u sites=%d rescues=%d hostages=%d bomb-state=%d bomb-ent=%d owner=%d pos=%s (%.1f %.1f %.1f) blow-time=%.2f bomb-radius=%.1f radius-source=%s planted-observed=%d\n",
 		world.mapFlags, world.roundEpoch, world.bombSites.Count(), world.rescueZones.Count(), world.hostages.Count(),
 		(int)world.bomb.state, NetVar_HandleEntry( world.bomb.handle ), NetVar_HandleEntry( world.bomb.owner ),
 		world.bomb.positionKnown ? "known" : "unknown", world.bomb.position.x, world.bomb.position.y,
-		world.bomb.position.z, world.bomb.blowTimeKnown ? world.bomb.blowTime : -1.0f );
+		world.bomb.position.z, world.bomb.blowTimeKnown ? world.bomb.blowTime : -1.0f,
+		world.bombBlastRadiusKnown ? world.bombBlastRadius : -1.0f,
+		AgPB_BombRadiusSourceName( world.bombRadiusSource ), world.bomb.plantedObserved ? 1 : 0 );
 	for ( int i = 0; i < world.hostages.Count(); ++i )
 	{
 		const AgPBObjectiveHostage &h = world.hostages[i];

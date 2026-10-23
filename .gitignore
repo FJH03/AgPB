@@ -2,3 +2,6 @@ build/
 build-*/
 __pycache__/
 *.pyc
+
+# Local workspace credentials.
+.codex/.env

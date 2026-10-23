@@ -1,11 +1,11 @@
 # AgPB 验证清单
 
-> 只列命令与验收标准；现状、开发顺序、历史证据与未验证范围统一看 [`PROGRESS.md`](PROGRESS.md)，命令参数看 [`COMMANDS.md`](COMMANDS.md)。
+> 只列命令与验收标准；现状、开发顺序、验收结论与未验证范围统一看 [`PROGRESS.md`](PROGRESS.md)，命令参数看 [`COMMANDS.md`](COMMANDS.md)。
 > A–G 是各模块的基线回归，不代表主线阶段已完成，也不是后续开发顺序。
 >
 > **测试前置：** 按 [`AGENTS.md`](AGENTS.md) §1，bot 与活着且处于 STATE_ACTIVE 的人类
 > **同队**；不因兼容补丁状态改用敌队、bot 独占队伍或真人观察者场景。
-> 真人 slot 更小；换场景 / 换图先 `agpb_kick all`。原始崩溃根因见
+> 真人 slot 更小；换场景 / 换图先 `agpb_kick all`。当前兼容约束见
 > [`CRASH_REPORT.md`](CRASH_REPORT.md)。关闭 / 卸载兼容补丁前先踢所有假客户端。
 
 ## 准备
@@ -48,15 +48,15 @@ agpb_netlist 0 m_iAmmo
 agpb_nethandle 0 m_hActiveWeapon
 ```
 
-| 字段 | 期望（2026-09-19 基线） |
+| 字段 | 期望 |
 |---|---|
-| `m_iHealth` | `+364` int = 100 |
-| `m_lifeState` | `+368` int = 0（内存里是 1 字节 char，宽度只能在 proxy 里看出来） |
-| `m_vecOrigin` | `+1076` vec3（同名同偏移出现 3 次是正常的） |
-| `m_vecVelocity` | `+888 / +892 / +896`（VECTORELEM，负偏移） |
-| `m_angEyeAngles` | `+6984 / +6988` |
-| `m_iAmmo` | `+2136` array `[32 x 4]`，USP 备用弹匣在 `[8]` |
-| `m_hActiveWeapon` | `entry=97` 且 `resolved=yes class=CWeaponUSP`（serial 每次开服会变） |
+| `m_iHealth` | 存活bot的实际生命值 |
+| `m_lifeState` | 活着时为0，按反射得到的真实类型读取 |
+| `m_vecOrigin` | 有限坐标，与实际位置一致 |
+| `m_vecVelocity` | Vector或分量均能读取，方向 / 大小与运动一致 |
+| `m_angEyeAngles` | 实际视角，随CUserCmd变化 |
+| `m_iAmmo` | 可读的实际弹药数组 |
+| `m_hActiveWeapon` | `resolved=yes`且指向当前武器，核对完整带serial句柄 |
 
 > `agpb_netlist` 打印 EHANDLE 时是**网络压缩值**，没有判读价值 —— 句柄一律看 `agpb_nethandle`。
 
@@ -72,7 +72,7 @@ agpb_netlist 0 m_angEyeAngles
 agpb_bot_stop 0
 ```
 
-期望（2026-09-19 实测基线）：`m_vecVelocity` 方向 = 目标方向、大小 ≈ 250（USP 上限）；
+期望：`m_vecVelocity` 方向 = 目标方向、大小 ≈ 250（USP 上限）；
 `m_angEyeAngles[1]` = 目标方向的 yaw。
 
 判读：
@@ -175,7 +175,7 @@ agpb_bot_goto 0
 （点同时带 `crouch` 的话保持蹲姿）。手动 `goto` 会关闭自主任务与漫游，蹲守结束后应停下；
 只在显式开启 `agpb_bot_auto 0 1` 或 `agpb_bot_roam 0 1` 后继续选点。
 
-### 路径障碍识别样本（2026-10-14，cs_office 桌面 / 真人）
+### 路径障碍识别（cs_office 桌面 / 真人）
 
 每个场景开始前 `agpb_kick all`，重新加入一个同队 bot；真人保持 ACTIVE。
 长时间观察时临时 `mp_autokick 0`，可用活着且同队的真人 noclip 镜头 / 第三人称观察；
@@ -192,36 +192,33 @@ agpb_bot_obstacle 0 -1 1       // 行走中：沿当前路线，扩大近处检�
   也可用 `agpb_bot_obstacle 0 60 1` 从当前位置直扫 #60（单段诊断，不代表完整寻路）。
   记录实体下标、`class` / `serverclass`、碰撞组、`probe`、`hit` / `center` 和 `visible`，
   用 `agpb_netlist ent <实体下标>` 查看它实际拥有的网络字段。
-- 历史样本范围：2026-10-14 的 cs_office 桌面卡点候选是收音机 `prop_physics_multiplayer`
-  （该次 ent=713，碰撞组 17）；不可把实体下标作为常量，每次开图应以诊断输出为准。证据见 PROGRESS。
+- 实体下标和碰撞组以本次诊断为准，不把某次开图的实体编号作为常量。
 - 世界墙体 / 静态模型应报 `world-or-static`；墙后道具不应成为当前候选。
 - `breakable-candidate=yes` 只表示类别 / 已知属性符合候选筛选；`health=unknown` 或
   `damage=unknown` 不表示一定可破坏。生命值可通过公开只读 key 查询补读；实际破坏须由射击确认。
 - 结束后 `agpb_obstacle_debug 0`、`agpb_kick all`。加载冒烟和上述实机结果写 PROGRESS。
 
-### 自主破坏与续路样本（2026-10-14，cs_office）
+### 自主破坏与续路（cs_office）
 
 - 每轮先 `agpb_kick all`，重载 `cs_office` 恢复原始道具；真人先进入 CT，确认 slot 1 / ACTIVE / hp=100，再 `agpb_add 3`。
 - 用 `agpb_bot_goto 0 51` 自主走到起点，完成后只下达一次 `agpb_bot_goto 0 61`。
   路线应为 `51 52 53 60 61`，使用活着的同队真人在外侧或第三人称观察，保持 ACTIVE。
-- 复测这组历史样本时，连续三轮核对 `breaking obstacle`、`obstacle shot confirmed`（弹药减少）、
+- 复测此路线时核对 `breaking obstacle`、`obstacle shot confirmed`（弹药减少）、
   障碍破坏 / 实体消失、`resuming goal #61`、`arrived at waypoint #61`；以 TGA 截图核对动作。
   人工开火、删除障碍或重新下达路线不能计入成功。
 - 真人挡路或挡住枪口时不开火；未知受伤属性的候选可有限试射，连续六枪无伤害确认应退出，
   10 秒超时也应退出。停止 / 死亡 / 换队 / 换图不能留下攻击输入。
 - 空弹夹有备弹时由 bot 自行换弹；障碍处理保留蹲姿，起跳途中不打断原来的跳跃输入。
-- 历史样本范围：2026-10-14 的 cs_office `51→61` 三轮路线、空弹夹 / 备弹和有限退出测试；
-  实际结果、当次 DLL 与后续双向蹲行的边界见 PROGRESS，不能以单次清障代表完整导航链路通过。
 
-#### 代表物品 / 武器样本（2026-10-14）
+#### 代表物品 / 武器
 
 - 验证以通用障碍处理功能为单位，武器 / 物品只是代表样本，不要求先穷举组合再完成逻辑移植。
-  最新实现与验证状态以 PROGRESS「障碍处理移植范围与验证状态」为准；未验证不等于未实现。
+  最新实现与验证状态以 PROGRESS 为准；未验证不等于未实现。
 - sv_cheats 测试夹具 `agpb_bot_testweapon 0 weapon_m4a1 only` / `weapon_usp only` /
   `weapon_knife only` 必须在 bot 活着且没有路线时使用；武器准备完成后只给一次验收路线。
-- USP、M4A1、刀与原始收音机的当次实测结果见 PROGRESS；其他物品可临时将地图原物品
-  移入已存在的手工路线验证，不能改生命值或由真人代打。换场景先踢 bot、重载地图复原。
-- 显示器 / 机箱实测见 PROGRESS；不能把“周围有可碎物”当作它们都挡住了当前路线。
+- 使用USP、M4A1、刀及地图原始可破坏物作代表场景；道具可移入已有手工路线，
+  不能改生命值或由真人代打。换场景先踢bot、重载地图复原。
+- 候选必须实际挡住当前路线，不能只凭周围有可碎物判定。
 - 持刀且拥有有弹枪械，远处取得目标时应通过 CUserCmd 切枪；近处可保留刀挥砍。
   取得目标的远近分类不能被活动目标的扩大几何复查改写。
 - 近战按 SDK 40-unit ray 和未命中时的 hull fallback 做检查，必须首先命中目标；
@@ -257,7 +254,7 @@ agpb_wp_check
 
 本节只给步骤与通过标准，限 `agpb_mode normal` 的炸弹、人质和无目标地图；
 `zombie` 仍只有开关，不在行为验收范围。测试全程遵守文首同队前置，换场景先
-`agpb_kick all`。**本轮不新增、改动或保存爆破地图路点。**
+`agpb_kick all`。验收复用已有手工图；制作和修改路点按[路点工作流](waypoint-workflow/README.md)执行。
 远距离目标、逃爆和巡逻只在已有、手工连通的 `.agpw` 图上验收；
 当前无爆破路点的地图只检查自然形成的近距离局部交互，不能据此判定整张图目标行为通过。
 
@@ -331,8 +328,7 @@ agpb_bot_tasks 0
 爆破图若已有人工路点，分别核对 T 携带 C4 的安放、T 拾取掉落 C4、CT 拆已安放 C4，
 以及时间不足时的逃爆：用 `agpb_objectives` 核对世界状态，用 `agpb_bot_tasks 0`
 核对任务切换，以游戏里的 C4 归属、实际安放 / 拆除、逃到安全处为完成标准。
-路线类场景以有效手工连边和可达路点为前置；**当前没有爆破路点时不执行这组远距验收，
-也不为验收临时打点或存盘。**
+路线类场景以有效手工连边和可达路点为前置；没有爆破路点时不执行远距路线验收。
 
 没有爆破路点时，只在局面自然满足以下条件时检查局部动作：T bot 已持 C4 且处于爆破区；
 CT bot 已在已安放 C4 附近；T bot 已在掉落 C4 附近。Bot 仍须与活着的人类同队。
@@ -381,11 +377,11 @@ CT bot 已在已安放 C4 附近；T bot 已在掉落 C4 附近。Bot 仍须与�
 
 ## Radio 三方假客户端兼容补丁状态核对
 
-本轮仍只在真人与 bot 同队的场景验证 AgPB。若已安装独立 SourceMod 补丁，可执行
+始终在真人与bot同队的场景验证AgPB。若已安装独立 SourceMod 补丁，可执行
 `sm_agpb_guard_status` 只读核对当前 DLL 的 active / intact 与命中计数；
 补丁状态不改变文首同队前置。关闭 / 卸载 / 重载前先 `agpb_kick all`，
 核对假客户端已离开；未知 DLL CRC 或签名不匹配应在写内存前拒绝。
-补丁不替代 AgPB 的 `CUserCmd` 行为，历史证据与版本记录见 [`PROGRESS.md`](PROGRESS.md)。
+补丁不替代AgPB的`CUserCmd`行为，当前适用范围与启停见[兼容约束](CRASH_REPORT.md)。
 
 ## 已搁置
 

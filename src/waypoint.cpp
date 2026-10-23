@@ -1163,7 +1163,7 @@ private:
 
 static IHandleEntity *AgPB_EdictHandleEntity( edict_t *pEdict )
 {
-	if ( pEdict == NULL )
+	if ( pEdict == NULL || pEdict->IsFree() || pEdict->GetUnknown() == NULL )
 		return NULL;
 
 	IServerNetworkable *pNet = pEdict->GetNetworkable();

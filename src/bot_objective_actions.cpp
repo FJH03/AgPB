@@ -20,6 +20,7 @@
 #include "objectives.h"
 #include "tasks.h"
 #include "waypoint.h"
+#include "bomb_escape_policy.h"
 
 // The task stack may change during navigation or completion. Work from a
 // copy, and never retain references to Current() across either operation.
@@ -374,11 +375,11 @@ bool CAgPB::ExecuteObjectiveTask( CGlobalVars *globals, CBotCmd &cmd )
 
 	case AgPBTaskId::EscapeBomb:
 	{
-		if ( ( world.mapFlags & AGPB_MAP_BOMB ) == 0 ||
-		     world.bomb.state != AGPB_BOMB_PLANTED ||
-		     ( world.bomb.tickingKnown && !world.bomb.ticking ) )
+		if ( AgPB_BombThreatEnded( world.roundEpoch == m_uEscapeRoundEpoch,
+			world.bomb.handle == (uintp)task.entityHandle, world.bomb.state == AGPB_BOMB_RESOLVED ) )
 		{
-			CompleteCurrentTask( "bomb threat ended" );
+			CompleteCurrentTask( "bomb resolved or round changed" );
+			ResetBombEscape();
 			return true;
 		}
 		if ( !TaskDestination( task, true, target ) )
@@ -390,8 +391,23 @@ bool CAgPB::ExecuteObjectiveTask( CGlobalVars *globals, CBotCmd &cmd )
 		{
 			StopObjectiveMovement( cmd );
 			cmd.buttons &= ~( IN_ATTACK | IN_USE );
-			// Remain at the selected escape point until the threat ends;
-			// otherwise the normal planner would reissue EscapeBomb every tick.
+			const float distance = world.bomb.positionKnown && m_pInfo != NULL
+				? ( m_pInfo->GetAbsOrigin() - world.bomb.position ).Length() : -1.0f;
+			const bool safe = AgPB_BombPositionSafe( distance, world.bombBlastRadiusKnown, world.bombBlastRadius );
+			if ( task.waypoint >= 0 && !safe )
+			{
+				CompleteCurrentTask( "best-effort retreat reached; safety boundary not confirmed", true );
+				return true;
+			}
+			if ( now >= m_flNextEscapeReport )
+			{
+				RouteReport( "escape holding: bomb-state=%d left=%.2f distance=%.1f radius=%.1f safe=%s",
+					(int)world.bomb.state, world.bomb.blowTimeKnown ? world.bomb.blowTime - now : -1.0f,
+					distance, world.bombBlastRadiusKnown ? world.bombBlastRadius : -1.0f, safe ? "yes" : "NO-unknown-or-blocked" );
+				m_flNextEscapeReport = now + 5.0f;
+			}
+			// UNKNOWN/missing observations retain this refuge. Only a confirmed
+			// resolution or a new round releases the emergency task.
 		}
 		return true;
 	}

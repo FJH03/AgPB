@@ -28,6 +28,15 @@ enum AgPBBombState
 	AGPB_BOMB_RESOLVED    // A planted C4 is present and its timer is stopped.
 };
 
+enum AgPBBombRadiusSource
+{
+	AGPB_BOMB_RADIUS_UNKNOWN = 0,
+	AGPB_BOMB_RADIUS_MAP_DEFAULT,
+	AGPB_BOMB_RADIUS_MAP_ENTITY,
+	AGPB_BOMB_RADIUS_OVERRIDE
+};
+const char *AgPB_BombRadiusSourceName( AgPBBombRadiusSource source );
+
 struct AgPBObjectiveRegion
 {
 	AgPBObjectiveRegion();
@@ -72,6 +81,7 @@ struct AgPBObjectiveBomb
 	float blowTime;
 	bool defuseCountdownKnown;
 	float defuseCountdown;
+	bool plantedObserved; // Retained during missing/unknown observations until round reset.
 };
 
 struct AgPBObjectiveSnapshot
@@ -82,6 +92,9 @@ struct AgPBObjectiveSnapshot
 	float observedAt;
 	unsigned int roundEpoch;
 	AgPBObjectiveBomb bomb;
+	bool bombBlastRadiusKnown;
+	float bombBlastRadius;
+	AgPBBombRadiusSource bombRadiusSource;
 	CUtlVector<AgPBObjectiveRegion> bombSites;
 	CUtlVector<AgPBObjectiveRegion> rescueZones;
 	CUtlVector<AgPBObjectiveHostage> hostages;
@@ -105,6 +118,10 @@ private:
 	int m_MapFlags;
 	unsigned int m_RoundEpoch;
 	float m_NextRefresh;
+	bool m_BombRadiusParsed;
+	bool m_MapBombRadiusKnown;
+	float m_MapBombBlastRadius;
+	AgPBBombRadiusSource m_MapBombRadiusSource;
 };
 
 AgPBObjectiveWorld &BotObjectives();

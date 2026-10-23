@@ -50,7 +50,8 @@ AgPBObstacle::AgPBObstacle()
 
 static IHandleEntity *EntityHandle( edict_t *entity )
 {
-	IServerNetworkable *net = entity != NULL ? entity->GetNetworkable() : NULL;
+	if ( entity == NULL || entity->IsFree() || entity->GetUnknown() == NULL ) return NULL;
+	IServerNetworkable *net = entity->GetNetworkable();
 	return net != NULL ? net->GetEntityHandle() : NULL;
 }
 
@@ -83,14 +84,13 @@ static bool ReadKeyInt( const BotEngineContext &ctx, edict_t *entity, const char
 
 static void Classify( const BotEngineContext &ctx, AgPBObstacle &result )
 {
-	if ( result.entity == NULL )
+	if ( result.entity == NULL || result.entity->IsFree() || result.entity->GetUnknown() == NULL )
 	{
 		result.kind = "world-or-static";
 		return;
 	}
 
-	IServerNetworkable *net = result.entity->GetNetworkable();
-	const char *name = net != NULL ? net->GetClassName() : "";
+	const char *name = result.entity->GetClassName();
 	if ( name == NULL )
 		name = "";
 

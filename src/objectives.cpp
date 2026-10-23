@@ -13,12 +13,74 @@
 #include <mathlib/mathlib.h>
 #include <engine/ICollideable.h>
 #include <iservernetworkable.h>
+#include <convar.h>
 
 #include "bot.h"
 #include "objectives.h"
+#include "bomb_escape_policy.h"
 
 static const float kObjectiveRefreshInterval = 0.1f;
 static const uintp kInvalidHandle = (uintp)INVALID_EHANDLE_INDEX;
+
+ConVar agpb_bomb_blast_radius( "agpb_bomb_blast_radius", "0", FCVAR_GAMEDLL,
+	"C4 damage-radius override in units; 0 uses map entity data. Synchronize with runtime map_setbombradius changes.",
+	true, 0.0f, false, 0.0f );
+
+const char *AgPB_BombRadiusSourceName( AgPBBombRadiusSource source )
+{
+	switch ( source )
+	{
+	case AGPB_BOMB_RADIUS_MAP_DEFAULT: return "map-default";
+	case AGPB_BOMB_RADIUS_MAP_ENTITY: return "map-entity";
+	case AGPB_BOMB_RADIUS_OVERRIDE: return "override";
+	default: return "unknown";
+	}
+}
+
+// CMapInfo only implements a KeyValue setter; bombradius is neither a
+// SendProp nor a datadesc keyfield, so IServerTools::GetKeyValue cannot read
+// its live value. Use the public pristine entity lump, never a member offset.
+// mapinfo.cpp: first info_map_parameters wins, default 500, integer map key
+// capped at 2048. weapon_c4.cpp applies damage out to that value * 3.5.
+// Administrators changing the live value must set the explicit override too.
+static bool ReadMapBombRadius( IVEngineServer *engine, float &radius, AgPBBombRadiusSource &source )
+{
+	const char *cursor = engine != NULL ? engine->GetMapEntitiesString() : NULL;
+	if ( cursor == NULL || cursor[0] == '\0' ) return false;
+	char token[2048], key[2048];
+	while ( cursor != NULL )
+	{
+		token[0] = '\0';
+		cursor = engine->ParseFile( cursor, token, sizeof( token ) );
+		if ( token[0] == '\0' ) break;
+		if ( V_strcmp( token, "{" ) != 0 ) return false;
+		bool mapInfo = false, hasRadius = false, closed = false;
+		int damage = 500;
+		while ( cursor != NULL )
+		{
+			key[0] = '\0';
+			cursor = engine->ParseFile( cursor, key, sizeof( key ) );
+			if ( V_strcmp( key, "}" ) == 0 ) { closed = true; break; }
+			if ( cursor == NULL || key[0] == '\0' ) return false;
+			token[0] = '\0';
+			cursor = engine->ParseFile( cursor, token, sizeof( token ) );
+			if ( cursor == NULL || V_strcmp( token, "}" ) == 0 ) return false;
+			if ( V_strcmp( key, "classname" ) == 0 ) mapInfo = V_strcmp( token, "info_map_parameters" ) == 0;
+			else if ( V_strcmp( key, "bombradius" ) == 0 ) { damage = V_atoi( token ); hasRadius = true; }
+		}
+		if ( !closed ) return false;
+		if ( mapInfo )
+		{
+			if ( damage < 0 ) return false;
+			radius = MIN( damage, 2048 ) * 3.5f;
+			source = hasRadius ? AGPB_BOMB_RADIUS_MAP_ENTITY : AGPB_BOMB_RADIUS_MAP_DEFAULT;
+			return true;
+		}
+	}
+	radius = 500.0f * 3.5f;
+	source = AGPB_BOMB_RADIUS_MAP_DEFAULT;
+	return true;
+}
 
 AgPBObjectiveRegion::AgPBObjectiveRegion()
 {
@@ -58,6 +120,7 @@ AgPBObjectiveBomb::AgPBObjectiveBomb()
 	blowTime = 0.0f;
 	defuseCountdownKnown = false;
 	defuseCountdown = 0.0f;
+	plantedObserved = false;
 }
 
 AgPBObjectiveSnapshot::AgPBObjectiveSnapshot()
@@ -65,13 +128,14 @@ AgPBObjectiveSnapshot::AgPBObjectiveSnapshot()
 	mapFlags = AGPB_MAP_NO_OBJECTIVE;
 	observedAt = 0.0f;
 	roundEpoch = 0;
+	bombBlastRadiusKnown = false;
+	bombBlastRadius = 0.0f;
+	bombRadiusSource = AGPB_BOMB_RADIUS_UNKNOWN;
 }
 
 AgPBObjectiveWorld::AgPBObjectiveWorld()
 {
-	m_MapFlags = AGPB_MAP_NO_OBJECTIVE;
-	m_RoundEpoch = 0;
-	m_NextRefresh = 0.0f;
+	Reset();
 }
 
 void AgPBObjectiveWorld::Reset()
@@ -80,6 +144,10 @@ void AgPBObjectiveWorld::Reset()
 	m_MapFlags = AGPB_MAP_NO_OBJECTIVE;
 	m_RoundEpoch = 0;
 	m_NextRefresh = 0.0f;
+	m_BombRadiusParsed = false;
+	m_MapBombRadiusKnown = false;
+	m_MapBombBlastRadius = 0.0f;
+	m_MapBombRadiusSource = AGPB_BOMB_RADIUS_UNKNOWN;
 }
 
 void AgPBObjectiveWorld::OnRoundStart()
@@ -119,7 +187,7 @@ static edict_t *ResolveHandle( const BotEngineContext &ctx, uintp handle,
 
 static ICollideable *EntityCollideable( const BotEngineContext &ctx, edict_t *entity )
 {
-	if ( ctx.pTrace == NULL || entity == NULL )
+	if ( ctx.pTrace == NULL || entity == NULL || entity->IsFree() || entity->GetUnknown() == NULL )
 		return NULL;
 	IServerNetworkable *networkable = entity->GetNetworkable();
 	IHandleEntity *handleEntity = networkable != NULL ? networkable->GetEntityHandle() : NULL;
@@ -280,6 +348,9 @@ static AgPBObjectiveBomb ReadPlantedC4( const BotEngineContext &ctx, edict_t *en
 	bomb.state = bomb.ticking ? AGPB_BOMB_PLANTED :
 		( bomb.tickingKnown && bomb.blowTimeKnown && bomb.blowTime > 0.0f
 		  ? AGPB_BOMB_RESOLVED : AGPB_BOMB_UNKNOWN );
+	// CPlantedC4::ShootSatchelCharge creates this class when planting finishes.
+	// Missing SendProps on a planted charge must retain an unknown threat.
+	bomb.plantedObserved = true;
 	return bomb;
 }
 
@@ -293,11 +364,26 @@ void AgPBObjectiveWorld::Refresh( const BotEngineContext &ctx, const CGlobalVars
 	if ( now < m_NextRefresh )
 		return;
 	m_NextRefresh = now + kObjectiveRefreshInterval;
+	if ( !m_BombRadiusParsed )
+	{
+		m_MapBombRadiusKnown = ReadMapBombRadius( ctx.pEngine, m_MapBombBlastRadius, m_MapBombRadiusSource );
+		m_BombRadiusParsed = true;
+	}
 
 	AgPBObjectiveSnapshot next;
 	next.observedAt = now;
 	next.roundEpoch = m_RoundEpoch;
 	next.bomb.state = AGPB_BOMB_NONE;
+	next.bombBlastRadiusKnown = m_MapBombRadiusKnown;
+	next.bombBlastRadius = m_MapBombBlastRadius;
+	next.bombRadiusSource = m_MapBombRadiusSource;
+	const float radiusOverride = agpb_bomb_blast_radius.GetFloat();
+	if ( IsFinite( radiusOverride ) && radiusOverride > 0.0f )
+	{
+		next.bombBlastRadiusKnown = true;
+		next.bombBlastRadius = radiusOverride;
+		next.bombRadiusSource = AGPB_BOMB_RADIUS_OVERRIDE;
+	}
 	bool sawWeapon = false, sawPlanted = false;
 	const int maxEntities = globals->maxEntities < MAX_EDICTS
 		? globals->maxEntities : MAX_EDICTS;
@@ -306,8 +392,10 @@ void AgPBObjectiveWorld::Refresh( const BotEngineContext &ctx, const CGlobalVars
 		edict_t *entity = ctx.pEngine->PEntityOfEntIndex( index );
 		if ( entity == NULL || entity->IsFree() )
 			continue;
-		IServerNetworkable *networkable = entity->GetNetworkable();
-		const char *name = networkable != NULL ? networkable->GetClassName() : NULL;
+		// DetachEdict calls SetEdict(NULL, false): IsFree can still be false
+		// while the cached networkable is stale. The public edict accessor
+		// checks GetUnknown before calling it (SDK edict.h / ServerNetworkProperty.cpp).
+		const char *name = entity->GetClassName();
 		if ( name == NULL || name[0] == '\0' )
 			continue;
 
@@ -342,6 +430,18 @@ void AgPBObjectiveWorld::Refresh( const BotEngineContext &ctx, const CGlobalVars
 				next.bomb = candidate;
 			sawPlanted = true;
 		}
+	}
+	// A temporarily missing entity or unreadable ticking field is not proof
+	// of a resolved threat. Preserve its last identity/position until a real
+	// resolved observation or OnRoundStart; unknown time means retreat now.
+	if ( m_Snapshot.bomb.plantedObserved && m_Snapshot.bomb.state != AGPB_BOMB_RESOLVED &&
+	     next.bomb.state != AGPB_BOMB_PLANTED && next.bomb.state != AGPB_BOMB_RESOLVED )
+	{
+		// Unknown ticking may coexist with a newly recovered position/handle.
+		next.bomb = AgPB_BombMergeUnknownObservation( m_Snapshot.bomb, next.bomb,
+			NetVar_HandleIsValid( m_Snapshot.bomb.handle ), NetVar_HandleIsValid( next.bomb.handle ) );
+		next.bomb.state = AGPB_BOMB_UNKNOWN;
+		next.bomb.tickingKnown = next.bomb.blowTimeKnown = next.bomb.defuseCountdownKnown = false;
 	}
 	next.mapFlags = m_MapFlags;
 	m_Snapshot = next;

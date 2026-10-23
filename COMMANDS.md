@@ -114,6 +114,7 @@
 | `agpb_enable` | 1 | 0 = 不驱动 bot（路点编辑器 / 绘制 / 菜单不受影响） |
 | `agpb_team` | 2 | `agpb_add` 不带队伍参数时用的默认队 |
 | `agpb_mode` | normal | 运行期游戏模式：`normal`（原生）/ `zombie`（ZM-ZE，行为未实现）。按图在 cfg 里切 |
+| `agpb_bomb_blast_radius` | 0 | C4最终伤害半径覆盖值（单位）；0按地图初始实体配置读取，并显示来源。若管理员运行期用 `map_setbombradius` 改值，需同步设置为实际伤害半径；用 `map_showbombradius` 核对。不是地图原始damage参数 |
 | `agpb_obstacle_debug` | 0 | 1 = 行走时每 0.25 秒输出路径障碍变化；卡住时输出扩大检测结果。只控制额外日志，自主破坏 / 续路不依赖此开关 |
 | `agpb_wp_show` | 0 | 绘制路点 |
 | `agpb_wp_labels` | 0 | 画下标 |
@@ -133,6 +134,7 @@ agpb_wp_type normal      // 站在 A 点打第一个点
 // 走到 B 点
 agpb_wp_type normal
 agpb_wp_cache            // 把 B 存成目标点（也可以直接用准星指）
+// 回到 A 点附近；最近点必须是 A，目标点才是 B
 agpb_wp_connect both     // 连接最近点 <-> 目标点（双向）
 agpb_wp_check
 agpb_wp_save
@@ -155,3 +157,15 @@ agpb_wp_save
   上半截=附加色（SNIPER 暗金 / T 红 / CT 蓝 / FALLRISK 粉）
 - 连线：JUMP 红 / BOOST 蓝 / VISIBLE 通视绿、被挡橙 / 双向黄 / 单向白 / 单向入边墨绿
 - 半径=蓝框；缓存点=黄线；准星指向点=白线
+
+### 终点停稳与逃爆诊断
+
+- 普通路线的中间节点仍连续穿行；最终节点用CUserCmd减速/制动，实际落地、水平误差在有效半径内、
+  脚底高度误差不超过4、速度不超过5且连续稳定0.8秒才报告arrived。有效半径为max(人工计划radius,4)，
+  控制目标另留0.5单位内侧余量，AGPW原始radius不改。跳跃到终点先完成落地，不在空中刹停。
+- `agpb_objectives` 新增bomb-radius、radius-source、planted-observed；unknown保持不确定，不能视为安全。
+- 普通模式逃爆沿现有手工图选择预计最早可达的安全点，预算包括入图、行走/蹲行/跳跃及余量；
+  CT还比较进场和拆弹预算。紧急撤离不受普通目标失败的5秒冷却阻断。
+- 逃爆日志有left、goal、entry、path、eta、radius/source与safe；`NO-best-effort`不表示已经安全。
+  UNKNOWN观测保留避险任务，确认炸弹已解决或回合变化后才释放。最终成功仍需实际爆炸后存活证据。
+- 行为基线为SyPB、EBot作对照；Source引擎仅提供公开接口、运动/伤害规则，不使用ZBot AI控制。

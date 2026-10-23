@@ -216,6 +216,8 @@ private:
 	void ClearRoute();
 	void UpdateTasks( CGlobalVars *globals, CBotCmd &cmd );
 	void PlanNormalTask( CGlobalVars *globals, bool urgentOnly = false );
+	bool PlanPlantedBombTask( CGlobalVars *globals, bool urgentOnly );
+	void ResetBombEscape();
 	bool ExecuteObjectiveTask( CGlobalVars *globals, CBotCmd &cmd );
 	bool NavigateTaskTo( const Vector &position, int preferredWaypoint, float interactionRange,
 	                     CGlobalVars *globals, CBotCmd &cmd );
@@ -258,6 +260,8 @@ private:
 	float  m_flStuckCheckTime;
 	float  m_flStuckRecoveryUntil;
 	bool   m_bRouteArrived;
+	float  m_flRouteSettleSince;
+	bool   m_bRouteLegAirborne;
 	float  m_flNextObstacleCheck;
 	uintp  m_uLastObstacleHandle;
 	bool   m_bLastObstacleFound;
@@ -287,6 +291,12 @@ private:
 	uintp m_uLastTaskUseHandle;
 	uintp m_uDeclinedObjectiveHandle;
 	float m_flObjectiveRetryAfter;
+	uintp m_uEscapeBombHandle;
+	unsigned int m_uEscapeRoundEpoch;
+	bool m_bEscapeCommitted;
+	CUtlVector<int> m_vecEscapeFailedGoals;
+	float m_flEscapeRetryAfter;
+	float m_flNextEscapeReport;
 
 	// 随机漫游（agpb_bot_roam）
 	bool   m_bRoam;

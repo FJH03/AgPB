@@ -1,61 +1,24 @@
-# 崩溃报告：freezetime 结束时的服务端崩溃
+# 假客户端Radio兼容约束
 
-> 日期：2026-09-19 ｜ 本文保留原始根因与复现说明。最新修复 / 验证状态统一见 [`PROGRESS.md`](PROGRESS.md)。
-> [独立兼容补丁的部署说明](compat/sourcemod/README.md)；未启用并确认补丁有效前，**bot 必须与人类同队**。
+本文件说明当前仍需遵守的引擎兼容条件。项目状态见[PROGRESS.md](PROGRESS.md)，测试始终遵守[AGENTS.md](AGENTS.md)的同队要求。
 
-## 现象与复现
+## 适用范围
 
-1. 服务器上有玩家（例如 CT），`agpb_add 2` 把 bot 加进**对立阵营**（T）；
-2. 双方都有玩家 → 游戏自动重新开始；
-3. **freezetime 结束的瞬间**服务端崩溃（Access violation）。
+当前csczs引擎的`CCSPlayer::Radio()`会把`IsBot()`为真的玩家当作原生`CCSBot`使用。AgPB创建的是无原生AI的假客户端，插件核心不靠伪装真人或改用CCSBot解决这个引擎假设。
 
-两个特征：崩在 `server.dll` 内部（不在 `agpb_mm.dll`）；只在 bot 成为
-**某队唯一 / 第一个活跃玩家**时发生，bot 与人类同队不崩。
+已有独立SourceMod兼容补丁检查空bot / profile分支，只在匹配的server.dll上生效：
 
-## 根因
+- 源码：[agpb_fakeclient_guard.sp](compat/sourcemod/agpb_fakeclient_guard.sp)。
+- 版本及字节校验数据：[agpb.fakeclient.guard.txt](configs/sourcemod/gamedata/agpb.fakeclient.guard.txt)。
+- 当前配置限csczs Win64、2026-10-11 server.dll、CRC `770BAE64`；未知版本或字节不匹配时拒绝安装。它不修改磁盘DLL，也不替代AgPB的CUserCmd行为。
 
-freezetime 结束 → `CCSGameRules::CheckFreezePeriodExpired()` → 每队第一个 `STATE_ACTIVE`
-玩家喊一次无线电（`radio.go` 之类）→ `CCSPlayer::Radio()` 里：
+## 部署与启停
 
-```cpp
-if (IsBot()) { CCSBot *pBot = dynamic_cast<CCSBot*>(this); pBot->SpeakAudio(...); }
-```
+游戏目录以AGENTS中的部署目标为准。用游戏既有`addons/sourcemod/scripting/spcomp64.exe`编译上述SP到系统TEMP；编译成功后，将SMX放`addons/sourcemod/plugins/agpb_fakeclient_guard.smx`，gamedata放`addons/sourcemod/gamedata/agpb.fakeclient.guard.txt`。已有同名插件先检查加载状态，替换前踢所有假客户端并卸载。
 
-假客户端 `IsBot()` 为 true，但它**不是 `CCSBot`** → cast 得 NULL → 读 `m_profile`
-（偏移 `0x1E48`）→ 空指针崩溃。栈上出现的 `SMGD_*` 只是符号表里离崩溃点最近的导出，
-不是真实调用链。
+- `sm_agpb_guard_status`只读检查当前补丁；使用时要求`active=1 intact=1`。
+- `sm_agpb_fakeclient_guard 0|1`切换补丁；有假客户端时关闭会被拒绝。
+- 关闭、卸载或重载前先`agpb_kick all`，并确认其它假客户端也已离开。关闭补丁后，引擎原有兼容限制恢复。
+- 补丁状态不改变本项目同队测试要求。真人退出、换队或切观察者之前，以及换图 / 场景之前，先踢bot。
 
-## 已排除的假设
-
-- 不是我们驱动的 `RunPlayerMove` 链：frame 05 是被 thunk 调用的原 `GameFrame`。
-- 不是武器 / 手雷逻辑：那些 `SMGD_*` 符号只是地址最近，不是真实函数。
-
-## 已试过、已回滚
-
-在 `round_freeze_end` 事件里临时摘掉 `FL_FAKECLIENT` 伪装真人：能绕过崩溃，但窗口期内
-引擎会把 bot 当网络客户端，副作用不可控；作者决定先把根因定性清楚再谈规避，实现已全部删除。
-
-## 修复选项
-
-| 方案 | 说明 | 代价 |
-|---|---|---|
-| Hook `CCSPlayer::Radio()` | 非虚函数，需要入口地址 + 特征码校验，对 `IsBot() && !CCSBot` 直接返回 | RVA 随 server.dll 版本变化 |
-| Hook `CCSGameRules::Think()` | 虚函数可 vtable hook；pre 把 bot 移出 `STATE_ACTIVE`，post 恢复 | 一帧内状态异常；vtable index 要确认 |
-| 软件断点 / 内存补丁 | 走 SourceMod 那类内存补丁思路 | 需要引入外部依赖或自写补丁 |
-| 架构层面改造 | 改用 `CCSBotManager` 建**真** `CCSBot` 再接管输入，绕开所有「`IsBot()` ⇒ 就是 `CCSBot`」的假设 | 改动最大，影响面广 |
-
-## 测试约束（修复前必须遵守）
-
-- bot 与人类**同队**，且队里人类 slot 更小、处于 `STATE_ACTIVE`；
-- 人类断线 / 切观察者 / 换队之前，先 `agpb_kick all`；
-- 换图 / 换场景前先 `agpb_kick all`。
-
-## 修复后的验证
-
-| 场景 | 期望 |
-|---|---|
-| bot + 人类同队 | 本来就不崩（对照） |
-| bot 独占一队，freezetime 结束 | 不再崩，队伍照常收到无线电语音 |
-| 连续多回合 / 换图 | 每回合 freezetime 结束都不崩 |
-
-如果修复后仍崩，优先排查是否还有其它「`IsBot()` ⇒ `CCSBot`」式的引擎假设被踩到。
+引擎或server.dll更新后重新核对gamedata及实际状态；不能把这个版本的兼容结论推广到其它DLL或所有引擎路径。

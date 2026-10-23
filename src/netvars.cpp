@@ -241,11 +241,11 @@ const CNetVarTable *CNetVarRegistry::GetForClass( ServerClass *pClass )
 
 const CNetVarTable *CNetVarRegistry::GetForEdict( edict_t *pEdict )
 {
-	if ( pEdict == NULL || pEdict->IsFree() )
+	if ( pEdict == NULL || pEdict->IsFree() || pEdict->GetUnknown() == NULL )
 		return NULL;
 
-	// edict_t::GetNetworkable() 是纯成员访问（m_pUnk->GetNetworkable()），
-	// 之后的 GetServerClass() 是编译器解析的虚调用。
+	// DetachEdict clears GetUnknown but can leave IsFree false and a stale
+	// cached networkable. Check attachment before the GetServerClass vcall.
 	IServerNetworkable *pNet = pEdict->GetNetworkable();
 	if ( pNet == NULL )
 		return NULL;

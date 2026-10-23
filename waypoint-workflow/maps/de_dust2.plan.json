@@ -1,0 +1,3208 @@
+{
+  "map": "de_dust2",
+  "author": "AgPB",
+  "nodes": [
+    {
+      "label": "t_spawn",
+      "x": -850.0,
+      "y": -800.0,
+      "z": 128.493,
+      "radius": 24,
+      "flags": 0
+    },
+    {
+      "label": "t_w1",
+      "x": -1200.0,
+      "y": -750.0,
+      "z": 130.092,
+      "radius": 24,
+      "flags": 0
+    },
+    {
+      "label": "t_w2",
+      "x": -1500.0,
+      "y": -700.0,
+      "z": 129.705,
+      "radius": 24,
+      "flags": 0
+    },
+    {
+      "label": "t_w3",
+      "x": -1800,
+      "y": -800,
+      "z": 129.621,
+      "radius": 24,
+      "flags": 0
+    },
+    {
+      "label": "t_w4",
+      "x": -1920.0,
+      "y": -400.0,
+      "z": 73.816,
+      "radius": 24,
+      "flags": 0
+    },
+    {
+      "label": "t_w5",
+      "x": -1920.0,
+      "y": -100.0,
+      "z": 0.479,
+      "radius": 24,
+      "flags": 0
+    },
+    {
+      "label": "t_w6",
+      "x": -1920.0,
+      "y": 200.0,
+      "z": 3.386,
+      "radius": 24,
+      "flags": 0
+    },
+    {
+      "label": "t_lobby",
+      "x": -1660.0,
+      "y": 350.0,
+      "z": 5.14,
+      "radius": 24,
+      "flags": 0
+    },
+    {
+      "label": "u_foot",
+      "x": -1660.0,
+      "y": 480.0,
+      "z": 1.275,
+      "radius": 8,
+      "flags": 0
+    },
+    {
+      "label": "u_step",
+      "x": -1660.0,
+      "y": 530.0,
+      "z": 32.031,
+      "radius": 8,
+      "flags": 0
+    },
+    {
+      "label": "u_entry",
+      "x": -1660.0,
+      "y": 650.0,
+      "z": 32.0,
+      "radius": 8,
+      "flags": 0
+    },
+    {
+      "label": "u_neck",
+      "x": -1660.0,
+      "y": 850.0,
+      "z": 32.0,
+      "radius": 8,
+      "flags": 0
+    },
+    {
+      "label": "u_south",
+      "x": -1660.0,
+      "y": 1030.0,
+      "z": 32.0,
+      "radius": 8,
+      "flags": 0
+    },
+    {
+      "label": "u_hub",
+      "x": -1660.0,
+      "y": 1200.0,
+      "z": 32.0,
+      "radius": 8,
+      "flags": 0
+    },
+    {
+      "label": "u_west",
+      "x": -1900.0,
+      "y": 1200.0,
+      "z": 32.0,
+      "radius": 8,
+      "flags": 0
+    },
+    {
+      "label": "u_turn",
+      "x": -2000.0,
+      "y": 1300.0,
+      "z": 32.0,
+      "radius": 8,
+      "flags": 0
+    },
+    {
+      "label": "u_corr1",
+      "x": -2000.0,
+      "y": 1420.0,
+      "z": 32.0,
+      "radius": 8,
+      "flags": 0
+    },
+    {
+      "label": "u_corr2",
+      "x": -2000.0,
+      "y": 1550.0,
+      "z": 32.0,
+      "radius": 8,
+      "flags": 0
+    },
+    {
+      "label": "u_corr3",
+      "x": -2000.0,
+      "y": 1700.0,
+      "z": 32.0,
+      "radius": 8,
+      "flags": 0
+    },
+    {
+      "label": "u_exitstep",
+      "x": -2000.0,
+      "y": 1800.0,
+      "z": 24.031,
+      "radius": 8,
+      "flags": 0
+    },
+    {
+      "label": "b_entry",
+      "x": -2000.0,
+      "y": 1850.0,
+      "z": 0.814,
+      "radius": 8,
+      "flags": 0
+    },
+    {
+      "label": "b_frontwest",
+      "x": -1900.0,
+      "y": 1950.0,
+      "z": 5.758,
+      "radius": 24,
+      "flags": 0
+    },
+    {
+      "label": "b_front",
+      "x": -1700.0,
+      "y": 1900.0,
+      "z": 3.419,
+      "radius": 24,
+      "flags": 0
+    },
+    {
+      "label": "b_eastfront",
+      "x": -1500.0,
+      "y": 2050.0,
+      "z": 2.178,
+      "radius": 24,
+      "flags": 0
+    },
+    {
+      "label": "b_eastmid",
+      "x": -1500.0,
+      "y": 2300.0,
+      "z": 3.804,
+      "radius": 24,
+      "flags": 0
+    },
+    {
+      "label": "b_goalapproach",
+      "x": -1550.0,
+      "y": 2600.0,
+      "z": 1.699,
+      "radius": 24,
+      "flags": 0
+    },
+    {
+      "label": "b_goal",
+      "x": -1600.0,
+      "y": 2700.0,
+      "z": 1.981,
+      "radius": 8,
+      "flags": 16
+    },
+    {
+      "label": "b_back",
+      "x": -1650,
+      "y": 2850,
+      "z": 18.638,
+      "radius": 8,
+      "flags": 0
+    },
+    {
+      "label": "b_backwest",
+      "x": -1900.0,
+      "y": 2800.0,
+      "z": 32.0,
+      "radius": 8,
+      "flags": 0
+    },
+    {
+      "label": "b_tunnelwall",
+      "x": -1990,
+      "y": 2600,
+      "z": 32.031,
+      "radius": 8,
+      "flags": 0
+    },
+    {
+      "label": "b_westmid",
+      "x": -2100,
+      "y": 2300,
+      "z": 1.177,
+      "radius": 8,
+      "flags": 0
+    },
+    {
+      "label": "b_center",
+      "x": -1950.0,
+      "y": 2200.0,
+      "z": 5.639,
+      "radius": 24,
+      "flags": 0
+    },
+    {
+      "label": "b_doorinside",
+      "x": -1450.0,
+      "y": 2200.0,
+      "z": 2.164,
+      "radius": 8,
+      "flags": 0
+    },
+    {
+      "label": "b_doorthroat",
+      "x": -1375,
+      "y": 2250,
+      "z": 2.836,
+      "radius": 0,
+      "flags": 0
+    },
+    {
+      "label": "b_dooroutside",
+      "x": -1250.0,
+      "y": 2200.0,
+      "z": 1.017,
+      "radius": 8,
+      "flags": 0
+    },
+    {
+      "label": "ctb_ramp1",
+      "x": -1050.0,
+      "y": 2200.0,
+      "z": -25.956,
+      "radius": 24,
+      "flags": 0
+    },
+    {
+      "label": "ctb_ramp2",
+      "x": -850.0,
+      "y": 2200.0,
+      "z": -93.38,
+      "radius": 24,
+      "flags": 0
+    },
+    {
+      "label": "ctb_low",
+      "x": -600.0,
+      "y": 2200.0,
+      "z": -123.871,
+      "radius": 24,
+      "flags": 0
+    },
+    {
+      "label": "ctb_mouth",
+      "x": -350.0,
+      "y": 2200.0,
+      "z": -127.377,
+      "radius": 24,
+      "flags": 0
+    },
+    {
+      "label": "ctb_ctlink",
+      "x": -100.0,
+      "y": 2200.0,
+      "z": -125.235,
+      "radius": 0,
+      "flags": 0
+    },
+    {
+      "label": "l_approach",
+      "x": -1550.0,
+      "y": 1200.0,
+      "z": 32.0,
+      "radius": 8,
+      "flags": 0
+    },
+    {
+      "label": "l_top",
+      "x": -1335,
+      "y": 1140,
+      "z": 32.031,
+      "radius": 8,
+      "flags": 0
+    },
+    {
+      "label": "l_step1",
+      "x": -1250.0,
+      "y": 1120.0,
+      "z": 32.031,
+      "radius": 0,
+      "flags": 0
+    },
+    {
+      "label": "l_step2",
+      "x": -1150.0,
+      "y": 1120.0,
+      "z": -15.968,
+      "radius": 0,
+      "flags": 0
+    },
+    {
+      "label": "l_step3",
+      "x": -1080.0,
+      "y": 1200.0,
+      "z": -79.968,
+      "radius": 0,
+      "flags": 0
+    },
+    {
+      "label": "l_bottom",
+      "x": -1080.0,
+      "y": 1320.0,
+      "z": -112.0,
+      "radius": 8,
+      "flags": 0
+    },
+    {
+      "label": "l_turn",
+      "x": -1050.0,
+      "y": 1450.0,
+      "z": -112.0,
+      "radius": 8,
+      "flags": 0
+    },
+    {
+      "label": "l_corr",
+      "x": -850.0,
+      "y": 1450.0,
+      "z": -112.0,
+      "radius": 8,
+      "flags": 0
+    },
+    {
+      "label": "l_exit",
+      "x": -620.0,
+      "y": 1450.0,
+      "z": -112.0,
+      "radius": 8,
+      "flags": 0
+    },
+    {
+      "label": "t_e1",
+      "x": -400.0,
+      "y": -800.0,
+      "z": 105.828,
+      "radius": 24,
+      "flags": 0
+    },
+    {
+      "label": "t_e2",
+      "x": -200.0,
+      "y": -800.0,
+      "z": 55.713,
+      "radius": 24,
+      "flags": 0
+    },
+    {
+      "label": "t_e3",
+      "x": 0.0,
+      "y": -800.0,
+      "z": 7.861,
+      "radius": 24,
+      "flags": 0
+    },
+    {
+      "label": "t_e4",
+      "x": 200.0,
+      "y": -800.0,
+      "z": 3.87,
+      "radius": 24,
+      "flags": 0
+    },
+    {
+      "label": "t_e5",
+      "x": 300.0,
+      "y": -650.0,
+      "z": 3.319,
+      "radius": 24,
+      "flags": 0
+    },
+    {
+      "label": "t_e6",
+      "x": 300.0,
+      "y": -400.0,
+      "z": 5.13,
+      "radius": 24,
+      "flags": 0
+    },
+    {
+      "label": "t_e7",
+      "x": 300.0,
+      "y": -100.0,
+      "z": 9.937,
+      "radius": 24,
+      "flags": 0
+    },
+    {
+      "label": "t_e8",
+      "x": 300.0,
+      "y": 250.0,
+      "z": 4.094,
+      "radius": 24,
+      "flags": 0
+    },
+    {
+      "label": "t_e9",
+      "x": 50.0,
+      "y": 400.0,
+      "z": 2.878,
+      "radius": 24,
+      "flags": 0
+    },
+    {
+      "label": "m_topjoin",
+      "x": -200.0,
+      "y": 500.0,
+      "z": 4.922,
+      "radius": 24,
+      "flags": 0
+    },
+    {
+      "label": "m_top",
+      "x": -400.0,
+      "y": 500.0,
+      "z": 5.499,
+      "radius": 24,
+      "flags": 0
+    },
+    {
+      "label": "m_start",
+      "x": -350.0,
+      "y": 800.0,
+      "z": -1.137,
+      "radius": 24,
+      "flags": 0
+    },
+    {
+      "label": "m_slope",
+      "x": -350.0,
+      "y": 1050.0,
+      "z": -60.881,
+      "radius": 24,
+      "flags": 0
+    },
+    {
+      "label": "m_bottom",
+      "x": -350.0,
+      "y": 1300.0,
+      "z": -120.012,
+      "radius": 24,
+      "flags": 0
+    },
+    {
+      "label": "m_lowerjoin",
+      "x": -440,
+      "y": 1480,
+      "z": -123.589,
+      "radius": 8,
+      "flags": 0
+    },
+    {
+      "label": "m_doors",
+      "x": -445,
+      "y": 1650,
+      "z": -126.623,
+      "radius": 8,
+      "flags": 0
+    },
+    {
+      "label": "m_ctside",
+      "x": -400.0,
+      "y": 1850.0,
+      "z": -126.913,
+      "radius": 24,
+      "flags": 0
+    },
+    {
+      "label": "m_ctjoin",
+      "x": -400.0,
+      "y": 2050.0,
+      "z": -127.133,
+      "radius": 24,
+      "flags": 0
+    },
+    {
+      "label": "t_w3b",
+      "x": -1950,
+      "y": -800,
+      "z": 131.321,
+      "radius": 24,
+      "flags": 0
+    },
+    {
+      "label": "t_w3c",
+      "x": -1950,
+      "y": -600,
+      "z": 125.448,
+      "radius": 24,
+      "flags": 0
+    },
+    {
+      "label": "m_boxsouth",
+      "x": -440,
+      "y": 1330,
+      "z": -124.595,
+      "radius": 8,
+      "flags": 0
+    },
+    {
+      "label": "m_doorapproach",
+      "x": -370,
+      "y": 1540,
+      "z": -125.086,
+      "radius": 0,
+      "flags": 0
+    },
+    {
+      "label": "m_doorfirst",
+      "x": -390,
+      "y": 1610,
+      "z": -125.971,
+      "radius": 0,
+      "flags": 0
+    },
+    {
+      "label": "m_doormiddle",
+      "x": -410,
+      "y": 1630,
+      "z": -126.348,
+      "radius": 0,
+      "flags": 0
+    },
+    {
+      "label": "m_doorclear",
+      "x": -445,
+      "y": 1730,
+      "z": -127.003,
+      "radius": 8,
+      "flags": 0
+    },
+    {
+      "label": "b_goaleast",
+      "x": -1450,
+      "y": 2700,
+      "z": 3.1,
+      "radius": 8,
+      "flags": 0
+    },
+    {
+      "label": "b_reareast",
+      "x": -1450,
+      "y": 2800,
+      "z": 5.226,
+      "radius": 8,
+      "flags": 0
+    },
+    {
+      "label": "b_rearcenter",
+      "x": -1600,
+      "y": 2850,
+      "z": 9.015,
+      "radius": 8,
+      "flags": 0
+    },
+    {
+      "label": "b_platformfoot",
+      "x": -1950,
+      "y": 2375,
+      "z": 1.334,
+      "radius": 8,
+      "flags": 0
+    },
+    {
+      "label": "b_platformstep",
+      "x": -1925,
+      "y": 2425,
+      "z": 32.031,
+      "radius": 8,
+      "flags": 0
+    },
+    {
+      "label": "b_platformsouth",
+      "x": -1950,
+      "y": 2500,
+      "z": 32,
+      "radius": 8,
+      "flags": 0
+    },
+    {
+      "label": "b_platformcenter",
+      "x": -1950,
+      "y": 2650,
+      "z": 32,
+      "radius": 8,
+      "flags": 0
+    },
+    {
+      "label": "ctb_boxsouthwest",
+      "x": -250,
+      "y": 2125,
+      "z": -127.666,
+      "radius": 8,
+      "flags": 0
+    },
+    {
+      "label": "ctb_boxsoutheast",
+      "x": -75,
+      "y": 2125,
+      "z": -124.864,
+      "radius": 0,
+      "flags": 0
+    },
+    {
+      "label": "ctb_boxeast",
+      "x": -75,
+      "y": 2200,
+      "z": -125.179,
+      "radius": 0,
+      "flags": 0
+    },
+    {
+      "label": "b_doorinnerturn",
+      "x": -1338,
+      "y": 2240,
+      "z": 2.129,
+      "radius": 0,
+      "flags": 0
+    },
+    {
+      "label": "b_doormiddle",
+      "x": -1312,
+      "y": 2225,
+      "z": 1.8,
+      "radius": 0,
+      "flags": 0
+    },
+    {
+      "label": "b_doorouterturn",
+      "x": -1300,
+      "y": 2175,
+      "z": 2.141,
+      "radius": 0,
+      "flags": 0
+    },
+    {
+      "label": "b_doorclear",
+      "x": -1250,
+      "y": 2175,
+      "z": 1.273,
+      "radius": 8,
+      "flags": 0
+    },
+    {
+      "label": "l_stepapproach",
+      "x": -1300,
+      "y": 1120,
+      "z": 32,
+      "radius": 0,
+      "flags": 0
+    },
+    {
+      "label": "C_south1",
+      "x": 100,
+      "y": 2180,
+      "z": -126.375,
+      "radius": 8,
+      "flags": 0
+    },
+    {
+      "label": "C_south",
+      "x": 350,
+      "y": 2180,
+      "z": -127.597,
+      "radius": 24,
+      "flags": 0
+    },
+    {
+      "label": "C_spawn",
+      "x": 350,
+      "y": 2290,
+      "z": -127.495,
+      "radius": 32,
+      "flags": 0
+    },
+    {
+      "label": "C_north",
+      "x": 350,
+      "y": 2450,
+      "z": -121.886,
+      "radius": 32,
+      "flags": 0
+    },
+    {
+      "label": "C_east1",
+      "x": 550,
+      "y": 2240,
+      "z": -106.658,
+      "radius": 32,
+      "flags": 0
+    },
+    {
+      "label": "C_east2",
+      "x": 800,
+      "y": 2240,
+      "z": -37.485,
+      "radius": 32,
+      "flags": 0
+    },
+    {
+      "label": "C_east3",
+      "x": 1050,
+      "y": 2240,
+      "z": 16.151,
+      "radius": 32,
+      "flags": 0
+    },
+    {
+      "label": "C_east4",
+      "x": 1200,
+      "y": 2240,
+      "z": 3.463,
+      "radius": 32,
+      "flags": 0
+    },
+    {
+      "label": "L_entry1",
+      "x": 480,
+      "y": 200,
+      "z": 5.457,
+      "radius": 24,
+      "flags": 0
+    },
+    {
+      "label": "L_entry2",
+      "x": 590,
+      "y": 225,
+      "z": 2.409,
+      "radius": 16,
+      "flags": 0
+    },
+    {
+      "label": "L_entry3",
+      "x": 610,
+      "y": 287,
+      "z": 4.748,
+      "radius": 12,
+      "flags": 0
+    },
+    {
+      "label": "L_gate0",
+      "x": 680,
+      "y": 350,
+      "z": 1.958,
+      "radius": 16,
+      "flags": 0
+    },
+    {
+      "label": "L_gate1",
+      "x": 650,
+      "y": 500,
+      "z": 2.037,
+      "radius": 16,
+      "flags": 0
+    },
+    {
+      "label": "L_gate2",
+      "x": 580,
+      "y": 625,
+      "z": 1.736,
+      "radius": 12,
+      "flags": 0
+    },
+    {
+      "label": "L_gate3",
+      "x": 625,
+      "y": 725,
+      "z": 2.497,
+      "radius": 8,
+      "flags": 0
+    },
+    {
+      "label": "L_gate4",
+      "x": 675,
+      "y": 750,
+      "z": 3.35,
+      "radius": 8,
+      "flags": 0
+    },
+    {
+      "label": "L_gate5",
+      "x": 680,
+      "y": 825,
+      "z": 6.344,
+      "radius": 12,
+      "flags": 0
+    },
+    {
+      "label": "L_gate6",
+      "x": 700,
+      "y": 925,
+      "z": 2.032,
+      "radius": 16,
+      "flags": 0
+    },
+    {
+      "label": "L_exit",
+      "x": 950,
+      "y": 1000,
+      "z": 1.671,
+      "radius": 32,
+      "flags": 0
+    },
+    {
+      "label": "L_corner1",
+      "x": 1200,
+      "y": 1100,
+      "z": 0.953,
+      "radius": 32,
+      "flags": 0
+    },
+    {
+      "label": "L_corner2",
+      "x": 1450,
+      "y": 1150,
+      "z": 0.664,
+      "radius": 32,
+      "flags": 0
+    },
+    {
+      "label": "L_long1",
+      "x": 1450,
+      "y": 1400,
+      "z": 0.976,
+      "radius": 40,
+      "flags": 0
+    },
+    {
+      "label": "L_long2",
+      "x": 1450,
+      "y": 1650,
+      "z": 1.792,
+      "radius": 40,
+      "flags": 0
+    },
+    {
+      "label": "L_long3",
+      "x": 1450,
+      "y": 1900,
+      "z": 4.912,
+      "radius": 40,
+      "flags": 0
+    },
+    {
+      "label": "L_long4",
+      "x": 1450,
+      "y": 2200,
+      "z": 8.491,
+      "radius": 32,
+      "flags": 0
+    },
+    {
+      "label": "L_car",
+      "x": 1600,
+      "y": 2200,
+      "z": 22.684,
+      "radius": 24,
+      "flags": 0
+    },
+    {
+      "label": "L_pitlip",
+      "x": 1550,
+      "y": 1000,
+      "z": 14.573,
+      "radius": 24,
+      "flags": 0
+    },
+    {
+      "label": "L_pit1",
+      "x": 1550,
+      "y": 750,
+      "z": 15.276,
+      "radius": 24,
+      "flags": 0
+    },
+    {
+      "label": "L_pit2",
+      "x": 1550,
+      "y": 500,
+      "z": -74.354,
+      "radius": 24,
+      "flags": 0
+    },
+    {
+      "label": "L_pit3",
+      "x": 1550,
+      "y": 280,
+      "z": -155.314,
+      "radius": 24,
+      "flags": 0
+    },
+    {
+      "label": "A_ramp1",
+      "x": 1450,
+      "y": 2400,
+      "z": 33.007,
+      "radius": 24,
+      "flags": 0
+    },
+    {
+      "label": "A_ramp2",
+      "x": 1450,
+      "y": 2600,
+      "z": 83.261,
+      "radius": 24,
+      "flags": 0
+    },
+    {
+      "label": "A_rampjoin",
+      "x": 1450,
+      "y": 2675,
+      "z": 102.071,
+      "radius": 16,
+      "flags": 0
+    },
+    {
+      "label": "A_entry",
+      "x": 1225,
+      "y": 2740,
+      "z": 96.0,
+      "radius": 4,
+      "flags": 134217728
+    },
+    {
+      "label": "A_backramp",
+      "x": 1450,
+      "y": 2800,
+      "z": 133.749,
+      "radius": 24,
+      "flags": 0
+    },
+    {
+      "label": "A_backeast",
+      "x": 1450,
+      "y": 2950,
+      "z": 129.892,
+      "radius": 24,
+      "flags": 0
+    },
+    {
+      "label": "A_back",
+      "x": 1250,
+      "y": 2950,
+      "z": 131.685,
+      "radius": 32,
+      "flags": 0
+    },
+    {
+      "label": "A_backwest",
+      "x": 1050,
+      "y": 2950,
+      "z": 140.156,
+      "radius": 24,
+      "flags": 0
+    },
+    {
+      "label": "A_sitenorth",
+      "x": 1100,
+      "y": 2650,
+      "z": 96.0,
+      "radius": 24,
+      "flags": 0
+    },
+    {
+      "label": "A_goal",
+      "x": 1100,
+      "y": 2450,
+      "z": 96.0,
+      "radius": 0,
+      "flags": 16
+    },
+    {
+      "label": "A_siteeast",
+      "x": 1210,
+      "y": 2450,
+      "z": 96.0,
+      "radius": 8,
+      "flags": 0
+    },
+    {
+      "label": "A_west",
+      "x": 850,
+      "y": 2550,
+      "z": 96.0,
+      "radius": 24,
+      "flags": 0
+    },
+    {
+      "label": "A_mid",
+      "x": 650,
+      "y": 2500,
+      "z": 96.0,
+      "radius": 24,
+      "flags": 0
+    },
+    {
+      "label": "A_bridge",
+      "x": 550,
+      "y": 2475,
+      "z": 96.0,
+      "radius": 12,
+      "flags": 0
+    },
+    {
+      "label": "A_northwest",
+      "x": 950,
+      "y": 2700,
+      "z": 96.0,
+      "radius": 16,
+      "flags": 0
+    },
+    {
+      "label": "A_northwest2",
+      "x": 750,
+      "y": 2700,
+      "z": 96.0,
+      "radius": 16,
+      "flags": 0
+    },
+    {
+      "label": "S_approach",
+      "x": -190,
+      "y": 650,
+      "z": 6.172,
+      "radius": 16,
+      "flags": 0
+    },
+    {
+      "label": "S_catnear",
+      "x": -190,
+      "y": 700,
+      "z": 1.991,
+      "radius": 8,
+      "flags": 0
+    },
+    {
+      "label": "S_cat1",
+      "x": -190,
+      "y": 800,
+      "z": 0.0,
+      "radius": 8,
+      "flags": 0
+    },
+    {
+      "label": "S_cat2",
+      "x": -190,
+      "y": 1000,
+      "z": 0.0,
+      "radius": 8,
+      "flags": 0
+    },
+    {
+      "label": "S_cat3",
+      "x": -190,
+      "y": 1200,
+      "z": 0.0,
+      "radius": 8,
+      "flags": 0
+    },
+    {
+      "label": "S_corner1",
+      "x": -175,
+      "y": 1400,
+      "z": 0.0,
+      "radius": 12,
+      "flags": 0
+    },
+    {
+      "label": "S_corner2",
+      "x": 0,
+      "y": 1450,
+      "z": 0.0,
+      "radius": 24,
+      "flags": 0
+    },
+    {
+      "label": "S_short1",
+      "x": 200,
+      "y": 1450,
+      "z": 0.0,
+      "radius": 24,
+      "flags": 0
+    },
+    {
+      "label": "S_short2",
+      "x": 350,
+      "y": 1550,
+      "z": 0.0,
+      "radius": 16,
+      "flags": 0
+    },
+    {
+      "label": "S_stairfoot",
+      "x": 325,
+      "y": 1635,
+      "z": 8.031,
+      "radius": 8,
+      "flags": 0
+    },
+    {
+      "label": "S_stairstep1",
+      "x": 325,
+      "y": 1680,
+      "z": 40.031,
+      "radius": 4,
+      "flags": 0
+    },
+    {
+      "label": "S_stairstep2",
+      "x": 325,
+      "y": 1730,
+      "z": 72.031,
+      "radius": 4,
+      "flags": 0
+    },
+    {
+      "label": "S_step4",
+      "x": 325,
+      "y": 1770,
+      "z": 96.031,
+      "radius": 4,
+      "flags": 0
+    },
+    {
+      "label": "S_stairtop",
+      "x": 325,
+      "y": 1785,
+      "z": 96.0,
+      "radius": 8,
+      "flags": 0
+    },
+    {
+      "label": "S_shortrun1",
+      "x": 350,
+      "y": 1900,
+      "z": 96.0,
+      "radius": 16,
+      "flags": 0
+    },
+    {
+      "label": "S_shortrun2",
+      "x": 350,
+      "y": 2100,
+      "z": 96.0,
+      "radius": 16,
+      "flags": 0
+    },
+    {
+      "label": "S_shortrun3",
+      "x": 350,
+      "y": 2300,
+      "z": 96.0,
+      "radius": 16,
+      "flags": 0
+    },
+    {
+      "label": "S_site",
+      "x": 350,
+      "y": 2500,
+      "z": 96.0,
+      "radius": 24,
+      "flags": 0
+    },
+    {
+      "label": "L_entrybend",
+      "x": 650,
+      "y": 287,
+      "z": 4.725,
+      "radius": 8,
+      "flags": 0
+    },
+    {
+      "label": "A_turn",
+      "x": 1350,
+      "y": 2740,
+      "z": 122.04,
+      "radius": 8,
+      "flags": 0
+    },
+    {
+      "label": "A_lip",
+      "x": 1285,
+      "y": 2740,
+      "z": 128.031,
+      "radius": 4,
+      "flags": 0
+    },
+    {
+      "label": "BW_ground_takeoff",
+      "x": -1525.0,
+      "y": 2622.0,
+      "z": 1.079,
+      "radius": 4,
+      "flags": 134217728
+    },
+    {
+      "label": "BW_stone_landing",
+      "x": -1480.2,
+      "y": 2635.9,
+      "z": 46.335,
+      "radius": 8,
+      "flags": 0
+    },
+    {
+      "label": "BW_inner_crate",
+      "x": -1442.0,
+      "y": 2622.0,
+      "z": 96.0,
+      "radius": 16,
+      "flags": 0
+    },
+    {
+      "label": "BW_high_crate",
+      "x": -1394.0,
+      "y": 2622.0,
+      "z": 112.0,
+      "radius": 0,
+      "flags": 0
+    },
+    {
+      "label": "BW_inner_turn",
+      "x": -1365.0,
+      "y": 2663,
+      "z": 117.387,
+      "radius": 4,
+      "flags": 134217728
+    },
+    {
+      "label": "BW_sill",
+      "x": -1320.0,
+      "y": 2663,
+      "z": 126.735,
+      "radius": 0,
+      "flags": 0
+    },
+    {
+      "label": "BW_outer_lip",
+      "x": -1260.0,
+      "y": 2665.0,
+      "z": 96.586,
+      "radius": 4,
+      "flags": 134217728
+    },
+    {
+      "label": "BW_outer_rock",
+      "x": -1230.0,
+      "y": 2650.0,
+      "z": 94.119,
+      "radius": 16,
+      "flags": 0
+    },
+    {
+      "label": "BW_outer_takeoff",
+      "x": -1185.0,
+      "y": 2655.0,
+      "z": 62.934,
+      "radius": 4,
+      "flags": 134217728
+    },
+    {
+      "label": "BW_out_approach2",
+      "x": -1160.0,
+      "y": 2575.0,
+      "z": 37.208,
+      "radius": 8,
+      "flags": 0
+    },
+    {
+      "label": "BW_out_approach1",
+      "x": -1180.0,
+      "y": 2475.0,
+      "z": 35.211,
+      "radius": 24,
+      "flags": 0
+    },
+    {
+      "label": "BW_out_approach0",
+      "x": -1180.0,
+      "y": 2350.0,
+      "z": 12.612,
+      "radius": 24,
+      "flags": 0
+    },
+    {
+      "label": "BW_out_approach_start",
+      "x": -1125.0,
+      "y": 2300.0,
+      "z": 1.65,
+      "radius": 24,
+      "flags": 0
+    },
+    {
+      "label": "BR_near",
+      "x": -1950.0,
+      "y": 2950.0,
+      "z": 32.0,
+      "radius": 24,
+      "flags": 0
+    },
+    {
+      "label": "BR_turn",
+      "x": -2030.0,
+      "y": 2980.0,
+      "z": 32.0,
+      "radius": 8,
+      "flags": 0
+    },
+    {
+      "label": "BR_deep",
+      "x": -2030.0,
+      "y": 3060.0,
+      "z": 32.0,
+      "radius": 8,
+      "flags": 0
+    },
+    {
+      "label": "BR_end",
+      "x": -2012.0,
+      "y": 3105.0,
+      "z": 32.0,
+      "radius": 0,
+      "flags": 0
+    },
+    {
+      "label": "BW_stone_takeoff",
+      "x": -1488,
+      "y": 2624,
+      "z": 46.335,
+      "radius": 4,
+      "flags": 134217728
+    },
+    {
+      "label": "BW_inner_align",
+      "x": -1410,
+      "y": 2663,
+      "z": 112.031,
+      "radius": 0,
+      "flags": 0
+    }
+  ],
+  "directed_edges": [
+    {
+      "from": "t_spawn",
+      "to": "t_w1",
+      "flags": 0
+    },
+    {
+      "from": "t_w1",
+      "to": "t_spawn",
+      "flags": 0
+    },
+    {
+      "from": "t_w1",
+      "to": "t_w2",
+      "flags": 0
+    },
+    {
+      "from": "t_w2",
+      "to": "t_w1",
+      "flags": 0
+    },
+    {
+      "from": "t_w2",
+      "to": "t_w3",
+      "flags": 0
+    },
+    {
+      "from": "t_w3",
+      "to": "t_w2",
+      "flags": 0
+    },
+    {
+      "from": "t_w4",
+      "to": "t_w5",
+      "flags": 0
+    },
+    {
+      "from": "t_w5",
+      "to": "t_w4",
+      "flags": 0
+    },
+    {
+      "from": "t_w5",
+      "to": "t_w6",
+      "flags": 0
+    },
+    {
+      "from": "t_w6",
+      "to": "t_w5",
+      "flags": 0
+    },
+    {
+      "from": "t_w6",
+      "to": "t_lobby",
+      "flags": 0
+    },
+    {
+      "from": "t_lobby",
+      "to": "t_w6",
+      "flags": 0
+    },
+    {
+      "from": "t_lobby",
+      "to": "u_foot",
+      "flags": 0
+    },
+    {
+      "from": "u_foot",
+      "to": "t_lobby",
+      "flags": 0
+    },
+    {
+      "from": "u_foot",
+      "to": "u_step",
+      "flags": 0
+    },
+    {
+      "from": "u_step",
+      "to": "u_foot",
+      "flags": 0
+    },
+    {
+      "from": "u_step",
+      "to": "u_entry",
+      "flags": 0
+    },
+    {
+      "from": "u_entry",
+      "to": "u_step",
+      "flags": 0
+    },
+    {
+      "from": "u_entry",
+      "to": "u_neck",
+      "flags": 0
+    },
+    {
+      "from": "u_neck",
+      "to": "u_entry",
+      "flags": 0
+    },
+    {
+      "from": "u_neck",
+      "to": "u_south",
+      "flags": 0
+    },
+    {
+      "from": "u_south",
+      "to": "u_neck",
+      "flags": 0
+    },
+    {
+      "from": "u_south",
+      "to": "u_hub",
+      "flags": 0
+    },
+    {
+      "from": "u_hub",
+      "to": "u_south",
+      "flags": 0
+    },
+    {
+      "from": "u_hub",
+      "to": "u_west",
+      "flags": 0
+    },
+    {
+      "from": "u_west",
+      "to": "u_hub",
+      "flags": 0
+    },
+    {
+      "from": "u_west",
+      "to": "u_turn",
+      "flags": 0
+    },
+    {
+      "from": "u_turn",
+      "to": "u_west",
+      "flags": 0
+    },
+    {
+      "from": "u_turn",
+      "to": "u_corr1",
+      "flags": 0
+    },
+    {
+      "from": "u_corr1",
+      "to": "u_turn",
+      "flags": 0
+    },
+    {
+      "from": "u_corr1",
+      "to": "u_corr2",
+      "flags": 0
+    },
+    {
+      "from": "u_corr2",
+      "to": "u_corr1",
+      "flags": 0
+    },
+    {
+      "from": "u_corr2",
+      "to": "u_corr3",
+      "flags": 0
+    },
+    {
+      "from": "u_corr3",
+      "to": "u_corr2",
+      "flags": 0
+    },
+    {
+      "from": "u_corr3",
+      "to": "u_exitstep",
+      "flags": 0
+    },
+    {
+      "from": "u_exitstep",
+      "to": "u_corr3",
+      "flags": 0
+    },
+    {
+      "from": "u_exitstep",
+      "to": "b_entry",
+      "flags": 0
+    },
+    {
+      "from": "b_entry",
+      "to": "u_exitstep",
+      "flags": 0
+    },
+    {
+      "from": "b_entry",
+      "to": "b_frontwest",
+      "flags": 0
+    },
+    {
+      "from": "b_frontwest",
+      "to": "b_entry",
+      "flags": 0
+    },
+    {
+      "from": "b_frontwest",
+      "to": "b_front",
+      "flags": 0
+    },
+    {
+      "from": "b_front",
+      "to": "b_frontwest",
+      "flags": 0
+    },
+    {
+      "from": "b_front",
+      "to": "b_eastfront",
+      "flags": 0
+    },
+    {
+      "from": "b_eastfront",
+      "to": "b_front",
+      "flags": 0
+    },
+    {
+      "from": "b_eastfront",
+      "to": "b_eastmid",
+      "flags": 0
+    },
+    {
+      "from": "b_eastmid",
+      "to": "b_eastfront",
+      "flags": 0
+    },
+    {
+      "from": "b_eastmid",
+      "to": "b_goalapproach",
+      "flags": 0
+    },
+    {
+      "from": "b_goalapproach",
+      "to": "b_eastmid",
+      "flags": 0
+    },
+    {
+      "from": "b_goalapproach",
+      "to": "b_goal",
+      "flags": 0
+    },
+    {
+      "from": "b_goal",
+      "to": "b_goalapproach",
+      "flags": 0
+    },
+    {
+      "from": "b_westmid",
+      "to": "b_center",
+      "flags": 0
+    },
+    {
+      "from": "b_center",
+      "to": "b_westmid",
+      "flags": 0
+    },
+    {
+      "from": "b_center",
+      "to": "b_frontwest",
+      "flags": 0
+    },
+    {
+      "from": "b_frontwest",
+      "to": "b_center",
+      "flags": 0
+    },
+    {
+      "from": "b_center",
+      "to": "b_eastmid",
+      "flags": 0
+    },
+    {
+      "from": "b_eastmid",
+      "to": "b_center",
+      "flags": 0
+    },
+    {
+      "from": "b_eastmid",
+      "to": "b_doorinside",
+      "flags": 0
+    },
+    {
+      "from": "b_doorinside",
+      "to": "b_eastmid",
+      "flags": 0
+    },
+    {
+      "from": "b_doorinside",
+      "to": "b_doorthroat",
+      "flags": 0
+    },
+    {
+      "from": "b_doorthroat",
+      "to": "b_doorinside",
+      "flags": 0
+    },
+    {
+      "from": "b_dooroutside",
+      "to": "ctb_ramp1",
+      "flags": 0
+    },
+    {
+      "from": "ctb_ramp1",
+      "to": "b_dooroutside",
+      "flags": 0
+    },
+    {
+      "from": "ctb_ramp1",
+      "to": "ctb_ramp2",
+      "flags": 0
+    },
+    {
+      "from": "ctb_ramp2",
+      "to": "ctb_ramp1",
+      "flags": 0
+    },
+    {
+      "from": "ctb_ramp2",
+      "to": "ctb_low",
+      "flags": 0
+    },
+    {
+      "from": "ctb_low",
+      "to": "ctb_ramp2",
+      "flags": 0
+    },
+    {
+      "from": "ctb_low",
+      "to": "ctb_mouth",
+      "flags": 0
+    },
+    {
+      "from": "ctb_mouth",
+      "to": "ctb_low",
+      "flags": 0
+    },
+    {
+      "from": "u_hub",
+      "to": "l_approach",
+      "flags": 0
+    },
+    {
+      "from": "l_approach",
+      "to": "u_hub",
+      "flags": 0
+    },
+    {
+      "from": "l_approach",
+      "to": "l_top",
+      "flags": 0
+    },
+    {
+      "from": "l_top",
+      "to": "l_approach",
+      "flags": 0
+    },
+    {
+      "from": "l_step1",
+      "to": "l_step2",
+      "flags": 0
+    },
+    {
+      "from": "l_step2",
+      "to": "l_step1",
+      "flags": 0
+    },
+    {
+      "from": "l_step2",
+      "to": "l_step3",
+      "flags": 0
+    },
+    {
+      "from": "l_step3",
+      "to": "l_step2",
+      "flags": 0
+    },
+    {
+      "from": "l_step3",
+      "to": "l_bottom",
+      "flags": 0
+    },
+    {
+      "from": "l_bottom",
+      "to": "l_step3",
+      "flags": 0
+    },
+    {
+      "from": "l_bottom",
+      "to": "l_turn",
+      "flags": 0
+    },
+    {
+      "from": "l_turn",
+      "to": "l_bottom",
+      "flags": 0
+    },
+    {
+      "from": "l_turn",
+      "to": "l_corr",
+      "flags": 0
+    },
+    {
+      "from": "l_corr",
+      "to": "l_turn",
+      "flags": 0
+    },
+    {
+      "from": "l_corr",
+      "to": "l_exit",
+      "flags": 0
+    },
+    {
+      "from": "l_exit",
+      "to": "l_corr",
+      "flags": 0
+    },
+    {
+      "from": "l_exit",
+      "to": "m_lowerjoin",
+      "flags": 0
+    },
+    {
+      "from": "m_lowerjoin",
+      "to": "l_exit",
+      "flags": 0
+    },
+    {
+      "from": "t_spawn",
+      "to": "t_e1",
+      "flags": 0
+    },
+    {
+      "from": "t_e1",
+      "to": "t_spawn",
+      "flags": 0
+    },
+    {
+      "from": "t_e1",
+      "to": "t_e2",
+      "flags": 0
+    },
+    {
+      "from": "t_e2",
+      "to": "t_e1",
+      "flags": 0
+    },
+    {
+      "from": "t_e2",
+      "to": "t_e3",
+      "flags": 0
+    },
+    {
+      "from": "t_e3",
+      "to": "t_e2",
+      "flags": 0
+    },
+    {
+      "from": "t_e3",
+      "to": "t_e4",
+      "flags": 0
+    },
+    {
+      "from": "t_e4",
+      "to": "t_e3",
+      "flags": 0
+    },
+    {
+      "from": "t_e4",
+      "to": "t_e5",
+      "flags": 0
+    },
+    {
+      "from": "t_e5",
+      "to": "t_e4",
+      "flags": 0
+    },
+    {
+      "from": "t_e5",
+      "to": "t_e6",
+      "flags": 0
+    },
+    {
+      "from": "t_e6",
+      "to": "t_e5",
+      "flags": 0
+    },
+    {
+      "from": "t_e6",
+      "to": "t_e7",
+      "flags": 0
+    },
+    {
+      "from": "t_e7",
+      "to": "t_e6",
+      "flags": 0
+    },
+    {
+      "from": "t_e7",
+      "to": "t_e8",
+      "flags": 0
+    },
+    {
+      "from": "t_e8",
+      "to": "t_e7",
+      "flags": 0
+    },
+    {
+      "from": "t_e8",
+      "to": "t_e9",
+      "flags": 0
+    },
+    {
+      "from": "t_e9",
+      "to": "t_e8",
+      "flags": 0
+    },
+    {
+      "from": "t_e9",
+      "to": "m_topjoin",
+      "flags": 0
+    },
+    {
+      "from": "m_topjoin",
+      "to": "t_e9",
+      "flags": 0
+    },
+    {
+      "from": "m_topjoin",
+      "to": "m_top",
+      "flags": 0
+    },
+    {
+      "from": "m_top",
+      "to": "m_topjoin",
+      "flags": 0
+    },
+    {
+      "from": "m_top",
+      "to": "m_start",
+      "flags": 0
+    },
+    {
+      "from": "m_start",
+      "to": "m_top",
+      "flags": 0
+    },
+    {
+      "from": "m_start",
+      "to": "m_slope",
+      "flags": 0
+    },
+    {
+      "from": "m_slope",
+      "to": "m_start",
+      "flags": 0
+    },
+    {
+      "from": "m_slope",
+      "to": "m_bottom",
+      "flags": 0
+    },
+    {
+      "from": "m_bottom",
+      "to": "m_slope",
+      "flags": 0
+    },
+    {
+      "from": "m_ctside",
+      "to": "m_ctjoin",
+      "flags": 0
+    },
+    {
+      "from": "m_ctjoin",
+      "to": "m_ctside",
+      "flags": 0
+    },
+    {
+      "from": "m_ctjoin",
+      "to": "ctb_mouth",
+      "flags": 0
+    },
+    {
+      "from": "ctb_mouth",
+      "to": "m_ctjoin",
+      "flags": 0
+    },
+    {
+      "from": "t_w3",
+      "to": "t_w3b",
+      "flags": 0
+    },
+    {
+      "from": "t_w3b",
+      "to": "t_w3",
+      "flags": 0
+    },
+    {
+      "from": "t_w3b",
+      "to": "t_w3c",
+      "flags": 0
+    },
+    {
+      "from": "t_w3c",
+      "to": "t_w3b",
+      "flags": 0
+    },
+    {
+      "from": "t_w3c",
+      "to": "t_w4",
+      "flags": 0
+    },
+    {
+      "from": "t_w4",
+      "to": "t_w3c",
+      "flags": 0
+    },
+    {
+      "from": "m_bottom",
+      "to": "m_boxsouth",
+      "flags": 0
+    },
+    {
+      "from": "m_boxsouth",
+      "to": "m_bottom",
+      "flags": 0
+    },
+    {
+      "from": "m_boxsouth",
+      "to": "m_lowerjoin",
+      "flags": 0
+    },
+    {
+      "from": "m_lowerjoin",
+      "to": "m_boxsouth",
+      "flags": 0
+    },
+    {
+      "from": "m_lowerjoin",
+      "to": "m_doorapproach",
+      "flags": 0
+    },
+    {
+      "from": "m_doorapproach",
+      "to": "m_lowerjoin",
+      "flags": 0
+    },
+    {
+      "from": "m_doorapproach",
+      "to": "m_doorfirst",
+      "flags": 0
+    },
+    {
+      "from": "m_doorfirst",
+      "to": "m_doorapproach",
+      "flags": 0
+    },
+    {
+      "from": "m_doorfirst",
+      "to": "m_doormiddle",
+      "flags": 0
+    },
+    {
+      "from": "m_doormiddle",
+      "to": "m_doorfirst",
+      "flags": 0
+    },
+    {
+      "from": "m_doormiddle",
+      "to": "m_doors",
+      "flags": 0
+    },
+    {
+      "from": "m_doors",
+      "to": "m_doormiddle",
+      "flags": 0
+    },
+    {
+      "from": "m_doors",
+      "to": "m_doorclear",
+      "flags": 0
+    },
+    {
+      "from": "m_doorclear",
+      "to": "m_doors",
+      "flags": 0
+    },
+    {
+      "from": "m_doorclear",
+      "to": "m_ctside",
+      "flags": 0
+    },
+    {
+      "from": "m_ctside",
+      "to": "m_doorclear",
+      "flags": 0
+    },
+    {
+      "from": "b_goal",
+      "to": "b_goaleast",
+      "flags": 0
+    },
+    {
+      "from": "b_goaleast",
+      "to": "b_goal",
+      "flags": 0
+    },
+    {
+      "from": "b_goaleast",
+      "to": "b_reareast",
+      "flags": 0
+    },
+    {
+      "from": "b_reareast",
+      "to": "b_goaleast",
+      "flags": 0
+    },
+    {
+      "from": "b_reareast",
+      "to": "b_rearcenter",
+      "flags": 0
+    },
+    {
+      "from": "b_rearcenter",
+      "to": "b_reareast",
+      "flags": 0
+    },
+    {
+      "from": "b_rearcenter",
+      "to": "b_back",
+      "flags": 0
+    },
+    {
+      "from": "b_back",
+      "to": "b_rearcenter",
+      "flags": 0
+    },
+    {
+      "from": "b_center",
+      "to": "b_platformfoot",
+      "flags": 0
+    },
+    {
+      "from": "b_platformfoot",
+      "to": "b_center",
+      "flags": 0
+    },
+    {
+      "from": "b_platformfoot",
+      "to": "b_platformstep",
+      "flags": 0
+    },
+    {
+      "from": "b_platformstep",
+      "to": "b_platformfoot",
+      "flags": 0
+    },
+    {
+      "from": "b_platformstep",
+      "to": "b_platformsouth",
+      "flags": 0
+    },
+    {
+      "from": "b_platformsouth",
+      "to": "b_platformstep",
+      "flags": 0
+    },
+    {
+      "from": "b_platformsouth",
+      "to": "b_platformcenter",
+      "flags": 0
+    },
+    {
+      "from": "b_platformcenter",
+      "to": "b_platformsouth",
+      "flags": 0
+    },
+    {
+      "from": "b_platformcenter",
+      "to": "b_backwest",
+      "flags": 0
+    },
+    {
+      "from": "b_backwest",
+      "to": "b_platformcenter",
+      "flags": 0
+    },
+    {
+      "from": "b_platformcenter",
+      "to": "b_tunnelwall",
+      "flags": 0
+    },
+    {
+      "from": "b_tunnelwall",
+      "to": "b_platformcenter",
+      "flags": 0
+    },
+    {
+      "from": "ctb_mouth",
+      "to": "ctb_boxsouthwest",
+      "flags": 0
+    },
+    {
+      "from": "ctb_boxsouthwest",
+      "to": "ctb_mouth",
+      "flags": 0
+    },
+    {
+      "from": "ctb_boxsouthwest",
+      "to": "ctb_boxsoutheast",
+      "flags": 0
+    },
+    {
+      "from": "ctb_boxsoutheast",
+      "to": "ctb_boxsouthwest",
+      "flags": 0
+    },
+    {
+      "from": "ctb_boxsoutheast",
+      "to": "ctb_boxeast",
+      "flags": 0
+    },
+    {
+      "from": "ctb_boxeast",
+      "to": "ctb_boxsoutheast",
+      "flags": 0
+    },
+    {
+      "from": "ctb_boxeast",
+      "to": "ctb_ctlink",
+      "flags": 0
+    },
+    {
+      "from": "ctb_ctlink",
+      "to": "ctb_boxeast",
+      "flags": 0
+    },
+    {
+      "from": "b_doorthroat",
+      "to": "b_doorinnerturn",
+      "flags": 0
+    },
+    {
+      "from": "b_doorinnerturn",
+      "to": "b_doorthroat",
+      "flags": 0
+    },
+    {
+      "from": "b_doorinnerturn",
+      "to": "b_doormiddle",
+      "flags": 0
+    },
+    {
+      "from": "b_doormiddle",
+      "to": "b_doorinnerturn",
+      "flags": 0
+    },
+    {
+      "from": "b_doormiddle",
+      "to": "b_doorouterturn",
+      "flags": 0
+    },
+    {
+      "from": "b_doorouterturn",
+      "to": "b_doormiddle",
+      "flags": 0
+    },
+    {
+      "from": "b_doorouterturn",
+      "to": "b_doorclear",
+      "flags": 0
+    },
+    {
+      "from": "b_doorclear",
+      "to": "b_doorouterturn",
+      "flags": 0
+    },
+    {
+      "from": "b_doorclear",
+      "to": "b_dooroutside",
+      "flags": 0
+    },
+    {
+      "from": "b_dooroutside",
+      "to": "b_doorclear",
+      "flags": 0
+    },
+    {
+      "from": "l_top",
+      "to": "l_stepapproach",
+      "flags": 0
+    },
+    {
+      "from": "l_stepapproach",
+      "to": "l_top",
+      "flags": 0
+    },
+    {
+      "from": "l_stepapproach",
+      "to": "l_step1",
+      "flags": 0
+    },
+    {
+      "from": "l_step1",
+      "to": "l_stepapproach",
+      "flags": 0
+    },
+    {
+      "from": "ctb_ctlink",
+      "to": "C_south1",
+      "flags": 0
+    },
+    {
+      "from": "C_south1",
+      "to": "ctb_ctlink",
+      "flags": 0
+    },
+    {
+      "from": "C_south1",
+      "to": "C_south",
+      "flags": 0
+    },
+    {
+      "from": "C_south",
+      "to": "C_south1",
+      "flags": 0
+    },
+    {
+      "from": "C_south",
+      "to": "C_spawn",
+      "flags": 0
+    },
+    {
+      "from": "C_spawn",
+      "to": "C_south",
+      "flags": 0
+    },
+    {
+      "from": "C_spawn",
+      "to": "C_north",
+      "flags": 0
+    },
+    {
+      "from": "C_north",
+      "to": "C_spawn",
+      "flags": 0
+    },
+    {
+      "from": "C_spawn",
+      "to": "C_east1",
+      "flags": 0
+    },
+    {
+      "from": "C_east1",
+      "to": "C_spawn",
+      "flags": 0
+    },
+    {
+      "from": "C_east1",
+      "to": "C_east2",
+      "flags": 0
+    },
+    {
+      "from": "C_east2",
+      "to": "C_east1",
+      "flags": 0
+    },
+    {
+      "from": "C_east2",
+      "to": "C_east3",
+      "flags": 0
+    },
+    {
+      "from": "C_east3",
+      "to": "C_east2",
+      "flags": 0
+    },
+    {
+      "from": "C_east3",
+      "to": "C_east4",
+      "flags": 0
+    },
+    {
+      "from": "C_east4",
+      "to": "C_east3",
+      "flags": 0
+    },
+    {
+      "from": "C_east4",
+      "to": "L_long4",
+      "flags": 0
+    },
+    {
+      "from": "L_long4",
+      "to": "C_east4",
+      "flags": 0
+    },
+    {
+      "from": "t_e8",
+      "to": "L_entry1",
+      "flags": 0
+    },
+    {
+      "from": "L_entry1",
+      "to": "t_e8",
+      "flags": 0
+    },
+    {
+      "from": "L_entry1",
+      "to": "L_entry2",
+      "flags": 0
+    },
+    {
+      "from": "L_entry2",
+      "to": "L_entry1",
+      "flags": 0
+    },
+    {
+      "from": "L_entry2",
+      "to": "L_entry3",
+      "flags": 0
+    },
+    {
+      "from": "L_entry3",
+      "to": "L_entry2",
+      "flags": 0
+    },
+    {
+      "from": "L_gate0",
+      "to": "L_gate1",
+      "flags": 0
+    },
+    {
+      "from": "L_gate1",
+      "to": "L_gate0",
+      "flags": 0
+    },
+    {
+      "from": "L_gate1",
+      "to": "L_gate2",
+      "flags": 0
+    },
+    {
+      "from": "L_gate2",
+      "to": "L_gate1",
+      "flags": 0
+    },
+    {
+      "from": "L_gate2",
+      "to": "L_gate3",
+      "flags": 0
+    },
+    {
+      "from": "L_gate3",
+      "to": "L_gate2",
+      "flags": 0
+    },
+    {
+      "from": "L_gate3",
+      "to": "L_gate4",
+      "flags": 0
+    },
+    {
+      "from": "L_gate4",
+      "to": "L_gate3",
+      "flags": 0
+    },
+    {
+      "from": "L_gate4",
+      "to": "L_gate5",
+      "flags": 0
+    },
+    {
+      "from": "L_gate5",
+      "to": "L_gate4",
+      "flags": 0
+    },
+    {
+      "from": "L_gate5",
+      "to": "L_gate6",
+      "flags": 0
+    },
+    {
+      "from": "L_gate6",
+      "to": "L_gate5",
+      "flags": 0
+    },
+    {
+      "from": "L_gate6",
+      "to": "L_exit",
+      "flags": 0
+    },
+    {
+      "from": "L_exit",
+      "to": "L_gate6",
+      "flags": 0
+    },
+    {
+      "from": "L_exit",
+      "to": "L_corner1",
+      "flags": 0
+    },
+    {
+      "from": "L_corner1",
+      "to": "L_exit",
+      "flags": 0
+    },
+    {
+      "from": "L_corner1",
+      "to": "L_corner2",
+      "flags": 0
+    },
+    {
+      "from": "L_corner2",
+      "to": "L_corner1",
+      "flags": 0
+    },
+    {
+      "from": "L_corner2",
+      "to": "L_long1",
+      "flags": 0
+    },
+    {
+      "from": "L_long1",
+      "to": "L_corner2",
+      "flags": 0
+    },
+    {
+      "from": "L_long1",
+      "to": "L_long2",
+      "flags": 0
+    },
+    {
+      "from": "L_long2",
+      "to": "L_long1",
+      "flags": 0
+    },
+    {
+      "from": "L_long2",
+      "to": "L_long3",
+      "flags": 0
+    },
+    {
+      "from": "L_long3",
+      "to": "L_long2",
+      "flags": 0
+    },
+    {
+      "from": "L_long3",
+      "to": "L_long4",
+      "flags": 0
+    },
+    {
+      "from": "L_long4",
+      "to": "L_long3",
+      "flags": 0
+    },
+    {
+      "from": "L_long4",
+      "to": "L_car",
+      "flags": 0
+    },
+    {
+      "from": "L_car",
+      "to": "L_long4",
+      "flags": 0
+    },
+    {
+      "from": "L_corner2",
+      "to": "L_pitlip",
+      "flags": 0
+    },
+    {
+      "from": "L_pitlip",
+      "to": "L_corner2",
+      "flags": 0
+    },
+    {
+      "from": "L_pitlip",
+      "to": "L_pit1",
+      "flags": 0
+    },
+    {
+      "from": "L_pit1",
+      "to": "L_pitlip",
+      "flags": 0
+    },
+    {
+      "from": "L_pit1",
+      "to": "L_pit2",
+      "flags": 0
+    },
+    {
+      "from": "L_pit2",
+      "to": "L_pit1",
+      "flags": 0
+    },
+    {
+      "from": "L_pit2",
+      "to": "L_pit3",
+      "flags": 0
+    },
+    {
+      "from": "L_pit3",
+      "to": "L_pit2",
+      "flags": 0
+    },
+    {
+      "from": "L_long4",
+      "to": "A_ramp1",
+      "flags": 0
+    },
+    {
+      "from": "A_ramp1",
+      "to": "L_long4",
+      "flags": 0
+    },
+    {
+      "from": "A_ramp1",
+      "to": "A_ramp2",
+      "flags": 0
+    },
+    {
+      "from": "A_ramp2",
+      "to": "A_ramp1",
+      "flags": 0
+    },
+    {
+      "from": "A_ramp2",
+      "to": "A_rampjoin",
+      "flags": 0
+    },
+    {
+      "from": "A_rampjoin",
+      "to": "A_ramp2",
+      "flags": 0
+    },
+    {
+      "from": "A_rampjoin",
+      "to": "A_backramp",
+      "flags": 0
+    },
+    {
+      "from": "A_backramp",
+      "to": "A_rampjoin",
+      "flags": 0
+    },
+    {
+      "from": "A_backramp",
+      "to": "A_backeast",
+      "flags": 0
+    },
+    {
+      "from": "A_backeast",
+      "to": "A_backramp",
+      "flags": 0
+    },
+    {
+      "from": "A_backeast",
+      "to": "A_back",
+      "flags": 0
+    },
+    {
+      "from": "A_back",
+      "to": "A_backeast",
+      "flags": 0
+    },
+    {
+      "from": "A_back",
+      "to": "A_backwest",
+      "flags": 0
+    },
+    {
+      "from": "A_backwest",
+      "to": "A_back",
+      "flags": 0
+    },
+    {
+      "from": "A_entry",
+      "to": "A_sitenorth",
+      "flags": 0
+    },
+    {
+      "from": "A_sitenorth",
+      "to": "A_entry",
+      "flags": 0
+    },
+    {
+      "from": "A_sitenorth",
+      "to": "A_goal",
+      "flags": 0
+    },
+    {
+      "from": "A_goal",
+      "to": "A_sitenorth",
+      "flags": 0
+    },
+    {
+      "from": "A_goal",
+      "to": "A_siteeast",
+      "flags": 0
+    },
+    {
+      "from": "A_siteeast",
+      "to": "A_goal",
+      "flags": 0
+    },
+    {
+      "from": "A_sitenorth",
+      "to": "A_west",
+      "flags": 0
+    },
+    {
+      "from": "A_west",
+      "to": "A_sitenorth",
+      "flags": 0
+    },
+    {
+      "from": "A_sitenorth",
+      "to": "A_northwest",
+      "flags": 0
+    },
+    {
+      "from": "A_northwest",
+      "to": "A_sitenorth",
+      "flags": 0
+    },
+    {
+      "from": "A_west",
+      "to": "A_mid",
+      "flags": 0
+    },
+    {
+      "from": "A_mid",
+      "to": "A_west",
+      "flags": 0
+    },
+    {
+      "from": "A_mid",
+      "to": "A_bridge",
+      "flags": 0
+    },
+    {
+      "from": "A_bridge",
+      "to": "A_mid",
+      "flags": 0
+    },
+    {
+      "from": "A_mid",
+      "to": "A_northwest2",
+      "flags": 0
+    },
+    {
+      "from": "A_northwest2",
+      "to": "A_mid",
+      "flags": 0
+    },
+    {
+      "from": "A_bridge",
+      "to": "S_site",
+      "flags": 0
+    },
+    {
+      "from": "S_site",
+      "to": "A_bridge",
+      "flags": 0
+    },
+    {
+      "from": "m_topjoin",
+      "to": "S_approach",
+      "flags": 0
+    },
+    {
+      "from": "S_approach",
+      "to": "m_topjoin",
+      "flags": 0
+    },
+    {
+      "from": "S_approach",
+      "to": "S_catnear",
+      "flags": 0
+    },
+    {
+      "from": "S_catnear",
+      "to": "S_approach",
+      "flags": 0
+    },
+    {
+      "from": "S_catnear",
+      "to": "S_cat1",
+      "flags": 0
+    },
+    {
+      "from": "S_cat1",
+      "to": "S_catnear",
+      "flags": 0
+    },
+    {
+      "from": "S_cat1",
+      "to": "S_cat2",
+      "flags": 0
+    },
+    {
+      "from": "S_cat2",
+      "to": "S_cat1",
+      "flags": 0
+    },
+    {
+      "from": "S_cat2",
+      "to": "S_cat3",
+      "flags": 0
+    },
+    {
+      "from": "S_cat3",
+      "to": "S_cat2",
+      "flags": 0
+    },
+    {
+      "from": "S_cat3",
+      "to": "S_corner1",
+      "flags": 0
+    },
+    {
+      "from": "S_corner1",
+      "to": "S_cat3",
+      "flags": 0
+    },
+    {
+      "from": "S_corner1",
+      "to": "S_corner2",
+      "flags": 0
+    },
+    {
+      "from": "S_corner2",
+      "to": "S_corner1",
+      "flags": 0
+    },
+    {
+      "from": "S_corner2",
+      "to": "S_short1",
+      "flags": 0
+    },
+    {
+      "from": "S_short1",
+      "to": "S_corner2",
+      "flags": 0
+    },
+    {
+      "from": "S_short1",
+      "to": "S_short2",
+      "flags": 0
+    },
+    {
+      "from": "S_short2",
+      "to": "S_short1",
+      "flags": 0
+    },
+    {
+      "from": "S_short2",
+      "to": "S_stairfoot",
+      "flags": 0
+    },
+    {
+      "from": "S_stairfoot",
+      "to": "S_short2",
+      "flags": 0
+    },
+    {
+      "from": "S_stairfoot",
+      "to": "S_stairstep1",
+      "flags": 0
+    },
+    {
+      "from": "S_stairstep1",
+      "to": "S_stairfoot",
+      "flags": 0
+    },
+    {
+      "from": "S_stairstep1",
+      "to": "S_stairstep2",
+      "flags": 0
+    },
+    {
+      "from": "S_stairstep2",
+      "to": "S_stairstep1",
+      "flags": 0
+    },
+    {
+      "from": "S_stairstep2",
+      "to": "S_step4",
+      "flags": 0
+    },
+    {
+      "from": "S_step4",
+      "to": "S_stairstep2",
+      "flags": 0
+    },
+    {
+      "from": "S_step4",
+      "to": "S_stairtop",
+      "flags": 0
+    },
+    {
+      "from": "S_stairtop",
+      "to": "S_step4",
+      "flags": 0
+    },
+    {
+      "from": "S_stairtop",
+      "to": "S_shortrun1",
+      "flags": 0
+    },
+    {
+      "from": "S_shortrun1",
+      "to": "S_stairtop",
+      "flags": 0
+    },
+    {
+      "from": "S_shortrun1",
+      "to": "S_shortrun2",
+      "flags": 0
+    },
+    {
+      "from": "S_shortrun2",
+      "to": "S_shortrun1",
+      "flags": 0
+    },
+    {
+      "from": "S_shortrun2",
+      "to": "S_shortrun3",
+      "flags": 0
+    },
+    {
+      "from": "S_shortrun3",
+      "to": "S_shortrun2",
+      "flags": 0
+    },
+    {
+      "from": "S_shortrun3",
+      "to": "S_site",
+      "flags": 0
+    },
+    {
+      "from": "S_site",
+      "to": "S_shortrun3",
+      "flags": 0
+    },
+    {
+      "from": "L_entry3",
+      "to": "L_entrybend",
+      "flags": 0
+    },
+    {
+      "from": "L_entrybend",
+      "to": "L_entry3",
+      "flags": 0
+    },
+    {
+      "from": "L_entrybend",
+      "to": "L_gate0",
+      "flags": 0
+    },
+    {
+      "from": "L_gate0",
+      "to": "L_entrybend",
+      "flags": 0
+    },
+    {
+      "from": "A_rampjoin",
+      "to": "A_turn",
+      "flags": 0
+    },
+    {
+      "from": "A_turn",
+      "to": "A_rampjoin",
+      "flags": 0
+    },
+    {
+      "from": "A_turn",
+      "to": "A_lip",
+      "flags": 0
+    },
+    {
+      "from": "A_lip",
+      "to": "A_turn",
+      "flags": 0
+    },
+    {
+      "from": "A_lip",
+      "to": "A_entry",
+      "flags": 0
+    },
+    {
+      "from": "A_entry",
+      "to": "A_lip",
+      "flags": 1
+    },
+    {
+      "from": "b_goalapproach",
+      "to": "BW_ground_takeoff",
+      "flags": 0
+    },
+    {
+      "from": "BW_ground_takeoff",
+      "to": "b_goalapproach",
+      "flags": 0
+    },
+    {
+      "from": "ctb_ramp1",
+      "to": "BW_out_approach_start",
+      "flags": 0
+    },
+    {
+      "from": "BW_out_approach_start",
+      "to": "ctb_ramp1",
+      "flags": 0
+    },
+    {
+      "from": "BW_out_approach_start",
+      "to": "BW_out_approach0",
+      "flags": 0
+    },
+    {
+      "from": "BW_out_approach0",
+      "to": "BW_out_approach_start",
+      "flags": 0
+    },
+    {
+      "from": "BW_out_approach0",
+      "to": "BW_out_approach1",
+      "flags": 0
+    },
+    {
+      "from": "BW_out_approach1",
+      "to": "BW_out_approach0",
+      "flags": 0
+    },
+    {
+      "from": "BW_out_approach1",
+      "to": "BW_out_approach2",
+      "flags": 0
+    },
+    {
+      "from": "BW_out_approach2",
+      "to": "BW_out_approach1",
+      "flags": 0
+    },
+    {
+      "from": "BW_out_approach2",
+      "to": "BW_outer_takeoff",
+      "flags": 0
+    },
+    {
+      "from": "BW_outer_takeoff",
+      "to": "BW_out_approach2",
+      "flags": 0
+    },
+    {
+      "from": "b_backwest",
+      "to": "BR_near",
+      "flags": 0
+    },
+    {
+      "from": "BR_near",
+      "to": "b_backwest",
+      "flags": 0
+    },
+    {
+      "from": "BR_near",
+      "to": "BR_turn",
+      "flags": 0
+    },
+    {
+      "from": "BR_turn",
+      "to": "BR_near",
+      "flags": 0
+    },
+    {
+      "from": "BR_turn",
+      "to": "BR_deep",
+      "flags": 0
+    },
+    {
+      "from": "BR_deep",
+      "to": "BR_turn",
+      "flags": 0
+    },
+    {
+      "from": "BR_deep",
+      "to": "BR_end",
+      "flags": 0
+    },
+    {
+      "from": "BR_end",
+      "to": "BR_deep",
+      "flags": 0
+    },
+    {
+      "from": "BW_ground_takeoff",
+      "to": "BW_stone_landing",
+      "flags": 1
+    },
+    {
+      "from": "BW_stone_landing",
+      "to": "BW_ground_takeoff",
+      "flags": 0
+    },
+    {
+      "from": "BW_inner_crate",
+      "to": "BW_stone_landing",
+      "flags": 0
+    },
+    {
+      "from": "BW_inner_crate",
+      "to": "BW_high_crate",
+      "flags": 0
+    },
+    {
+      "from": "BW_high_crate",
+      "to": "BW_inner_crate",
+      "flags": 0
+    },
+    {
+      "from": "BW_inner_turn",
+      "to": "BW_sill",
+      "flags": 1
+    },
+    {
+      "from": "BW_sill",
+      "to": "BW_inner_turn",
+      "flags": 0
+    },
+    {
+      "from": "BW_sill",
+      "to": "BW_outer_lip",
+      "flags": 0
+    },
+    {
+      "from": "BW_outer_lip",
+      "to": "BW_sill",
+      "flags": 1
+    },
+    {
+      "from": "BW_outer_lip",
+      "to": "BW_outer_rock",
+      "flags": 0
+    },
+    {
+      "from": "BW_outer_rock",
+      "to": "BW_outer_lip",
+      "flags": 0
+    },
+    {
+      "from": "BW_outer_rock",
+      "to": "BW_outer_takeoff",
+      "flags": 0
+    },
+    {
+      "from": "BW_outer_takeoff",
+      "to": "BW_outer_rock",
+      "flags": 1
+    },
+    {
+      "from": "BW_stone_landing",
+      "to": "BW_stone_takeoff",
+      "flags": 0
+    },
+    {
+      "from": "BW_stone_takeoff",
+      "to": "BW_stone_landing",
+      "flags": 0
+    },
+    {
+      "from": "BW_stone_takeoff",
+      "to": "BW_inner_crate",
+      "flags": 1
+    },
+    {
+      "from": "BW_high_crate",
+      "to": "BW_inner_align",
+      "flags": 0
+    },
+    {
+      "from": "BW_inner_align",
+      "to": "BW_high_crate",
+      "flags": 0
+    },
+    {
+      "from": "BW_inner_align",
+      "to": "BW_inner_turn",
+      "flags": 0
+    },
+    {
+      "from": "BW_inner_turn",
+      "to": "BW_inner_align",
+      "flags": 0
+    }
+  ]
+}
