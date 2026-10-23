@@ -44,8 +44,10 @@ IVDebugOverlay *debugoverlay = NULL;
 static CAgPBManager g_Bots;
 static IGameEventManager2 *g_GameEvents = NULL;
 static bool g_RoundFrozen = false;
+static unsigned int g_AgentMapSerial = 1;
 
 bool AgPB_IsRoundFrozen() { return g_RoundFrozen; }
+unsigned int AgPB_MapSerial() { return g_AgentMapSerial; }
 
 class CAgPBRoundListener : public IGameEventListener2
 {
@@ -58,13 +60,13 @@ public:
 		{
 			g_RoundFrozen = true;
 			BotObjectives().OnRoundStart();
-			g_Bots.ResetAllTasks();
+			g_Bots.ResetAllTasks( "round-start" );
 		}
 		else if ( Q_strcmp( name, "round_freeze_end" ) == 0 ) g_RoundFrozen = false;
 		else if ( Q_strcmp( name, "round_end" ) == 0 )
 		{
 			g_RoundFrozen = true;
-			g_Bots.ResetAllTasks();
+			g_Bots.ResetAllTasks( "round-end" );
 		}
 	}
 };
@@ -1278,7 +1280,7 @@ static void Cmd_BotStop( const CCommand &args )
 		for ( int i = 0; i < g_Bots.Count(); ++i )
 		{
 			if ( CAgPB *pBot = g_Bots.Get( i ) )
-				pBot->SetRoam( false );     // 同时停漫游 + 清路线
+				pBot->StopRoute();
 		}
 
 		META_CONPRINTF( "[AgPB] all routes stopped\n" );
@@ -1293,7 +1295,7 @@ static void Cmd_BotStop( const CCommand &args )
 		return;
 	}
 
-	pBot->SetRoam( false );             // 同时停漫游 + 清路线
+	pBot->StopRoute();
 	META_CONPRINTF( "[AgPB] %s: route stopped (roam off)\n", pBot->Name() );
 }
 
@@ -1388,7 +1390,7 @@ static void Cmd_BotObstacle( const CCommand &args )
 		return;
 	}
 	CAgPB *bot = g_Bots.Get( V_atoi( args.Arg( 1 ) ) );
-	if ( bot == NULL || bot->PlayerInfo() == NULL || bot->PlayerInfo()->IsDead() )
+	if ( bot == NULL || !bot->IsAlive() )
 	{
 		META_CONPRINTF( "[AgPB] obstacle probe needs a valid, living bot\n" );
 		return;
@@ -1436,6 +1438,186 @@ static void Cmd_BotTasks( const CCommand &args )
 		if ( all || i == V_atoi( args.Arg( 1 ) ) ) g_Bots.Get( i )->ReportTasks();
 }
 
+static void Cmd_BotInfo( const CCommand &args )
+{
+	if ( args.ArgC() > 2 )
+	{
+		META_CONPRINTF( "[AgPB] usage: agpb_bot_info [idx|all]\n" );
+		return;
+	}
+	const bool all = args.ArgC() < 2 || Q_stricmp( args.Arg( 1 ), "all" ) == 0;
+	if ( !all )
+	{
+		CAgPB *bot = g_Bots.Get( V_atoi( args.Arg( 1 ) ) );
+		if ( bot == NULL )
+		{
+			META_CONPRINTF( "[AgPB] invalid list index '%s' (see agpb_list)\n", args.Arg( 1 ) );
+			return;
+		}
+		bot->ReportLifecycle();
+		return;
+	}
+	for ( int i = 0; i < g_Bots.Count(); ++i ) g_Bots.Get( i )->ReportLifecycle();
+	if ( g_Bots.Count() == 0 ) META_CONPRINTF( "[AgPB] agpb_bot_info: no bots\n" );
+}
+
+static void Cmd_BotClearance( const CCommand &args )
+{
+	if ( args.ArgC() > 2 )
+	{
+		META_CONPRINTF( "[AgPB] usage: agpb_bot_clearance [idx|all]\n" );
+		return;
+	}
+	const bool all = args.ArgC() < 2 || Q_stricmp( args.Arg( 1 ), "all" ) == 0;
+	if ( !all )
+	{
+		CAgPB *bot = g_Bots.Get( V_atoi( args.Arg( 1 ) ) );
+		if ( bot == NULL )
+		{
+			META_CONPRINTF( "[AgPB] invalid list index '%s' (see agpb_list)\n", args.Arg( 1 ) );
+			return;
+		}
+		bot->ReportClearance();
+		return;
+	}
+	for ( int i = 0; i < g_Bots.Count(); ++i ) g_Bots.Get( i )->ReportClearance();
+	if ( g_Bots.Count() == 0 ) META_CONPRINTF( "[AgPB] agpb_bot_clearance: no bots\n" );
+}
+
+static void Cmd_BotCombat( const CCommand &args )
+{
+	if ( args.ArgC() < 2 || args.ArgC() > 3 ||
+	     ( args.ArgC() == 3 && Q_strcmp( args.Arg( 2 ), "0" ) != 0 && Q_strcmp( args.Arg( 2 ), "1" ) != 0 ) )
+	{
+		META_CONPRINTF( "[AgPB] usage: agpb_bot_combat <idx|all> [0|1]\n" );
+		return;
+	}
+	const bool all = Q_stricmp( args.Arg( 1 ), "all" ) == 0;
+	const bool enabled = args.ArgC() < 3 || Q_strcmp( args.Arg( 2 ), "1" ) == 0;
+	if ( !all && g_Bots.Get( V_atoi( args.Arg( 1 ) ) ) == NULL )
+	{
+		META_CONPRINTF( "[AgPB] invalid list index '%s' (see agpb_list)\n", args.Arg( 1 ) );
+		return;
+	}
+	for ( int i = 0; i < g_Bots.Count(); ++i )
+		if ( all || i == V_atoi( args.Arg( 1 ) ) )
+		{
+			g_Bots.Get( i )->SetCombat( enabled );
+			META_CONPRINTF( "[AgPB] %s: local combat %s\n", g_Bots.Get( i )->Name(), enabled ? "enabled" : "disabled" );
+		}
+}
+
+static void Cmd_BotCombatInfo( const CCommand &args )
+{
+	if ( args.ArgC() > 2 )
+	{
+		META_CONPRINTF( "[AgPB] usage: agpb_bot_combat_info [idx|all]\n" );
+		return;
+	}
+	const bool all = args.ArgC() < 2 || Q_stricmp( args.Arg( 1 ), "all" ) == 0;
+	if ( !all )
+	{
+		CAgPB *bot = g_Bots.Get( V_atoi( args.Arg( 1 ) ) );
+		if ( bot == NULL )
+		{
+			META_CONPRINTF( "[AgPB] invalid list index '%s' (see agpb_list)\n", args.Arg( 1 ) );
+			return;
+		}
+		bot->ReportCombat();
+		return;
+	}
+	for ( int i = 0; i < g_Bots.Count(); ++i ) g_Bots.Get( i )->ReportCombat();
+	if ( g_Bots.Count() == 0 ) META_CONPRINTF( "[AgPB] agpb_bot_combat_info: no bots\n" );
+}
+
+static void Cmd_BotDifficulty( const CCommand &args )
+{
+	if ( args.ArgC() != 3 || args.Arg( 2 )[0] < '0' || args.Arg( 2 )[0] > '4' || args.Arg( 2 )[1] != '\0' )
+	{
+		META_CONPRINTF( "[AgPB] usage: agpb_bot_difficulty <idx|all> <0..4>\n" ); return;
+	}
+	const bool all = Q_stricmp( args.Arg( 1 ), "all" ) == 0;
+	if ( !all && g_Bots.Get( V_atoi( args.Arg( 1 ) ) ) == NULL )
+	{
+		META_CONPRINTF( "[AgPB] invalid list index '%s' (see agpb_list)\n", args.Arg( 1 ) ); return;
+	}
+	for ( int i = 0; i < g_Bots.Count(); ++i )
+		if ( all || i == V_atoi( args.Arg( 1 ) ) )
+		{
+			CAgPB *bot = g_Bots.Get( i );
+			bot->SetDifficulty( args.Arg( 2 )[0] - '0' );
+			META_CONPRINTF( "[AgPB] %s: SyPB difficulty=%d skill=%d\n", bot->Name(), bot->Difficulty(), bot->Skill() );
+		}
+}
+
+static bool ReadAgentUnsigned( const char *text, unsigned int &value )
+{
+	value = 0;
+	if ( text == NULL || text[0] == '\0' ) return false;
+	for ( const char *at = text; *at != '\0'; ++at )
+	{
+		if ( *at < '0' || *at > '9' || value > ( 2147483647u - ( *at - '0' ) ) / 10u ) return false;
+		value = value * 10u + ( *at - '0' );
+	}
+	return true;
+}
+
+static void Cmd_AgentState( const CCommand &args )
+{
+	if ( args.ArgC() != 1 ) { META_CONPRINTF( "[AgPB] usage: agpb_agent_state\n" ); return; }
+	const char *map = gpGlobals != NULL ? STRING( gpGlobals->mapname ) : "";
+	META_CONPRINTF( "[AgPB agent] v=1 map=%s mapserial=%u round=%u bots=%d\n",
+		map != NULL && map[0] != '\0' ? map : "unknown", AgPB_MapSerial(),
+		BotObjectives().Snapshot().roundEpoch, g_Bots.Count() );
+	for ( int i = 0; i < g_Bots.Count(); ++i ) g_Bots.Get( i )->ReportAgentIntent();
+}
+
+static void Cmd_AgentIntent( const CCommand &args )
+{
+	if ( args.ArgC() != 5 && args.ArgC() != 7 )
+	{
+		META_CONPRINTF( "[AgPB] usage: agpb_agent_intent <mapserial> <round> <userid> clear\n" );
+		META_CONPRINTF( "[AgPB]        agpb_agent_intent <mapserial> <round> <userid> move|camp <wp> <ttl-seconds>\n" );
+		return;
+	}
+	unsigned int mapSerial, round, userId;
+	if ( !ReadAgentUnsigned( args.Arg( 1 ), mapSerial ) || !ReadAgentUnsigned( args.Arg( 2 ), round ) ||
+	     !ReadAgentUnsigned( args.Arg( 3 ), userId ) || userId == 0 ||
+	     mapSerial != AgPB_MapSerial() || round != BotObjectives().Snapshot().roundEpoch )
+	{
+		META_CONPRINTF( "[AgPB] agent intent rejected: invalid or stale map/round/user scope; query agpb_agent_state\n" ); return;
+	}
+	CAgPB *bot = NULL;
+	for ( int i = 0; i < g_Bots.Count(); ++i )
+		if ( g_Bots.Get( i )->PlayerInfo() != NULL && g_Bots.Get( i )->PlayerInfo()->GetUserID() == (int)userId )
+		{ bot = g_Bots.Get( i ); break; }
+	if ( bot == NULL ) { META_CONPRINTF( "[AgPB] agent intent rejected: userid is not a current AgPB bot\n" ); return; }
+	const bool clear = Q_stricmp( args.Arg( 4 ), "clear" ) == 0;
+	const bool camp = Q_stricmp( args.Arg( 4 ), "camp" ) == 0;
+	if ( clear && args.ArgC() == 5 )
+	{
+		bot->ClearAgentIntent( "agent-clear" ); bot->ReportAgentIntent(); return;
+	}
+	if ( args.ArgC() != 7 || ( !camp && Q_stricmp( args.Arg( 4 ), "move" ) != 0 ) )
+	{ META_CONPRINTF( "[AgPB] agent intent rejected: mode/argument mismatch\n" ); return; }
+	unsigned int waypoint;
+	if ( !ReadAgentUnsigned( args.Arg( 5 ), waypoint ) )
+	{ META_CONPRINTF( "[AgPB] agent intent rejected: invalid waypoint\n" ); return; }
+	const char *ttl = args.Arg( 6 );
+	bool dot = false, digit = false;
+	if ( Q_strlen( ttl ) > 8 ) { META_CONPRINTF( "[AgPB] agent intent rejected: invalid ttl\n" ); return; }
+	for ( const char *at = ttl; *at != '\0'; ++at )
+	{
+		if ( *at == '.' && !dot ) { dot = true; continue; }
+		if ( *at < '0' || *at > '9' ) { META_CONPRINTF( "[AgPB] agent intent rejected: invalid ttl\n" ); return; }
+		digit = true;
+	}
+	char error[192];
+	if ( !digit || !bot->SetAgentIntent( camp, (int)waypoint, V_atof( ttl ), error, sizeof( error ) ) )
+	{ META_CONPRINTF( "[AgPB] agent intent rejected: %s\n", digit ? error : "invalid ttl" ); return; }
+	bot->ReportAgentIntent();
+}
+
 static void Cmd_Objectives( const CCommand &args )
 {
 	const AgPBObjectiveSnapshot &world = BotObjectives().Snapshot();
@@ -1458,6 +1640,13 @@ static void Cmd_Objectives( const CCommand &args )
 
 static ConCommand agpb_bot_auto_cmd( "agpb_bot_auto", Cmd_BotAuto, "Enable normal-mode task autonomy: <idx|all> [0|1].", FCVAR_GAMEDLL );
 static ConCommand agpb_bot_tasks_cmd( "agpb_bot_tasks", Cmd_BotTasks, "Show active and suspended tasks: [idx|all].", FCVAR_GAMEDLL );
+static ConCommand agpb_bot_info_cmd( "agpb_bot_info", Cmd_BotInfo, "Read-only bot lifecycle and submitted-command snapshot: [idx|all].", FCVAR_GAMEDLL );
+static ConCommand agpb_bot_clearance_cmd( "agpb_bot_clearance", Cmd_BotClearance, "Read-only obstacle clearance and submitted-command snapshot: [idx|all].", FCVAR_GAMEDLL );
+static ConCommand agpb_bot_combat_cmd( "agpb_bot_combat", Cmd_BotCombat, "Enable local normal-mode combat: <idx|all> [0|1].", FCVAR_GAMEDLL );
+static ConCommand agpb_bot_combat_info_cmd( "agpb_bot_combat_info", Cmd_BotCombatInfo, "Read-only enemy selection, visibility, aim and combat command snapshot: [idx|all].", FCVAR_GAMEDLL );
+static ConCommand agpb_bot_difficulty_cmd( "agpb_bot_difficulty", Cmd_BotDifficulty, "Set SyPB normal-mode difficulty: <idx|all> <0..4>.", FCVAR_GAMEDLL );
+static ConCommand agpb_agent_state_cmd( "agpb_agent_state", Cmd_AgentState, "Read current agent map/round scope, bot identities and bounded intent leases.", FCVAR_GAMEDLL );
+static ConCommand agpb_agent_intent_cmd( "agpb_agent_intent", Cmd_AgentIntent, "Submit bounded waypoint intent in current map/round scope; query agpb_agent_state first.", FCVAR_GAMEDLL );
 static ConCommand agpb_objectives_cmd( "agpb_objectives", Cmd_Objectives, "Read-only normal objective snapshot.", FCVAR_GAMEDLL );
 
 static ConCommand agpb_add_cmd( "agpb_add", Cmd_Add,
@@ -1661,6 +1850,7 @@ void AgPBPlugin::AllPluginsLoaded()
 
 void AgPBPlugin::OnLevelShutdown()
 {
+	if ( ++g_AgentMapSerial == 0 ) g_AgentMapSerial = 1;
 	BotObjectives().Reset();
 	g_RoundFrozen = false;
 	// 换图会销毁所有 edict，先清掉本地记录，避免悬挂指针。

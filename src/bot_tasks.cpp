@@ -51,8 +51,12 @@ void CAgPB::ResetBombEscape()
 	m_flEscapeRetryAfter = m_flNextEscapeReport = 0.0f;
 }
 
-void CAgPB::ResetTaskSystem()
+void CAgPB::ResetTaskSystem( const char *reason )
 {
+	++m_uTaskResetCount;
+	m_pszTaskResetReason = reason;
+	ClearAgentIntent( reason );
+	ClearCombat( reason );
 	ClearRoute();
 	m_Tasks.Reset();
 	m_uObservedTaskToken = m_uRouteTaskToken = 0;
@@ -61,19 +65,33 @@ void CAgPB::ResetTaskSystem()
 	m_flObjectiveRetryAfter = 0.0f;
 	ResetTaskUse();
 	ResetBombEscape();
+	m_bHasVelOverride = false;
+	m_vVelOverride.Init();
+}
+
+void CAgPB::SuspendTaskActions( float now )
+{
+	ClearCombat( "frozen" );
+	ClearBreakable();
+	ResetTaskUse();
+	ResetRouteProgress( now );
+	// A terminal arrival needs one uninterrupted unfrozen settling interval.
+	m_flRouteSettleSince = -1.0f;
+	m_bHasVelOverride = false;
+	m_vVelOverride.Init();
 }
 
 void CAgPB::StopRoute()
 {
 	m_bAutonomous = m_bRoam = false;
-	ResetTaskSystem();
+	ResetTaskSystem( "stop" );
 }
 
 void CAgPB::SetAutonomous( bool enable )
 {
 	m_bAutonomous = enable;
 	m_bRoam = false;
-	ResetTaskSystem();
+	ResetTaskSystem( "autonomy" );
 }
 
 bool CAgPB::StartRoute( int goal, char *error, size_t maxlen )
@@ -562,15 +580,47 @@ void CAgPB::PlanNormalTask( CGlobalVars *globals, bool urgentOnly )
 	else m_flNextTaskPlan = globals->curtime + 1.0f;
 }
 
+void CAgPB::RefreshTaskPlan( CGlobalVars *globals )
+{
+	if ( !m_bAutonomous || AgPB_GameMode() != AgPB_MODE_NORMAL || AgPB_IsRoundFrozen() ||
+	     ( GetNetVarInt( "m_fFlags" ) & FL_FROZEN ) != 0 || globals->curtime < m_flNextTaskPlan ) return;
+	const AgPBTask task = m_Tasks.Current();
+	if ( task.deadline > 0.0f && globals->curtime >= task.deadline ) return;
+	if ( task.id == AgPBTaskId::Normal )
+	{
+		m_flNextTaskPlan = globals->curtime + 0.5f;
+		PlanNormalTask( globals );
+		return;
+	}
+	// Keep the existing guarded SyPB-derived objective arbitration available
+	// while a combat command overlay suspends locomotion/action dispatch.
+	m_flNextTaskPlan = globals->curtime + 0.5f;
+	const AgPBObjectiveSnapshot &world = BotObjectives().Snapshot();
+	const AgPBObjectiveBomb &bomb = world.bomb;
+	const int team = m_pInfo->GetTeamIndex();
+	const bool plantedHandled = PlanPlantedBombTask( globals, true );
+	const bool eligible = bomb.handle != m_uDeclinedObjectiveHandle || globals->curtime >= m_flObjectiveRetryAfter;
+	const bool bombUrgent = ( world.mapFlags & AGPB_MAP_BOMB ) != 0 && eligible &&
+		( ( team == AgPB_TEAM_T && FindOwnedWeapon( "weapon_c4" ) != NULL &&
+	       !m_Tasks.Contains( AgPBTaskId::PlantBomb ) ) ||
+		( team == AgPB_TEAM_T && bomb.state == AGPB_BOMB_DROPPED &&
+		  !m_Tasks.Contains( AgPBTaskId::PickupBomb ) ) );
+	const bool hostageUrgent = ( world.mapFlags & AGPB_MAP_HOSTAGE ) != 0 && team == AgPB_TEAM_CT &&
+		!m_Tasks.Contains( AgPBTaskId::RescueHostage ) && !m_Tasks.Contains( AgPBTaskId::EscortHostages );
+	if ( !plantedHandled && ( bombUrgent || hostageUrgent ) &&
+	     m_Tasks.Current().desire < AgPBTaskPriority::Objective ) PlanNormalTask( globals, true );
+}
+
 void CAgPB::UpdateTasks( CGlobalVars *globals, CBotCmd &cmd )
 {
+	UpdateAgentIntent( globals );
 	if ( AgPB_IsRoundFrozen() || ( GetNetVarInt( "m_fFlags" ) & FL_FROZEN ) != 0 )
 	{
-		ClearBreakable(); ResetRouteProgress( globals->curtime ); return;
+		SuspendTaskActions( globals->curtime ); return;
 	}
 	if ( m_bAutonomous && AgPB_GameMode() != AgPB_MODE_NORMAL )
 	{
-		ResetTaskSystem(); return;
+		ResetTaskSystem( "mode" ); return;
 	}
 	const AgPBTask beforeExpiry = m_Tasks.Current();
 	if ( beforeExpiry.deadline > 0.0f && globals->curtime >= beforeExpiry.deadline )
@@ -580,26 +630,7 @@ void CAgPB::UpdateTasks( CGlobalVars *globals, CBotCmd &cmd )
 	}
 	m_Tasks.Expire( globals->curtime );
 	if ( m_uRouteTaskToken != 0 && m_Tasks.State( m_uRouteTaskToken ) == AgPBTaskState::Missing ) ClearRoute();
-	// Objective changes interrupt patrol/CAMP immediately, as SyPB's desires
-	// do. Do not replace an already running objective on every observation.
-	if ( m_bAutonomous && m_Tasks.Current().id != AgPBTaskId::Normal && globals->curtime >= m_flNextTaskPlan )
-	{
-		m_flNextTaskPlan = globals->curtime + 0.5f;
-		const AgPBObjectiveSnapshot &world = BotObjectives().Snapshot();
-		const AgPBObjectiveBomb &bomb = world.bomb;
-		const int team = m_pInfo->GetTeamIndex();
-		const bool plantedHandled = PlanPlantedBombTask( globals, true );
-		const bool eligible = bomb.handle != m_uDeclinedObjectiveHandle || globals->curtime >= m_flObjectiveRetryAfter;
-		const bool bombUrgent = ( world.mapFlags & AGPB_MAP_BOMB ) != 0 && eligible &&
-			( ( team == AgPB_TEAM_T && FindOwnedWeapon( "weapon_c4" ) != NULL &&
-		       !m_Tasks.Contains( AgPBTaskId::PlantBomb ) ) ||
-			( team == AgPB_TEAM_T && bomb.state == AGPB_BOMB_DROPPED &&
-			  !m_Tasks.Contains( AgPBTaskId::PickupBomb ) ) );
-		const bool hostageUrgent = ( world.mapFlags & AGPB_MAP_HOSTAGE ) != 0 && team == AgPB_TEAM_CT &&
-			!m_Tasks.Contains( AgPBTaskId::RescueHostage ) && !m_Tasks.Contains( AgPBTaskId::EscortHostages );
-		if ( !plantedHandled && ( bombUrgent || hostageUrgent ) &&
-		     m_Tasks.Current().desire < AgPBTaskPriority::Objective ) PlanNormalTask( globals, true );
-	}
+	if ( m_Tasks.Current().id != AgPBTaskId::Normal ) RefreshTaskPlan( globals );
 	AgPBTask task = m_Tasks.Current();
 	if ( task.id != AgPBTaskId::DestroyBreakable && m_uBreakTaskToken != 0 ) ClearBreakable();
 	if ( task.id != AgPBTaskId::DestroyBreakable && m_uRouteTaskToken != task.token &&
@@ -607,7 +638,7 @@ void CAgPB::UpdateTasks( CGlobalVars *globals, CBotCmd &cmd )
 	if ( task.token != m_uObservedTaskToken )
 	{
 		m_uObservedTaskToken = task.token;
-		m_flTaskActionStarted = globals->curtime;
+		m_flTaskActionStarted = task.id == AgPBTaskId::Normal ? 0.0f : globals->curtime;
 		ResetTaskUse();
 		RouteReport( "task -> %s (wp=%d, priority=%.0f)", AgPBTaskName( task.id ), task.waypoint, task.desire );
 	}
@@ -616,7 +647,8 @@ void CAgPB::UpdateTasks( CGlobalVars *globals, CBotCmd &cmd )
 		if ( !UpdateBreakable( globals, cmd ) ) CompleteCurrentTask( "breakable state released" );
 		return;
 	}
-	if ( task.id == AgPBTaskId::Camp || task.id == AgPBTaskId::Pause )
+	if ( task.id == AgPBTaskId::Camp || task.id == AgPBTaskId::Pause ||
+	     ( task.id == AgPBTaskId::AgentIntention && m_AgentIntent.camp && m_AgentIntent.arrived ) )
 	{
 		const AgPBPath *node = BotWaypoints().Get( task.waypoint );
 		if ( node != NULL && ( node->flags & AgPB_WP_CROUCH ) != 0 ) cmd.buttons |= IN_DUCK;
@@ -639,18 +671,38 @@ void CAgPB::UpdateTasks( CGlobalVars *globals, CBotCmd &cmd )
 		return;
 	}
 	if ( ExecuteObjectiveTask( globals, cmd ) ) return;
-	if ( task.id == AgPBTaskId::MoveToPosition )
+	if ( task.id == AgPBTaskId::MoveToPosition || task.id == AgPBTaskId::AgentIntention )
 	{
+		const bool agent = task.id == AgPBTaskId::AgentIntention;
 		if ( !HasRoute() && !m_bRouteArrived )
 		{
 			char error[192];
-			if ( !BuildRoute( task.waypoint, error, sizeof( error ) ) ) { CompleteCurrentTask( error, true ); return; }
+			if ( !BuildRoute( task.waypoint, error, sizeof( error ) ) )
+			{
+				if ( agent )
+				{
+					RouteReport( "agent route failed: %s", error );
+					ClearAgentIntent( "route-failed" );
+				}
+				else CompleteCurrentTask( error, true );
+				return;
+			}
 			m_uRouteTaskToken = task.token;
 		}
 		if ( HasRoute() ) UpdateRoute( globals, cmd );
 		if ( !HasRoute() && m_Tasks.Current().token == task.token )
 		{
 			const bool arrived = m_bRouteArrived;
+			if ( agent )
+			{
+				if ( arrived && m_AgentIntent.camp )
+				{
+					m_AgentIntent.arrived = true;
+					RouteReport( "agent camp reached waypoint #%d; lease expires at %.3f", task.waypoint, m_AgentIntent.deadline );
+				}
+				else ClearAgentIntent( arrived ? "reached" : "route-failed" );
+				return;
+			}
 			CompleteCurrentTask( arrived ? "waypoint reached" : "manual route failed", !arrived );
 			const AgPBPath *node = BotWaypoints().Get( task.waypoint );
 			if ( arrived && node != NULL && ( ( node->flags & AgPB_WP_CAMP ) != 0 || m_bAutonomous ) )

@@ -33,7 +33,40 @@ static void Simulate(float x, float y, float vx, float vy, float radius,
     }
     std::fprintf(stderr,"FAILED simulation %s x=%.3f y=%.3f v=%.3f %.3f\n",name,x,y,vx,vy); std::exit(1);
 }
+static void JumpIntoCrouchSection() {
+    // cs_office's authored 52->53 jump lands before the low opening, with
+    // CROUCH on the next node (60), not the landing anchor (53). Replay the
+    // takeoff, airborne and grounded phases through the production policies.
+    struct Phase { bool grounded; float dz; float distance; bool jump; bool crouch; };
+    const Phase phases[] = {
+        {true, 30, 49, true, false},
+        {false, -17, 42, false, false},
+        {false, 0, 30, false, false},
+        {true, 0, 28, false, true},
+        {true, 0, 20, false, true}
+    };
+    bool seenAirborne = false;
+    for (const Phase& phase : phases) {
+        if (!phase.grounded) seenAirborne = true;
+        const bool landed = LandedJump(true, seenAirborne, phase.grounded, phase.dz);
+        const RoutePosture posture = ComputeRoutePosture(false, true, false,
+            phase.distance, true, landed, phase.grounded, false);
+        Require(posture.jump == phase.jump && posture.crouch == phase.crouch,
+                "jump reaches authored crouch section without airborne duck or repeated jump");
+    }
+    const RoutePosture takeoff = ComputeRoutePosture(true, true, true, 60, false, false, true, false);
+    Require(!takeoff.jump && !takeoff.crouch, "crouch approach releases duck before next takeoff");
+    const RoutePosture landingTakeoff = ComputeRoutePosture(true, true, true, 28, true, true, true, false);
+    Require(!landingTakeoff.jump && !landingTakeoff.crouch, "landed chain prepares the next jump without repeating this one");
+    const RoutePosture distant = ComputeRoutePosture(false, true, false, 65, false, false, true, false);
+    Require(!distant.crouch, "next crouch does not affect a distant ordinary anchor");
+    const RoutePosture authored = ComputeRoutePosture(true, false, false, 28, true, true, true, false);
+    Require(authored.crouch && !authored.jump, "authored crouch also applies after landing");
+    const RoutePosture recovery = ComputeRoutePosture(false, true, false, 28, true, true, true, true);
+    Require(recovery.crouch && !recovery.jump, "grounded recovery preserves low-opening posture");
+}
 int main() {
+    JumpIntoCrouchSection();
     Require(!LandedJump(true,false,true,0),"takeoff is not a completed jump");
     Require(!LandedJump(true,true,false,0),"airborne jump still runs");
     Require(!LandedJump(true,true,true,32),"wrong landing height cannot complete jump");

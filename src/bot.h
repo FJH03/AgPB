@@ -90,6 +90,7 @@ public:
 	bool SetTeam( int team );
 
 	bool IsValid() const { return m_pEdict != NULL && m_pController != NULL; }
+	bool IsAlive() const;
 
 	edict_t *Edict() const { return m_pEdict; }
 	const char *Name() const { return m_Name; }
@@ -177,8 +178,21 @@ public:
 	void StopRoute();
 	void SetAutonomous( bool enable );
 	bool IsAutonomous() const { return m_bAutonomous; }
-	void ResetTaskSystem();
+	void ResetTaskSystem( const char *reason = "reset" );
+	// Optional agent supplies a bounded waypoint intention; local AI keeps ownership.
+	bool SetAgentIntent( bool camp, int waypoint, float ttl, char *error, size_t maxlen );
+	void ClearAgentIntent( const char *reason = "cleared" );
+	void ReportAgentIntent() const;
 	void ReportTasks() const;
+	void ReportLifecycle() const;
+	void ReportClearance() const;
+	void SetCombat( bool enable );
+	bool IsCombatEnabled() const { return m_bCombatEnabled; }
+	void ReportCombat() const;
+	bool SetSkill( int skill );
+	bool SetDifficulty( int difficulty );
+	int Skill() const { return m_iCombatSkill; }
+	int Difficulty() const { return m_iCombatDifficulty; }
 
 	/** 随机漫游：没路线时随机挑一个可达路点走过去，到了再挑下一个（EBot/SyPB 式"瞎逛"的最小版）。 */
 	void SetRoam( bool bEnable );
@@ -215,7 +229,9 @@ private:
 	bool BuildRoute( int goal, char *error, size_t maxlen );
 	void ClearRoute();
 	void UpdateTasks( CGlobalVars *globals, CBotCmd &cmd );
+	void UpdateAgentIntent( CGlobalVars *globals );
 	void PlanNormalTask( CGlobalVars *globals, bool urgentOnly = false );
+	void RefreshTaskPlan( CGlobalVars *globals );
 	bool PlanPlantedBombTask( CGlobalVars *globals, bool urgentOnly );
 	void ResetBombEscape();
 	bool ExecuteObjectiveTask( CGlobalVars *globals, CBotCmd &cmd );
@@ -228,6 +244,14 @@ private:
 	bool CanWalkToTaskPosition( const Vector &position, bool crouch ) const;
 	int PickTaskWaypoint( const Vector &position, unsigned int requiredFlags = 0 ) const;
 	void ResetRouteProgress( float now );
+	void SuspendTaskActions( float now );
+	void InitializeCombatSkill();
+	void ClearCombat( const char *reason = "reset" );
+	bool UpdateCombat( CGlobalVars *globals, CBotCmd &cmd );
+	void PauseCombatOwner( CGlobalVars *globals );
+	bool IsCombatEnemy( edict_t *target, int expectedUserId = 0 ) const;
+	bool CombatAimPoint( edict_t *target, const Vector &eye, Vector &point, bool requireViewCone, unsigned int *visibility = NULL ) const;
+	edict_t *CurrentCombatWeapon( uintp &handle, bool &knife, int &clip, int &reserve ) const;
 	void ClearBreakable();
 	bool BeginBreakable( const AgPBObstacle &obstacle, float now, bool crouch );
 	bool UpdateBreakable( CGlobalVars *pGlobals, CBotCmd &cmd );
@@ -243,6 +267,12 @@ private:
 	int   m_iIndex;            // edict 索引
 	int   m_iTeam;             // 目标队伍（1/2/3）
 	int   m_iCommandNumber;
+	CBotCmd m_LastSubmittedCmd;
+	unsigned int m_uSubmittedAttackCommands;
+	int m_iLastSubmittedAttackTick;
+	int   m_iObservedTeam;
+	unsigned int m_uTaskResetCount;
+	const char *m_pszTaskResetReason;
 	bool  m_bClassRequested;   // 是否已经补发过 joinclass
 
 	float m_flNextJoinAttempt;
@@ -298,6 +328,44 @@ private:
 	float m_flEscapeRetryAfter;
 	float m_flNextEscapeReport;
 
+	struct AgentIntentState
+	{
+		std::uint64_t token = 0;
+		unsigned int mapSerial = 0;
+		unsigned int roundEpoch = 0;
+		int waypoint = -1;
+		int team = 0;
+		float deadline = 0.0f;
+		bool camp = false;
+		bool arrived = false;
+		char reason[96] = "none";
+	};
+	AgentIntentState m_AgentIntent;
+
+	// Combat is a command overlay; it never replaces the route/task owner.
+	int m_iCombatSkill = 80;
+	int m_iCombatDifficulty = 3;
+	float m_flCombatIdealReaction = 0.1f;
+	float m_flCombatActualReaction = 0.1f;
+	float m_flCombatSurpriseUntil;
+	float m_flCombatRearCheckAt;
+	float m_flCombatFirePause;
+	Vector m_vCombatAimDeviation;
+	bool m_bCombatPerfectAim;
+	bool m_bCombatEnabled;
+	uintp m_uCombatEnemy;
+	uintp m_uCombatWeapon;
+	int m_iCombatEnemyUserId;
+	int m_iCombatLastClip;
+	std::uint64_t m_uCombatOwnerToken;
+	float m_flCombatLastTime;
+	float m_flCombatNextAttack;
+	float m_flCombatAimError;
+	bool m_bCombatRelease;
+	unsigned int m_uCombatAttackCommands;
+	unsigned int m_uCombatConfirmedShots;
+	const char *m_pszCombatState;
+
 	// 随机漫游（agpb_bot_roam）
 	bool   m_bRoam;
 	float  m_flNextRoamTime;    // 上一轮挑不到点后的重试时间
@@ -322,7 +390,7 @@ public:
 	void RemoveByEdict( edict_t *pEdict );
 
 	void ThinkAll( CGlobalVars *pGlobals );
-	void ResetAllTasks();
+	void ResetAllTasks( const char *reason = "reset" );
 
 	int Count() const { return m_Bots.Count(); }
 	CAgPB *Get( int listIndex );

@@ -30,7 +30,8 @@ enum class AgPBTaskId
 	PickupBomb,
 	RescueHostage,
 	EscortHostages,
-	EscapeBomb
+	EscapeBomb,
+	AgentIntention
 };
 
 // SyPB's normal-mode desire scale. The objective variants added for AgPB
@@ -41,6 +42,7 @@ namespace AgPBTaskPriority
 	constexpr float Pause = 36.0f;
 	constexpr float Camp = 37.0f;
 	constexpr float MoveToPosition = 50.0f;
+	constexpr float AgentIntention = 60.0f;
 	constexpr float Objective = 89.0f;
 	constexpr float DestroyBreakable = 100.0f;
 	constexpr float EscapeBomb = 100.0f;
@@ -96,6 +98,9 @@ public:
 	bool Complete( std::uint64_t token );
 	bool Remove( AgPBTaskId id );
 	bool RemoveToken( std::uint64_t token );
+	// Renew an existing finite lease without replacing its identity or priority.
+	// Normal and missing/stale tokens cannot be renewed.
+	bool RenewDeadline( std::uint64_t token, float deadline );
 	bool Expire( float now );
 	void Reset();
 

@@ -21,6 +21,7 @@
 #include "obstacle.h"
 #include "objectives.h"
 #include "route_control.h"
+#include "movement_control.h"
 
 #include <vstdlib/random.h>
 
@@ -47,9 +48,6 @@ static ConVar agpb_obstacle_debug( "agpb_obstacle_debug", "0", FCVAR_GAMEDLL,
 #define AgPB_STUCK_WINDOW    2.0f
 #define AgPB_STUCK_MOVE      24.0f
 #define AgPB_STUCK_RECOVERY  2.0f
-
-// 下一段是跳跃边时，离起跳点还有这么远就松开蹲（退蹲要 0.2 秒，留足余量）
-#define AgPB_UNDUCK_AHEAD    120.0f
 
 // 找起点时允许的最大吸附距离
 #define AgPB_ROUTE_PICK      512.0f
@@ -93,6 +91,11 @@ CAgPB::CAgPB()
 	m_iIndex = 0;
 	m_iTeam = 0;
 	m_iCommandNumber = 0;
+	m_uSubmittedAttackCommands = 0;
+	m_iLastSubmittedAttackTick = -1;
+	m_iObservedTeam = 0;
+	m_uTaskResetCount = 0;
+	m_pszTaskResetReason = "created";
 	m_bClassRequested = false;
 	m_flNextJoinAttempt = 0.0f;
 	m_flJoinDeadline = -1.0f;
@@ -110,6 +113,10 @@ CAgPB::CAgPB()
 	m_uLastObstacleHandle = (uintp)INVALID_EHANDLE_INDEX;
 	m_bLastObstacleFound = false;
 	m_uBreakTaskToken = 0;
+	m_bCombatEnabled = true;
+	InitializeCombatSkill();
+	m_uCombatAttackCommands = m_uCombatConfirmedShots = 0;
+	ClearCombat( "created" );
 	m_bAutonomous = true;
 	m_bWasAlive = false;
 	m_uObservedTaskToken = m_uRouteTaskToken = 0;
@@ -176,7 +183,7 @@ bool CAgPB::Create( const BotEngineContext &ctx,
 
 void CAgPB::Destroy()
 {
-	ResetTaskSystem();
+	ResetTaskSystem( "destroy" );
 	if ( m_Ctx.pEngine != NULL && m_pEdict != NULL )
 	{
 		// Kick the fake client so the engine recycles the slot.
@@ -205,7 +212,7 @@ bool CAgPB::SetTeam( int team )
 	}
 
 	m_iTeam = team;
-	ResetTaskSystem();
+	ResetTaskSystem( "team-request" );
 	m_bRoam = false;
 
 	// 重新开始一轮切换流程。
@@ -274,7 +281,13 @@ void CAgPB::Think( CGlobalVars *pGlobals )
 	if ( !IsValid() || pGlobals == NULL )
 		return;
 
+	// Observe external team changes before our requested-team retry can mask
+	// them. A route and its interaction handles belong to one team lifecycle.
+	const int previousTeam = m_pInfo != NULL ? m_pInfo->GetTeamIndex() : 0;
+	if ( previousTeam != m_iObservedTeam ) ResetTaskSystem( "team-change" );
 	TryJoinTeam( pGlobals->curtime );
+	m_iObservedTeam = m_pInfo != NULL ? m_pInfo->GetTeamIndex() : 0;
+	if ( m_iObservedTeam != previousTeam ) ResetTaskSystem( "team-change" );
 
 	// 即使 bot 处于死亡/未出生状态，也必须每 tick 调用一次
 	// RunPlayerMove()：武器逻辑、动画与 PostThink 都挂在
@@ -286,17 +299,17 @@ void CAgPB::Think( CGlobalVars *pGlobals )
 	// Releasing movement/attack must not snap an idle bot back to world yaw 0.
 	cmd.viewangles.x = GetNetVarFloat( "m_angEyeAngles[0]", 0.0f );
 	cmd.viewangles.y = GetNetVarFloat( "m_angEyeAngles[1]", 0.0f );
-	const bool alive = m_pInfo != NULL && !m_pInfo->IsDead() &&
-		( m_pInfo->GetTeamIndex() == AgPB_TEAM_T || m_pInfo->GetTeamIndex() == AgPB_TEAM_CT );
+	const bool alive = IsAlive();
 	if ( !alive )
 	{
-		if ( m_bWasAlive ) ResetTaskSystem();
+		if ( m_bWasAlive ) ResetTaskSystem( "dead" );
 		m_bWasAlive = false;
 	}
 	else
 	{
 		m_bWasAlive = true;
-		UpdateTasks( pGlobals, cmd );
+		UpdateAgentIntent( pGlobals );
+		if ( !UpdateCombat( pGlobals, cmd ) ) UpdateTasks( pGlobals, cmd );
 	}
 
 	// 【弹道跳/调试】把本 tick 的速度覆盖值写进引擎（真成员地址），
@@ -313,7 +326,26 @@ void CAgPB::Think( CGlobalVars *pGlobals )
 	// 线性同余凑一个每帧不同的种子（武器散布随机流用），省掉 <stdlib.h> 的 rand()
 	cmd.random_seed = (int)( (unsigned int)pGlobals->tickcount * 1103515245u + 12345u );
 
+	m_LastSubmittedCmd = cmd;
+	if ( ( cmd.buttons & IN_ATTACK ) != 0 )
+	{
+		++m_uSubmittedAttackCommands;
+		m_iLastSubmittedAttackTick = cmd.tick_count;
+	}
 	m_pController->RunPlayerMove( &cmd );
+}
+
+bool CAgPB::IsAlive() const
+{
+	if ( !IsValid() || m_pInfo == NULL || m_pInfo->IsObserver() ) return false;
+	const int team = m_pInfo->GetTeamIndex();
+	if ( team != AgPB_TEAM_T && team != AgPB_TEAM_CT ) return false;
+	// IPlayerInfo::IsDead() only matches LIFE_DEAD. LIFE_DYING and other
+	// non-alive states must also release route/action state immediately.
+	const BotNetVar *life = FindNetVar( "m_lifeState" );
+	void *base = NetVarBase();
+	return life != NULL && life->type == DPT_Int && base != NULL &&
+		NetVar_GetInt( base, *life ) == LIFE_ALIVE;
 }
 
 // ---------------------------------------------------------------------------
@@ -444,7 +476,7 @@ static bool IsObstacleKnife( edict_t *weapon )
 
 bool CAgPB::TestWeapon( const char *name, bool only )
 {
-	if ( !IsValid() || m_pInfo == NULL || m_pInfo->IsDead() || HasRoute() ) return false;
+	if ( !IsAlive() || HasRoute() ) return false;
 	// Explicit console fixture only: public bot interface creates/equips items.
 	// Autonomous selection, reload, firing and melee remain CUserCmd-only.
 	if ( only ) m_pController->RemoveAllItems( false );
@@ -653,7 +685,7 @@ bool CAgPB::InspectObstacle( AgPBObstacle &result, int iWaypoint, bool bStuck, u
                             bool breakableOnly ) const
 {
 	result = AgPBObstacle();
-	if ( !IsValid() || m_pInfo == NULL || m_pInfo->IsDead() )
+	if ( !IsAlive() )
 		return false;
 
 	Vector points[32];
@@ -865,6 +897,86 @@ static bool ReadRouteVelocity( const CAgPB &bot, Vector &velocity )
 	return velocity.IsValid();
 }
 
+void CAgPB::ReportLifecycle() const
+{
+	const float now = gpGlobals != NULL ? gpGlobals->curtime : 0.0f;
+	const int team = m_pInfo != NULL ? m_pInfo->GetTeamIndex() : 0;
+	const bool alive = IsAlive();
+	const Vector position = m_pInfo != NULL ? m_pInfo->GetAbsOrigin() : vec3_origin;
+	Vector velocity;
+	const bool velocityKnown = ReadRouteVelocity( *this, velocity );
+	if ( !velocityKnown ) velocity.Init();
+	const AgPBTask &task = m_Tasks.Current();
+	const char *map = gpGlobals != NULL ? STRING( gpGlobals->mapname ) : "";
+	// Print one versioned record, bypassing RouteReport's 512-byte buffer.
+	// cmd fields are the last command submitted to the public bot interface;
+	// command state is not fabricated when a console command clears a route.
+	META_CONPRINTF( "[AgPB lifecycle] v=1 name=%s edict=%d userid=%d map=%s epoch=%u tick=%d time=%.3f "
+		"alive=%d wasalive=%d lifestate=%d team=%d desired=%d auto=%d roam=%d roundfrozen=%d flags=0x%X hp=%d "
+		"pos=(%.3f,%.3f,%.3f) vel=(%.3f,%.3f,%.3f) velknown=%d eye=(%.3f,%.3f) "
+		"route=%d index=%d node=%d goal=%d owner=%llu arrived=%d settle=%.3f settleage=%.3f "
+		"airborne=%d progress=%.3f stuck=%.3f recovery=%.3f task=%s token=%llu tasks=%d "
+		"break=%d breaktoken=%llu use=%d action=%.3f pendingvel=%d resets=%u reset=%s "
+		"cmdnum=%d cmdtick=%d buttons=0x%X move=(%.3f,%.3f,%.3f) view=(%.3f,%.3f)\n",
+		m_Name, m_iIndex, m_pInfo != NULL ? m_pInfo->GetUserID() : -1,
+		map != NULL && map[0] != '\0' ? map : "unknown", BotObjectives().Snapshot().roundEpoch,
+		gpGlobals != NULL ? gpGlobals->tickcount : -1, now,
+		alive ? 1 : 0, m_bWasAlive ? 1 : 0, GetNetVarInt( "m_lifeState", -1 ), team, m_iTeam, m_bAutonomous ? 1 : 0,
+		m_bRoam ? 1 : 0, AgPB_IsRoundFrozen() ? 1 : 0, GetNetVarInt( "m_fFlags" ),
+		m_pInfo != NULL ? m_pInfo->GetHealth() : -1,
+		position.x, position.y, position.z, velocity.x, velocity.y, velocity.z, velocityKnown ? 1 : 0,
+		GetNetVarFloat( "m_angEyeAngles[0]", 0.0f ), GetNetVarFloat( "m_angEyeAngles[1]", 0.0f ),
+		m_vecRoute.Count(), m_iRouteIndex, RouteNode( m_iRouteIndex ), m_iGoalWaypoint,
+		(unsigned long long)m_uRouteTaskToken, m_bRouteArrived ? 1 : 0, m_flRouteSettleSince,
+		m_flRouteSettleSince >= 0.0f ? now - m_flRouteSettleSince : -1.0f,
+		m_bRouteLegAirborne ? 1 : 0, m_flRouteProgressDistance, m_flStuckCheckTime,
+		m_flStuckRecoveryUntil, AgPBTaskName( task.id ), (unsigned long long)task.token, m_Tasks.Count(),
+		NetVar_HandleIsValid( m_uBreakHandle ) ? NetVar_HandleEntry( m_uBreakHandle ) : -1,
+		(unsigned long long)m_uBreakTaskToken,
+		NetVar_HandleIsValid( m_uLastTaskUseHandle ) ? NetVar_HandleEntry( m_uLastTaskUseHandle ) : -1,
+		m_flTaskActionStarted, m_bHasVelOverride ? 1 : 0, m_uTaskResetCount, m_pszTaskResetReason,
+		m_LastSubmittedCmd.command_number, m_LastSubmittedCmd.tick_count, m_LastSubmittedCmd.buttons,
+		m_LastSubmittedCmd.forwardmove, m_LastSubmittedCmd.sidemove, m_LastSubmittedCmd.upmove,
+		m_LastSubmittedCmd.viewangles.x, m_LastSubmittedCmd.viewangles.y );
+}
+
+void CAgPB::ReportClearance() const
+{
+	uintp activeHandle = (uintp)INVALID_EHANDLE_INDEX;
+	GetNetVarHandleValue( "m_hActiveWeapon", &activeHandle );
+	edict_t *weapon = HandleToEdict( activeHandle );
+	const char *weaponClass = weapon != NULL ? weapon->GetClassName() : "none";
+	const int ammoType = weapon != NULL ? AgPB_ReadNetVarInt( weapon, "m_iPrimaryAmmoType", -1 ) : -1;
+	const int reserve = ammoType >= 0 ? GetNetVarArrayInt( "m_iAmmo", ammoType, -1 ) : -1;
+	const char *map = gpGlobals != NULL ? STRING( gpGlobals->mapname ) : "";
+	META_CONPRINTF( "[AgPB clearance] v=1 name=%s edict=%d userid=%d map=%s tick=%d time=%.3f "
+		"target=0x%llX ent=%d route=%d goal=%d owner=%llu index=%d node=%d next=%d "
+		"breaktoken=%llu acquired=%.3f deadline=%.3f shots=%d nodamage=%d besthealth=%d "
+		"near=%d release=%d knifepending=%d trackedweapon=0x%llX weapon=0x%llX class=%s "
+		"clip=%d ammotype=%d reserve=%d nextattack=%.3f playerattack=%.3f "
+		"cmdnum=%d cmdtick=%d buttons=0x%X weaponselect=%d move=(%.3f,%.3f,%.3f) "
+		"view=(%.3f,%.3f) attackcmds=%u lastattacktick=%d\n",
+		m_Name, m_iIndex, m_pInfo != NULL ? m_pInfo->GetUserID() : -1,
+		map != NULL && map[0] != '\0' ? map : "unknown", gpGlobals != NULL ? gpGlobals->tickcount : -1,
+		gpGlobals != NULL ? gpGlobals->curtime : 0.0f,
+		(unsigned long long)m_uBreakHandle,
+		NetVar_HandleIsValid( m_uBreakHandle ) ? NetVar_HandleEntry( m_uBreakHandle ) : -1,
+		m_vecRoute.Count(), m_iGoalWaypoint, (unsigned long long)m_uRouteTaskToken,
+		m_iRouteIndex, RouteNode( m_iRouteIndex ), RouteNode( m_iRouteIndex + 1 ),
+		(unsigned long long)m_uBreakTaskToken, m_flBreakDeadline > 0.0f ? m_flBreakDeadline - 10.0f : -1.0f,
+		m_flBreakDeadline, m_iBreakShots, m_iBreakNoDamageShots, m_iBreakBestHealth,
+		m_bBreakNear ? 1 : 0, m_bBreakRelease ? 1 : 0, m_bBreakKnifePending ? 1 : 0,
+		(unsigned long long)m_uBreakWeapon, (unsigned long long)activeHandle,
+		weaponClass != NULL && weaponClass[0] != '\0' ? weaponClass : "none",
+		weapon != NULL ? ReadWeaponClip( weapon ) : -1, ammoType, reserve,
+		weapon != NULL ? AgPB_ReadNetVarFloat( weapon, "m_flNextPrimaryAttack", -1.0f ) : -1.0f,
+		GetNetVarFloat( "m_flNextAttack", -1.0f ), m_LastSubmittedCmd.command_number,
+		m_LastSubmittedCmd.tick_count, m_LastSubmittedCmd.buttons, m_LastSubmittedCmd.weaponselect,
+		m_LastSubmittedCmd.forwardmove, m_LastSubmittedCmd.sidemove, m_LastSubmittedCmd.upmove,
+		m_LastSubmittedCmd.viewangles.x, m_LastSubmittedCmd.viewangles.y,
+		m_uSubmittedAttackCommands, m_iLastSubmittedAttackTick );
+}
+
 static bool RouteNodeReached( const AgPBPath &node, const Vector &position, const Vector &velocity,
                               bool entry, bool takeoff, bool jumpLeg, bool grounded, float interval )
 {
@@ -920,7 +1032,7 @@ bool CAgPB::BuildRoute( int iGoalWaypoint, char *error, size_t maxlen )
 		return false;
 	}
 	const int team = m_pInfo->GetTeamIndex();
-	if ( m_pInfo->IsDead() || ( team != AgPB_TEAM_T && team != AgPB_TEAM_CT ) ||
+	if ( !IsAlive() ||
 	     ( GetNetVarInt( "m_fFlags" ) & FL_ONGROUND ) == 0 )
 	{
 		Q_strncpy( error, "route entry requires a living, grounded T/CT player", (int)maxlen );
@@ -1002,7 +1114,7 @@ bool CAgPB::BuildRoute( int iGoalWaypoint, char *error, size_t maxlen )
 
 void CAgPB::SetRoam( bool bEnable )
 {
-	ResetTaskSystem();
+	ResetTaskSystem( "roam" );
 	m_bAutonomous = false;
 	m_bRoam = bEnable;
 	m_flNextRoamTime = 0.0f;
@@ -1088,7 +1200,7 @@ bool CAgPB::IsRoamGoalCrowded( const Vector &vGoal, float flRadius ) const
 
 		IPlayerInfo *pOtherInfo = pOther->PlayerInfo();
 
-		if ( pOtherInfo == NULL || pOtherInfo->IsDead() )
+		if ( !pOther->IsAlive() )
 			continue;
 
 		// 已经有 bot 站在目标点附近
@@ -1116,9 +1228,7 @@ void CAgPB::UpdateRoute( CGlobalVars *pGlobals, CBotCmd &cmd )
 	// and release attack until movement is enabled again.
 	if ( AgPB_IsRoundFrozen() || ( GetNetVarInt( "m_fFlags" ) & FL_FROZEN ) != 0 )
 	{
-		ClearBreakable();
-		ResetRouteProgress( pGlobals->curtime );
-		m_flRouteSettleSince = -1.0f;
+		SuspendTaskActions( pGlobals->curtime );
 		return;
 	}
 	if ( UpdateBreakable( pGlobals, cmd ) ) return;
@@ -1222,13 +1332,27 @@ void CAgPB::UpdateRoute( CGlobalVars *pGlobals, CBotCmd &cmd )
 	// 只用水平方向算 yaw：爬梯子时目标在正上方，水平分量≈0，
 	// 拿三维向量算出来的 yaw 会乱跳（机器人转头撞墙）；这时保持当前朝向。
 	Vector vFlat( vDelta.x, vDelta.y, 0.0f );
+	const bool smoothGroundView = bGrounded && !bJumpLeg && !bTakeoff &&
+		( pNode->flags & AgPB_WP_LADDER ) == 0 && GetNetVarInt( "movetype", MOVETYPE_NONE ) != MOVETYPE_LADDER;
 
 	if ( vFlat.LengthSqr() > 1.0f )
 	{
 		QAngle angTo;
 		VectorAngles( vFlat, angTo );
-		cmd.viewangles.x = 0.0f;
-		cmd.viewangles.y = angTo.y;
+		if ( smoothGroundView )
+		{
+			// SyPB tracks view and movement angles independently. Keep the
+			// manual route direction while turning the submitted view smoothly.
+			const AgPBMovement::View view = AgPBMovement::ApproachView(
+				GetNetVarFloat( "m_angEyeAngles[0]" ), GetNetVarFloat( "m_angEyeAngles[1]" ),
+				0.0f, angTo.y, pGlobals->interval_per_tick );
+			cmd.viewangles.Init( view.pitch, view.yaw, 0 );
+		}
+		else
+		{
+			cmd.viewangles.x = 0.0f;
+			cmd.viewangles.y = angTo.y;
+		}
 	}
 	else
 	{
@@ -1243,6 +1367,14 @@ void CAgPB::UpdateRoute( CGlobalVars *pGlobals, CBotCmd &cmd )
 		// Very small wish speeds cannot overcome Source's stop-speed friction.
 		// Keep a walking-speed floor; crouch movement is already slow enough.
 		cmd.forwardmove = MIN( cmd.forwardmove, MAX( 100.0f, flDist2D * 4.0f ) );
+	}
+
+	if ( smoothGroundView && flDist2D > 0.01f )
+	{
+		const float speed = cmd.forwardmove;
+		const AgPBMovement::LocalWish wish = AgPBMovement::WorldToLocal(
+			vDelta.x * speed / flDist2D, vDelta.y * speed / flDist2D, cmd.viewangles.y );
+		cmd.forwardmove = wish.forward; cmd.sidemove = wish.side;
 	}
 
 	// A completed jump may land slightly short of its small authored radius.
@@ -1284,7 +1416,7 @@ void CAgPB::UpdateRoute( CGlobalVars *pGlobals, CBotCmd &cmd )
 
 			IPlayerInfo *pOtherInfo = pOther->PlayerInfo();
 
-			if ( pOtherInfo == NULL || pOtherInfo->IsDead() )
+			if ( !pOther->IsAlive() )
 				continue;
 
 			const Vector vTo = pOtherInfo->GetAbsOrigin() - vPos;
@@ -1332,20 +1464,12 @@ void CAgPB::UpdateRoute( CGlobalVars *pGlobals, CBotCmd &cmd )
 		}
 	}
 
-	// 下一段是跳跃边 → 提前松蹲：退出蹲态要 TIME_TO_UNDUCK = 0.2 秒
-	// （shareddefs.h:112），不松的话到了起跳点还是"蹲着跳"，只能跳 42
-	// （矮区里松蹲是安全的：引擎的 CanUnduck() 会因为头顶没空间而拒绝站起，cs_gamemovement.cpp:857）
-	if ( bCrouch && !bJumpLeg && m_iRouteIndex + 1 < m_vecRoute.Count() )
-	{
-		unsigned int uNextLeg = 0;
-
-		if ( wp.IsConnected( m_vecRoute[m_iRouteIndex], m_vecRoute[m_iRouteIndex + 1], &uNextLeg ) &&
-		     ( uNextLeg & AgPB_PATH_JUMP ) != 0 &&
-		     flDist2D < AgPB_UNDUCK_AHEAD )
-		{
-			bCrouch = false;
-		}
-	}
+	const AgPBPath *nextNode = m_iRouteIndex + 1 < m_vecRoute.Count()
+		? wp.Get( m_vecRoute[m_iRouteIndex + 1] ) : NULL;
+	const AgPBTerminal::RoutePosture posture = AgPBTerminal::ComputeRoutePosture(
+		bCrouch, nextNode != NULL && ( nextNode->flags & AgPB_WP_CROUCH ) != 0,
+		bTakeoff, flDist2D, bJumpLeg, bLandedJumpLeg, bGrounded,
+		m_flStuckRecoveryUntil > 0.0f );
 
 	// Source ZBot checks breakables before ordinary navigation is updated.
 	// SyPB/CS-EBOT pause their current path while breaking. Keep our manual
@@ -1356,7 +1480,7 @@ void CAgPB::UpdateRoute( CGlobalVars *pGlobals, CBotCmd &cmd )
 		AgPBObstacle obstacle;
 		InspectObstacle( obstacle, -1, m_flStuckRecoveryUntil > 0.0f,
 		                 (uintp)INVALID_EHANDLE_INDEX, true );
-		if ( BeginBreakable( obstacle, pGlobals->curtime, !bJumpLeg && bCrouch ) )
+		if ( BeginBreakable( obstacle, pGlobals->curtime, posture.crouch ) )
 		{
 			UpdateBreakable( pGlobals, cmd );
 			return;
@@ -1369,16 +1493,9 @@ void CAgPB::UpdateRoute( CGlobalVars *pGlobals, CBotCmd &cmd )
 	// 2) 起跳那一 tick 只要没按蹲，引擎会自动给 bot 接上 crouch-jump：
 	//    m_duckUntilOnGround = true + FinishDuck()（:767-772），空中它还替 bot 按着蹲（:173-178），
 	//    落地后自己决定何时站起（:1017+）；空中蹲会把脚抬起 8.5 单位，更容易上高台
-	// 3) 我们**绝不能**在跳跃边/空中按 IN_DUCK —— 那会把引擎这套自动序列取消掉（:166-171）
-	if ( bJumpLeg )
-	{
-		if ( bGrounded && !bLandedJumpLeg && m_flStuckRecoveryUntil == 0.0f )
-			cmd.buttons |= IN_JUMP;
-	}
-	else if ( bCrouch )
-	{
-		cmd.buttons |= IN_DUCK;
-	}
+	// 3) 起跳/空中不追加 IN_DUCK；该边已正确落地后可衔接手工 CROUCH 段。
+	if ( posture.jump ) cmd.buttons |= IN_JUMP;
+	if ( posture.crouch ) cmd.buttons |= IN_DUCK;
 
 	// Stuck recovery uses the wider near probe to catch small pushaway props.
 	// Optional lookahead diagnostics are throttled and log only identity changes.
@@ -1407,7 +1524,7 @@ void CAgPB::UpdateRoute( CGlobalVars *pGlobals, CBotCmd &cmd )
 			AgPBObstacle obstacle;
 			InspectObstacle( obstacle, -1, true, (uintp)INVALID_EHANDLE_INDEX, true );
 			if ( ( pNode->flags & AgPB_WP_LADDER ) == 0 &&
-			     BeginBreakable( obstacle, pGlobals->curtime, !bJumpLeg && bCrouch ) )
+			     BeginBreakable( obstacle, pGlobals->curtime, posture.crouch ) )
 			{
 				UpdateBreakable( pGlobals, cmd );
 				return;
@@ -1535,9 +1652,9 @@ void CAgPBManager::ThinkAll( CGlobalVars *pGlobals )
 	}
 }
 
-void CAgPBManager::ResetAllTasks()
+void CAgPBManager::ResetAllTasks( const char *reason )
 {
-	for ( int i = 0; i < m_Bots.Count(); ++i ) m_Bots[i]->ResetTaskSystem();
+	for ( int i = 0; i < m_Bots.Count(); ++i ) m_Bots[i]->ResetTaskSystem( reason );
 }
 
 CAgPB *CAgPBManager::Get( int listIndex )

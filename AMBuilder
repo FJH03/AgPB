@@ -10,6 +10,7 @@ for sdk_target in MMSPlugin.sdk_targets:
   binary.sources += [
     'src/plugin.cpp',
     'src/bot.cpp',
+    'src/bot_combat.cpp',
     'src/obstacle.cpp',
     'src/netvars.cpp',
     'src/waypoint.cpp',
@@ -20,6 +21,7 @@ for sdk_target in MMSPlugin.sdk_targets:
     'src/tasks.cpp',
     'src/objectives.cpp',
     'src/bot_tasks.cpp',
+    'src/bot_intention.cpp',
     'src/bot_objective_actions.cpp',
   ]
 

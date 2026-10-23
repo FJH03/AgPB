@@ -10,12 +10,19 @@
 | `agpb_add [team]` | 创建 bot：1=观察者 2=T 3=CT（默认用 `agpb_team`） |
 | `agpb_bot_team <idx> <team>` | 运行时切换队伍 |
 | `agpb_list` | 列出所有 bot（队伍 / 血量 / 武器 / 坐标） |
+| `agpb_bot_info [idx\|all]` | 只读生命周期快照，默认全部：身份、地图 / 回合代次、存活 / 队伍、任务 / 路线归属、终点计时、清理原因，以及最近实际提交的 CUserCmd |
+| `agpb_bot_clearance [idx\|all]` | 独立只读清障快照，默认全部：完整目标 / 武器句柄、路线owner / goal、破坏任务 / 预算、武器状态、最近实际CUserCmd及累计提交攻击次数 |
 | `agpb_kick <idx\|all>` | 移除 bot |
 | `agpb_netlist <bot-idx> [filter]` ｜ `agpb_netlist ent <edict-idx> [filter]` | 打印实体 SendTable 字段（名字 / 偏移 / 当前值） |
 | `agpb_nethandle <idx> <field>` | 解包 EHANDLE 并解析回实体（entry / serial / class） |
 | `agpb_obstacle_entity <targetname>` | **只读诊断**：通过公开 server tools 查询一个命名实体的位置、模型索引、碰撞组、生命值与候选分类 |
 | `agpb_ents [class-filter]` | 列出世界实体（edict 下标 / 类名 / 血量 / 坐标） |
 | `agpb_netwrite <bot-idx> <field> <value> [element]` ｜ `... ent <edict-idx> ...` | **开发 / 诊断工具**：写网络字段并打印邻字段对照；不作为 bot 的行为手段（[`PROGRESS.md`](PROGRESS.md) 问题 14） |
+
+`agpb_bot_info` 的 `cmdnum` / `cmdtick`、`buttons` / `move` / `view` 来自最近实际提交的
+CUserCmd，读取时可能早于当前 tick。停止、死亡、换队或回合变化后应跨至少两个 tick 再取样，
+并连续核对命令序号递增、输入释放和任务 / 路线状态；一帧快照不能代替生命周期验收。
+清障诊断的 `attackcmds` 只统计实际提交含 `IN_ATTACK` 的命令，伤害与破坏另以真实事件和目标状态确认。
 
 ## 普通模式任务
 
@@ -36,6 +43,47 @@
 携带 C4 且已进入爆破区时安放、靠近已安放 C4 且剩余时间足够时拆除、
 靠近掉落 C4 时拾取；需要接近目标时，起点须在地面且短段可行走体积检查通过。
 此时不能据此验收跨图寻路或逃爆。
+
+## 普通模式战斗与难度
+
+`agpb_combat` 默认 `1`。本地战斗沿用 SyPB 普通模式机制，EBot 作实现对照：
+使用当前持有武器，在地面停步瞄准、按冷却脉冲开火或换弹；每次开火复核实际指向与玩家遮挡。
+当前不追敌，空中和梯子阶段不接管导航。战斗保留原任务 / 路线归属，目标失效后释放攻击并交回本地任务；
+逃爆及正在安放 / 拆除等优先交互仍由本地核心处理。开启战斗不会解除手动 stop。
+
+| 命令 | 说明 |
+|---|---|
+| `agpb_bot_combat <idx\|all> [0\|1]` | 切换指定 bot 的本地战斗；省略开关等于 `1`，还须全局 `agpb_combat=1` |
+| `agpb_bot_combat_info [idx\|all]` | 只读目标完整句柄 / userid、武器、瞄准、实际攻击命令 / 弹药消耗、任务与路线归属，以及 difficulty / skill / 反应和后坐力状态 |
+| `agpb_bot_difficulty <idx\|all> <0..4>` | 给已有 bot 设置 SyPB 难度并在该档范围内重新选择 skill；清当前战斗目标，不改自主开关 |
+
+五档预设的 skill 范围为 `0=1–29`、`1=30–49`、`2=50–79`、`3=80–99`、`4=100`；
+内部技能表有六行，按 `skill / 20` 选择反应与后坐力参数。`agpb_difficulty` 默认 `3`，只影响之后创建的 bot。
+瞄准同时区分反应、头部选择、低技能误差与弹道暂停；SyPB 的直接对准条件是已产生开火意图且
+`skill >= 70`（狙击武器也有该分支），因此也覆盖档位 2 的高 skill 和档位 3，并非最高档独有。
+
+## 可选 agent 意图
+
+本地 SyPB / EBot 血统核心默认自主运行；已提供原生控制台意图接口及确定性 Python 客户端，尚未接入 LLM 战术层。
+外部调用者只给路点目标，由现有任务仲裁、手工图导航和 CUserCmd 执行移动 / 瞄准 / 按键。
+
+| 命令 | 说明 |
+|---|---|
+| `agpb_agent_state` | 只读当前地图代次 `mapserial`、回合代次 `round`、实际 bot `userid`、租约及本地任务状态 |
+| `agpb_agent_intent <mapserial> <round> <userid> move\|camp <wp> <ttl>` | 在当前地图 / 回合和该 bot 身份下提交目标；TTL 为有限的 `0.5..30` 游戏秒，仅接受普通模式、存活且 `auto=1` 的 bot |
+| `agpb_agent_intent <mapserial> <round> <userid> clear` | 释放该 bot 的意图及其拥有的路线 / 清障子任务，交回本地任务 |
+
+先查询 state 再使用当前 scope 与实际 userid，不用会前移的 bot 列表 idx 代替身份。
+意图优先级高于普通巡逻、低于本地目标 / 逃爆；战斗和清障仍由核心处理。
+同目标、同模式续期保留 token 与当前 hop；TTL 在挂起和战斗期间继续计时。
+`move` 到达即释放，`camp` 到达后保持至租约到期；过期、失败、清除或生命周期变化后自动回到本地核心，
+不会取消更高优先级目标的路线。没有后续续期时按 TTL 释放；接口不改变自主开关，
+手动 `agpb_bot_stop` 后仍保持停止，须用户显式重新开启 auto。
+
+`tools/agpb_agent.py` 向已运行的原生控制台会话提交有限时长的目标并续期；须显式 `--run`，
+使用实际 `--userid`、`--mode move|camp`、`--waypoint`、`--session-name` 和 `--session-directory`。
+默认续期 10 墙钟秒、TTL 为 3 游戏秒；客户端不打开 auto、不接管既有租约，退出后停止续期，
+保留最后期限供本地核心自动回退。原始回执保留在它打印的系统 TEMP 目录。
 
 ## 路点：基础操作
 
@@ -100,13 +148,48 @@
 自动破坏不依赖它；`agpb_bot_obstacle` 本身仍是只读查询。生命值可由公开只读 key 查询补读，
 未暴露的受伤属性保持 `unknown`，候选判断不等于保证可破坏。
 
+## 可选回归夹具
+
+以下命令由手工加载的 SourceMod 测试夹具提供，不属于 AgPB 发布包。编译、加载与完整
+M3a / M3b 采样流程见 [路点工作流](waypoint-workflow/README.md)，战斗专用夹具及流程见 [战斗验证](combat-tests/README.md)。
+准备命令要求 `sv_cheats 1`，只用于构造测试条件；bot 的导航、视角和按键仍由核心 CUserCmd 控制。
+
+| 命令 | 说明 |
+|---|---|
+| `agpb_wp_probe_state` | 只读玩家身份、实际队伍 / 存活、位置 / 速度 / 视角、按钮、真实冻结标志和事件计数 |
+| `agpb_wp_probe_bomb` | 只读 C4 状态与真实安放 / 拆除 / 爆炸事件计数 |
+| `agpb_wp_probe_lifecycle` | 只读生命周期计数及最近真实事件缓存；`replay=1` 保留原序号，不表示新事件 |
+| `agpb_wp_probe_clearance_watch name\|ent value` | 独立clearance probe：按唯一targetname或实体idx锁定已有物件的完整SM EntRef，最多16个；需SDKHooks实际加载成功 |
+| `agpb_wp_probe_clearance slot` | 查询所有被观测物件、该玩家真实武器状态、伤害 / 破坏 / 开火计数及64条真实事件缓存 |
+| `agpb_wp_probe_clearance_clear` | 仅取消clearance观测与钩子，不删除或改变游戏物件 |
+| `agpb_wp_probe_combat_watch subject_bot_slot human_slot [target_slot]` | 独立只读战斗探针：绑定实际身份与事件；主体 bot 与低 slot 真人保持同队，第三参数仅供另获明确授权的受控敌对场景 |
+| `agpb_wp_probe_combat` | 读取已绑定玩家 / 武器、真实开火 / 伤害 / 死亡事件与射线观察 |
+| `agpb_wp_probe_combat_clear` | 仅取消战斗观测，不改变玩家或游戏设置 |
+| `agpb_reg_lifecycle_freeze bot_slot human_slot seconds [after_seconds]` | 同队存活 bot 的有限时 point_viewcontrol；持续 0.5..15 秒，可延迟 0..5 秒，实际冻结须读回确认 |
+| `agpb_reg_lifecycle_kill bot_slot human_slot` | 同队 bot 的真实死亡准备；拒绝与点控重叠 |
+| `agpb_reg_lifecycle_respawn bot_slot human_slot` | 同队已死 bot 的真实重生准备；拒绝与点控重叠 |
+| `agpb_reg_lifecycle_team bot_slot human_slot SPEC\|SAME` | 仅场景准备：先观察者，再加入锚定真人所在队；核心换队回归使用 `agpb_bot_team` |
+| `agpb_reg_clearance_arm stop\|death bot_slot human_slot core_idx` | fixture1.2：单个AgPB fake与活真人同队、core_idx=0；首次真实weapon_fire后跨tick记录快照，再标准stop / 真实自杀；10秒未执行则取消 |
+| `agpb_reg_clear` | 取消真人输入、生命周期及fire-arm请求，并通过引擎 Disable 恢复存活点控对象；随后须 probe 确认 |
+
+死亡、换队、卸载前先结束点控并确认 `frozen=0`、玩家视角恢复。真实回合切换通过游戏原生
+`endround`，以真实事件和后续状态验收。
+fire-arm 绑定双方userid / serial，clear、卸载、换图、断线或身份 / 同队条件失效均取消；`armed`不能证明实际中断。
+常规测试仍要求所有 bot 与真人同队；战斗探针的绑定不构成敌对授权。正向敌对测试须另获用户单独明确授权，
+并持续核对 Radio 兼容补丁 `active=1`、`intact=1`；工作流与离线重算入口见 [战斗验证](combat-tests/README.md)。
+
 ## ConVar
+
+原生 ZBot 作为对手的多目标短测另用可选只读 [agpb_native_match_probe.sp](combat-tests/fixtures/agpb_native_match_probe.sp)：
+`agpb_match_watch <subject_slot> <human_slot>`、`agpb_match_state`、`agpb_match_clear`。
+该观察器要求真人与受测 AgPB 同队，并只观测另外两或三名假客户端；不会创建对手、发输入或修改伤害。
+敌队场景仍须用户单独授权并核验匹配的 Radio guard；原生 ZBot 仅作对手，不替代 AgPB 行为核心。
 
 可选三方假客户端兼容层：先按 [部署说明](compat/sourcemod/README.md) 构建 / 安装 SourceMod 补丁。
 
 | 命令 / ConVar | 说明 |
 |---|---|
-| `sm_agpb_guard_status` | 只读查询补丁 active / intact，以及空 bot、空 profile、有效原生分支的实际命中计数；本轮测试始终遵守 bot 与真人同队的前置 |
+| `sm_agpb_guard_status` | 只读查询补丁 active / intact，以及空 bot、空 profile、有效原生分支的实际命中计数；常规测试要求所有 bot 与真人同队；受控敌对测试另需用户明确授权及 active / intact 均有效 |
 | `sm_agpb_fakeclient_guard` | 默认 1，开关当前 DLL 版本的 Radio 兼容补丁；有假客户端连接时拒绝关闭。卸载前先踢所有假客户端，关闭后原始崩溃风险恢复 |
 
 | ConVar | 默认 | 说明 |
@@ -114,6 +197,9 @@
 | `agpb_enable` | 1 | 0 = 不驱动 bot（路点编辑器 / 绘制 / 菜单不受影响） |
 | `agpb_team` | 2 | `agpb_add` 不带队伍参数时用的默认队 |
 | `agpb_mode` | normal | 运行期游戏模式：`normal`（原生）/ `zombie`（ZM-ZE，行为未实现）。按图在 cfg 里切 |
+| `agpb_combat` | 1 | 普通模式本地战斗总开关；还须对应 bot 的战斗开关开启 |
+| `agpb_difficulty` | 3 | 新建 bot 的 SyPB 难度 `0..4`；已有 bot 用 `agpb_bot_difficulty` 修改 |
+| `agpb_combat_debug` | 0 | 输出战斗目标取得 / 释放诊断 |
 | `agpb_bomb_blast_radius` | 0 | C4最终伤害半径覆盖值（单位）；0按地图初始实体配置读取，并显示来源。若管理员运行期用 `map_setbombradius` 改值，需同步设置为实际伤害半径；用 `map_showbombradius` 核对。不是地图原始damage参数 |
 | `agpb_obstacle_debug` | 0 | 1 = 行走时每 0.25 秒输出路径障碍变化；卡住时输出扩大检测结果。只控制额外日志，自主破坏 / 续路不依赖此开关 |
 | `agpb_wp_show` | 0 | 绘制路点 |

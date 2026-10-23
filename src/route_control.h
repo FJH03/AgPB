@@ -37,6 +37,24 @@ inline bool LandedJump(bool jumpLeg, bool seenAirborne, bool grounded, float dz)
     return jumpLeg && seenAirborne && grounded && std::isfinite(dz) &&
         std::fabs(dz) <= HeightTolerance;
 }
+struct RoutePosture { bool jump; bool crouch; };
+inline RoutePosture ComputeRoutePosture(bool authoredCrouch, bool nextCrouch,
+                                        bool nextJump, float targetDistance,
+                                        bool jumpLeg, bool landedJump,
+                                        bool grounded, bool recovering) {
+    const bool canCrouch = !jumpLeg || landedJump;
+    // A nearby authored crouch section can begin before the preceding anchor.
+    // In particular, a completed jump may land just short of a low opening.
+    // This changes command posture only; authored flags/radii are untouched.
+    bool crouch = authoredCrouch || (grounded && canCrouch && nextCrouch &&
+                                    !nextJump && targetDistance < 64.0f);
+    // Source needs time to unduck before takeoff. Pending/in-flight jumps
+    // retain their engine-owned crouch-jump sequence without added IN_DUCK.
+    if (canCrouch && nextJump && targetDistance < 120.0f) crouch = false;
+    RoutePosture result = {jumpLeg && !landedJump && grounded && !recovering,
+                           crouch && canCrouch};
+    return result;
+}
 struct Wish { float x; float y; };
 inline Wish ComputeWish(float dx, float dy, float vx, float vy, float interval,
                         float acceleration, float friction, float stopSpeed,

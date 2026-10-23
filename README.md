@@ -38,6 +38,7 @@ SDK 静态库必须先编好：`hl2sdk-css\source-engine-czero\build\{tier0,vstd
 | [`PROGRESS.md`](PROGRESS.md) | 当前状态、待验收事项与下一步 |
 | [`COMMANDS.md`](COMMANDS.md) | 控制台命令 / ConVar / 路点编辑器用法 |
 | [`waypoint-workflow/README.md`](waypoint-workflow/README.md) | 路点制作、原生控制台/TGA、实走与真实目标验收的统一入口 |
+| [`combat-tests/README.md`](combat-tests/README.md) | 独立战斗验证、难度采样与原生 bot 对手短测 |
 | [`VERIFY.md`](VERIFY.md) | A–G 基线回归、主线阶段验收标准与兼容补丁验证；执行顺序与状态见 PROGRESS |
 | [`CRASH_REPORT.md`](CRASH_REPORT.md) | 当前Radio兼容补丁的适用范围、部署及启停约束 |
 

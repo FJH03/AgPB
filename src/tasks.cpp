@@ -29,6 +29,7 @@
 #include "tasks.h"
 
 #include <algorithm>
+#include <cmath>
 
 namespace
 {
@@ -91,6 +92,7 @@ const char *AgPBTaskName( AgPBTaskId id )
 	case AgPBTaskId::RescueHostage: return "rescue_hostage";
 	case AgPBTaskId::EscortHostages: return "escort_hostages";
 	case AgPBTaskId::EscapeBomb: return "escape_bomb";
+	case AgPBTaskId::AgentIntention: return "agent_intention";
 	}
 	return "unknown";
 }
@@ -257,6 +259,18 @@ bool AgPBTaskStack::RemoveToken( std::uint64_t token )
 			Select();
 			return true;
 		}
+	}
+	return false;
+}
+
+bool AgPBTaskStack::RenewDeadline( std::uint64_t token, float deadline )
+{
+	if ( token == 0 || !std::isfinite( deadline ) || deadline <= 0.0f ) return false;
+	for ( std::size_t i = 1; i < m_tasks.size(); ++i )
+	{
+		if ( m_tasks[i].token != token ) continue;
+		m_tasks[i].deadline = deadline;
+		return true;
 	}
 	return false;
 }
