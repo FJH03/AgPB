@@ -7,8 +7,11 @@ from pathlib import Path
 
 HEADER = struct.Struct('<III32s32s')
 NODE = struct.Struct('<3fIBB8h8Hf')
+NODE_V2 = struct.Struct('<3fIBB8h8Hf24f')
+NODES = {1: NODE, 2: NODE_V2}
 MAGIC = 0x50424741
 VERSION = 1
+JUMP_VELOCITY_MAX = 2000.0
 
 
 def integer(value, field):
@@ -20,7 +23,10 @@ def integer(value, field):
 def number(value, field):
     if isinstance(value, bool) or not isinstance(value, (int, float)):
         raise ValueError(field + ' must be a finite number')
-    value = float(value)
+    try:
+        value = float(value)
+    except OverflowError as exc:
+        raise ValueError(field + ' must be a finite float32 number') from exc
     if not math.isfinite(value):
         raise ValueError(field + ' must be a finite number')
     try:
@@ -42,11 +48,23 @@ def header_string(value, field):
     return encoded
 
 
+def jump_velocity(value):
+    if not isinstance(value, list) or len(value) != 3:
+        raise ValueError('jumpVelocity must contain exactly three XYZ components')
+    result = [number(component, 'jumpVelocity') for component in value]
+    if any(abs(component) > JUMP_VELOCITY_MAX for component in result):
+        raise ValueError('jumpVelocity components must be between -2000 and 2000 units/s')
+    return [struct.unpack('<f', struct.pack('<f', component))[0] for component in result]
+
+
 def export(plan):
-    """Return AGPW v1 bytes, rejecting ambiguity before any output is written.
+    """Return AGPW v1/v2 bytes, validating before any output is written.
 
     Radius is mandatory. Zero flags, mesh=0 and gravity=1 retain the existing
-    explicit-plan format defaults; none of these defaults creates graph edges.
+    explicit-plan defaults. Missing directed-edge jumpVelocity is XYZ zero. A
+    nonzero jumpVelocity or
+    explicit agpw_version=2 selects v2; unchanged old plans still export v1.
+    plan_version describes the JSON schema, independently of the AGPW version.
     """
     if not isinstance(plan, dict):
         raise ValueError('plan must be an object')
@@ -58,6 +76,9 @@ def export(plan):
         raise ValueError('nodes must contain 1..8192 explicit nodes')
     if not isinstance(edges, list):
         raise ValueError('directed_edges must be an explicit list')
+    file_version = integer(plan.get('agpw_version', 1), 'agpw_version')
+    if file_version not in NODES:
+        raise ValueError('Only agpw_version 1 or 2 is supported')
     labels = {}
     for index, node in enumerate(nodes):
         if not isinstance(node, dict):
@@ -81,12 +102,17 @@ def export(plan):
         if pair in seen:
             raise ValueError('Duplicate directed edge: ' + source + ' -> ' + target)
         seen.add(pair)
-        adjacency[pair[0]].append((pair[1], flags))
+        velocity = jump_velocity(edge.get('jumpVelocity', [0.0, 0.0, 0.0]))
+        if any(component != 0 for component in velocity):
+            if not flags & 1:
+                raise ValueError('Nonzero jumpVelocity requires an explicit PATH_JUMP edge')
+            file_version = 2
+        adjacency[pair[0]].append((pair[1], flags, velocity))
     if any(len(row) > 8 for row in adjacency):
         raise ValueError('More than eight outgoing edges')
     name = header_string(plan.get('map'), 'map')
     author = header_string(plan.get('author', 'AgPB manual waypoints'), 'author')
-    data = bytearray(HEADER.pack(MAGIC, VERSION, len(nodes), name, author))
+    data = bytearray(HEADER.pack(MAGIC, file_version, len(nodes), name, author))
     for index, (node, row) in enumerate(zip(nodes, adjacency)):
         xyz = [number(node.get(key), 'node %d %s' % (index, key)) for key in ('x', 'y', 'z')]
         flags = integer(node.get('flags', 0), 'node flags')
@@ -95,9 +121,12 @@ def export(plan):
         gravity = number(node.get('gravity', 1.0), 'gravity')
         if not 0 <= radius <= 255 or not 0 <= flags <= 0xffffffff or not 0 <= mesh <= 255:
             raise ValueError('Invalid node fields')
-        targets = [target for target, _ in row] + [-1] * (8 - len(row))
-        link_flags = [value for _, value in row] + [0] * (8 - len(row))
-        data.extend(NODE.pack(*xyz, flags, radius, mesh, *targets, *link_flags, gravity))
+        targets = [target for target, _, _ in row] + [-1] * (8 - len(row))
+        link_flags = [value for _, value, _ in row] + [0] * (8 - len(row))
+        values = (*xyz, flags, radius, mesh, *targets, *link_flags, gravity)
+        if file_version == 2:
+            values += tuple(component for _, _, velocity in row for component in velocity) + (0.0,) * (3 * (8 - len(row)))
+        data.extend(NODES[file_version].pack(*values))
     return bytes(data)
 
 
@@ -114,6 +143,7 @@ def main():
         parser.exit(2, 'error: ' + str(exc) + '\n')
     print(json.dumps({'map': plan['map'], 'nodes': len(plan['nodes']),
                       'directed_edges': len(plan['directed_edges']),
+                      'agpw_version': HEADER.unpack_from(data)[1],
                       'bytes': len(data), 'output': str(args.output)}))
 
 

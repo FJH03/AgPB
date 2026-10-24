@@ -16,6 +16,7 @@ from urllib.request import Request, urlopen
 
 import agpw_view3d as viewer
 from agpw3d_document import schema
+from test_agpw3d_document import zero_velocity
 from test_agpw_view3d import (
     get_json, make_bsp, post_waypoint, running_viewer, waypoint_bytes, write_gameinfo,
 )
@@ -27,11 +28,13 @@ _ORIGINAL_FLAGS = _UNKNOWN_FLAG | (1 << 1)
 
 def source_bytes():
     """Keep an untouched second record, unknown flags, signed zero and a tail."""
-    first = waypoint_bytes(origin=(-0.0, 2, 3), flags=_ORIGINAL_FLAGS)
+    first = waypoint_bytes(origin=(-0.0, 2, 3), target=1, flags=_ORIGINAL_FLAGS)
     second = waypoint_bytes(origin=(15, -20, 31), target=0, flags=0x10000000)
     result = bytearray(first)
     struct.pack_into('<I', result, 8, 2)
     result.extend(second[viewer.HEADER.size:])
+    for index in range(2):
+        struct.pack_into('<H', result, viewer.HEADER.size + index * viewer.RECORD.size + 34, 1)
     result.extend(b'\x00opaque-tail\xfe\xff')
     return bytes(result)
 
@@ -136,6 +139,44 @@ class EditorHTTPChecks(unittest.TestCase):
             untouched_again, _ = download(url, export_payload(manifest, []))
             self.assertEqual(untouched_again, self.original)
 
+    def test_velocity_export_upgrades_v1_and_reimport_edits_v2_without_downgrade(self):
+        velocity = zero_velocity()
+        velocity[0] = [123.456789, -234.56789, 300]
+        with running_viewer(self.game) as (_, url):
+            manifest = post_waypoint(url, self.original)
+            self.assertEqual(manifest['waypoints']['version'], 1)
+            self.assertEqual([point['jumpVelocity'] for point in manifest['waypoints']['points']], [zero_velocity(), zero_velocity()])
+            zero, _ = download(url, export_payload(manifest, [dict(index=0, jumpVelocity=zero_velocity())]))
+            self.assertEqual(zero, self.original)
+            exported, _ = download(url, export_payload(manifest, [dict(index=0, jumpVelocity=velocity)]))
+            expected = bytearray(self.original[:viewer.HEADER.size])
+            struct.pack_into('<I', expected, 4, 2)
+            for index in range(2):
+                offset = viewer.HEADER.size + index * viewer.RECORD.size
+                expected.extend(self.original[offset:offset + viewer.RECORD.size])
+                vectors = velocity if index == 0 else zero_velocity()
+                expected.extend(struct.pack('<24f', *(value for vector in vectors for value in vector)))
+            expected.extend(self.original[viewer.HEADER.size + 2 * viewer.RECORD.size:])
+            self.assertEqual(exported, bytes(expected))
+            # Download does not implicitly replace the currently open source.
+            untouched, _ = download(url, export_payload(manifest, []))
+            self.assertEqual(untouched, self.original)
+            imported = post_waypoint(url, exported, 'v2.agpw')
+            self.assertEqual(imported['waypoints']['version'], 2)
+            self.assertEqual(imported['waypoints']['points'][0]['jumpVelocity'][0],
+                             list(struct.unpack('<3f', struct.pack('<3f', *velocity[0]))))
+            self.assertEqual(imported['waypoints']['points'][0]['linkSlots'][0], [1, 1])
+            self.assertEqual(imported['editor']['source_hash'], hashlib.sha256(exported).hexdigest())
+            edited, _ = download(url, export_payload(imported, [dict(index=1, radius=99)]))
+            expected[viewer.HEADER.size + viewer.RECORD_V2.size + 16] = 99
+            self.assertEqual(edited, bytes(expected))
+            reset, _ = download(url, export_payload(imported, [dict(index=0, jumpVelocity=zero_velocity())]))
+            struct.pack_into('<3f', expected, viewer.HEADER.size + 54, 0, 0, 0)
+            expected[viewer.HEADER.size + viewer.RECORD_V2.size + 16] = manifest['waypoints']['points'][1]['radius']
+            self.assertEqual(reset, bytes(expected))
+            self.assertEqual(viewer.parse_waypoints(reset, 'zero.agpw')['version'], 2)
+        self.assertEqual(self.source.read_bytes(), self.original)
+
     def test_invalid_edits_are_rejected_atomically_without_changing_open_snapshot(self):
         invalid = (
             [dict(index=-1, radius=4)], [dict(index=2, radius=4)],
@@ -145,6 +186,12 @@ class EditorHTTPChecks(unittest.TestCase):
             [dict(index=0, radius=True)], [dict(index=0, radius=float('nan'))],
             [dict(index=0, flags=-1)], [dict(index=0, flags=0x100000000)],
             [dict(index=0, flags=True)], [dict(index=0, flags=3.5)],
+            [dict(index=0, jumpVelocity=True)], [dict(index=0, jumpVelocity='4')],
+            [dict(index=0, jumpVelocity=[[float('nan'), 0, 0]] + zero_velocity()[1:])],
+            [dict(index=0, jumpVelocity=[[float('inf'), 0, 0]] + zero_velocity()[1:])],
+            [dict(index=0, jumpVelocity=[[-2001, 0, 0]] + zero_velocity()[1:])],
+            [dict(index=0, jumpVelocity=[[2000.0001, 0, 0]] + zero_velocity()[1:])],
+            [dict(index=0, jumpVelocity=zero_velocity()[:7])],
             [dict(index=0, flags=1 << 2)],  # Clearing the existing unknown bit.
             [dict(index=0, flags=_ORIGINAL_FLAGS | 1)],  # Adding another unknown bit.
             [dict(index=0, origin=[0, 0, 0])], [dict(index=0, mesh=9)],

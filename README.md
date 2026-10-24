@@ -6,7 +6,7 @@ Counter-Strike: Source（Source 1 / Win64）的 agent 控制 bot —— Metamod:
 
 - 假客户端用 `server.dll` 的 `BotManager001` 创建，**不带任何 AI**；`RunPlayerMove` 与引擎
   驱动真人玩家是同一条路径，不需要特征码、硬编码偏移，也不链接 `server.dll`。
-- 玩家侧的一切（移动 / 视角 / 按键）都走 `CUserCmd`，不写服务端实体字段。
+- 常规移动 / 视角 / 按键走 `CUserCmd`；手工跳跃连边的弹道初速度按用户授权使用服务端变量，见 AGENTS 的弹道跳补充。
 - 现状 / 进度 / 下一步看 [`PROGRESS.md`](PROGRESS.md)。
 
 ## 需要什么

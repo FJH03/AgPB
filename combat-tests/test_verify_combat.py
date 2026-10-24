@@ -4,7 +4,7 @@ import itertools
 import re
 import unittest
 
-from verify_combat import HASHES, evaluate, evaluate_case, parse
+from verify_combat import HASHES, LOCOMOTION_CONTRACT, LOCOMOTION_KIND, evaluate, evaluate_case, parse
 from test_verify_lifecycle import CORE, CLEAR, change
 
 NONCE = itertools.count(1)
@@ -50,14 +50,21 @@ def events(friendly=False, victim_serial=259, health=70):
             row("event", 11.2, seq=112002, event="player_hurt", **common)]
 
 
-def frame(t, *, enemy=True, owned=False, attacks=0, health=100, pos=100, stopped=False, settled=False, retained=(), extra="", command=None):
+def frame(t, *, enemy=True, owned=False, attacks=0, health=100, pos=100, stopped=False, settled=False, retained=(), extra="", command=None,
+          position=None, movement=None, velocity=None, view=None):
     tick = round(t*100)
     core_changes = dict(tick=tick, time=f"{t:.3f}", cmdnum=tick, cmdtick=tick,
                         pos=f"({pos},0,0)", vel="(0,0,0)" if owned or stopped or settled else "(10,0,0)",
                         move="(0,0,0)" if owned else "(100,0,0)", buttons="0x1" if owned and attacks else "0x0")
+    position = position if position is not None else [pos, 0, 0]
+    core_changes["pos"] = "(" + ",".join(map(str, position)) + ")"
+    for key, value in (("move", movement), ("vel", velocity), ("view", view)):
+        if value is not None:
+            core_changes[key] = "(" + ",".join(map(str, value)) + ")"
     if stopped or settled:
         core_changes.update(CLEAR)
-        core_changes.update(tick=tick, time=f"{t:.3f}", cmdnum=tick, cmdtick=tick, pos=f"({pos},0,0)", reset="stop" if stopped else "arrived")
+        core_changes.update(tick=tick, time=f"{t:.3f}", cmdnum=tick, cmdtick=tick,
+                            pos="(" + ",".join(map(str, position)) + ")", reset="stop" if stopped else "arrived")
     core = change(CORE, core_changes)
     route = 0 if stopped or settled else 2
     combat = dict(v=1, enabled=1, global_=1, state="stopped" if stopped else "aiming" if owned else "scanning",
@@ -76,7 +83,7 @@ def frame(t, *, enemy=True, owned=False, attacks=0, health=100, pos=100, stopped
     parts.append(row("scene",t,**scene))
     for slot, userid, serial, fake, team, hp, x, fires in ((1,101,1,0,2,100,-100,0),(2,102,258,1,2,100,pos,attacks),(3,103,259,1,3 if enemy else 2,health,200,0)):
         parts.append(row("player",t,seq=tick*100+slot+1,slot=slot,userid=userid,serial=serial,fake=fake,team=team,alive=1,
-                         health_known=1,health=hp,state_known=1,player_state=0,life_state=0,pos=[x,0,0],fires=fires,
+                         health_known=1,health=hp,state_known=1,player_state=0,life_state=0,pos=position if slot==2 else [x,0,0],fires=fires,
                          hurts_dealt=attacks if slot==2 else 0,hurts_taken=attacks if slot==3 else 0))
         parts.append(row("weapon",t,seq=tick*100+slot+11,slot=slot,userid=userid,serial=serial,active_ref=-2001-slot,
                          active_ent=114+slot,**{"class":"weapon_usp"},clip_known=1,clip=12-attacks if slot==2 else 12,
@@ -119,6 +126,45 @@ def edit_log(receipt_, tag, changes):
     for line in receipt_["log"].splitlines():
         lines.append(change(line,changes) if tag in line else line)
     receipt_["log"]="\n".join(lines)+"\n"
+
+
+def locomotion_case(motion="approach"):
+    meta = metadata()
+    meta["acceptance_contract"] = LOCOMOTION_CONTRACT
+    item = dict(kind=LOCOMOTION_KIND, locomotion_policy="sypb_ground_v1", goal=4,
+                binding={key:meta[key] for key in HASHES}, target_identity=TARGET.copy(),
+                locomotion=dict(expected_motion=motion, weapon_class="weapon_usp",
+                                distance_range=[20, 300], movement_context="ground_walk"))
+    move = {"approach":[100,0,0], "retreat":[-100,0,0],
+            "strafe":[0,-100,0], "precision_stop":[0,0,0]}[motion]
+    def combat(t, step, attacks=1, retained=()):
+        position = ([100 + step*10,0,0] if motion == "approach" else
+                    [100 - step*10,0,0] if motion == "retreat" else
+                    [100,step*10,0] if motion == "strafe" else [100,0,0])
+        return frame(t, owned=True, attacks=attacks, health=100-30*attacks,
+                     position=position, movement=move, view=[0,0],
+                     velocity=[0,0,0] if motion == "precision_stop" else [move[0]/5,-move[1]/5,0], retained=retained)
+    shots = events()
+    stages = dict(before=[frame(10,command="agpb_bot_goto 0 4; agpb_bot_info 0; agpb_bot_combat_info 0; agpb_wp_probe_combat")],
+                  run=[combat(11,0,0),combat(11.5,1,retained=shots),combat(12,2,retained=shots)],
+                  resumed=[frame(12.5,attacks=1,health=70,pos=125,retained=shots,
+                                 extra="[AgPB] Test_Bot: combat released ent=3; route goal=#4 hop=0 owner=5"),
+                           frame(13,attacks=1,health=70,pos=130,retained=shots)],
+                  reengaged=[combat(t,i+3,retained=shots) for i,t in enumerate((13.5,14,14.5))],
+                  quiet=[frame(t,stopped=True,attacks=1,health=70,retained=shots,
+                               command="agpb_bot_stop 0; agpb_bot_info 0; agpb_bot_combat_info 0; agpb_wp_probe_combat" if t==15 else None)
+                         for t in (15,15.5,16)])
+    if motion == "precision_stop":
+        second = [change(line, {"tick":1370, "t":13.7, "seq":137001+i})
+                  for i,line in enumerate(events(health=40))]
+        stages["reengaged"] = [combat(13.5,3,retained=shots),
+                               combat(14,4,attacks=2,retained=shots+second),
+                               combat(14.5,5,attacks=2,retained=shots+second)]
+        stages["quiet"] = [frame(t,stopped=True,attacks=2,health=40,retained=shots+second,
+                                 command="agpb_bot_stop 0; agpb_bot_info 0; agpb_bot_combat_info 0; agpb_wp_probe_combat" if t==15 else None)
+                           for t in (15,15.5,16)]
+    item["stages"] = stages
+    return meta,item
 
 
 class CombatEvidenceTests(unittest.TestCase):
@@ -299,6 +345,201 @@ class CombatEvidenceTests(unittest.TestCase):
         self.verdict(meta,item)
         item["identity"]["dll_sha256"]="b"*64
         self.verdict(meta,item,"pending","Unknown per-case")
+
+    def test_locomotion_contract_certifies_only_one_explicit_sample(self):
+        for motion in ("approach", "retreat", "strafe", "precision_stop"):
+            with self.subTest(motion=motion):
+                meta,item=locomotion_case(motion)
+                result=self.verdict(meta,item)
+                self.assertEqual(result["locomotion"]["expected_motion"],motion)
+                report=evaluate(dict(schema_version=1,metadata=meta,cases=[item]))
+                self.assertEqual(report["status"],"passed",report)
+                self.assertFalse(report["pending_kinds"])
+                self.assertIn("sampled_ground",report["scope"])
+        meta,item=locomotion_case()
+        meta.pop("acceptance_contract")
+        report=evaluate(dict(schema_version=1,metadata=meta,cases=[item]))
+        self.assertEqual(report["status"],"incomplete")
+        self.assertEqual(set(report["pending_kinds"]),set(("friendly_rejection","occluded_rejection","visible_damage_resume","stop_interrupt")))
+
+    def test_legacy_stationary_assertion_is_preserved_and_policy_is_explicit(self):
+        meta,item=make_case("visible_damage_resume")
+        edit_log(item["stages"]["run"][0],"[AgPB lifecycle]",{"move":"(100,0,0)"})
+        self.verdict(meta,item,"pending","suspend actual locomotion")
+        meta,item=locomotion_case();item.pop("locomotion_policy")
+        self.verdict(meta,item,"pending","locomotion policy")
+        meta,item=locomotion_case();item["locomotion"].pop("distance_range")
+        self.verdict(meta,item,"pending","scene boundaries")
+
+    def test_locomotion_commands_without_real_displacement_and_wrong_direction_fail(self):
+        meta,item=locomotion_case()
+        for rec in item["stages"]["run"]:
+            edit_log(rec,"[AgPB lifecycle]",{"pos":"(100,0,0)"})
+            edit_log(rec,"slot=2 userid=102 serial=258 fake=1",{"pos":"(100,0,0)"})
+        self.verdict(meta,item,"pending","actual displacement")
+        meta,item=locomotion_case();item["locomotion"]["expected_motion"]="retreat"
+        self.verdict(meta,item,"pending","actual displacement")
+
+    def test_locomotion_displacement_without_commands_and_reversed_world_axis_fail(self):
+        meta,item=locomotion_case()
+        for rec in item["stages"]["run"]:edit_log(rec,"[AgPB lifecycle]",{"move":"(0,0,0)"})
+        self.verdict(meta,item,"pending","actual displacement")
+        meta,item=locomotion_case()
+        for rec in item["stages"]["run"]:edit_log(rec,"[AgPB lifecycle]",{"view":"(0,180)"})
+        self.verdict(meta,item,"pending","actual displacement")
+
+    def test_locomotion_needs_grounded_fresh_window_and_actual_scene_boundaries(self):
+        for field,value in (("airborne",1),("flags","0x300"),("roundfrozen",1),("move","(100,0,1)"),("buttons","0x2")):
+            meta,item=locomotion_case()
+            edit_log(item["stages"]["run"][1],"[AgPB lifecycle]",{field:value})
+            self.verdict(meta,item,"pending","remain grounded")
+        meta,item=locomotion_case();item["stages"]["run"].pop()
+        self.verdict(meta,item,"pending","Too few")
+        meta,item=locomotion_case();item["locomotion"]["distance_range"]=[0,50]
+        self.verdict(meta,item,"pending","distance is outside")
+        meta,item=locomotion_case();item["locomotion"]["weapon_class"]="weapon_awp"
+        self.verdict(meta,item,"pending","weapon/target changed")
+
+    def test_locomotion_real_damage_route_resume_and_combat_stop_remain_required(self):
+        meta,item=locomotion_case()
+        for stage in item["stages"].values():
+            for rec in stage:edit_log(rec,"[WP_COMBAT_PLAYER]",{"health":100})
+        self.verdict(meta,item,"pending","health decrease")
+        meta,item=locomotion_case()
+        edit_log(item["stages"]["run"][1],"[AgPB lifecycle]",{"index":1})
+        edit_log(item["stages"]["run"][1],"[AgPB] Test_Bot: combat",{"hop":1})
+        self.verdict(meta,item,"pending","owner/goal/hop")
+        meta,item=locomotion_case();item["stages"]["resumed"][0]["command"]+="; agpb_bot_goto 0 4"
+        self.verdict(meta,item,"pending","replacement goto")
+        meta,item=locomotion_case()
+        edit_log(item["stages"]["quiet"][1],"[AgPB lifecycle]",{"move":"(10,0,0)"})
+        self.verdict(meta,item,"pending","release actual")
+
+    def test_locomotion_reengagement_preserves_resumed_hop_and_moves_before_stop(self):
+        meta,item=locomotion_case()
+        for rec in item["stages"]["reengaged"]:
+            edit_log(rec,"[AgPB lifecycle]",{"index":1})
+            edit_log(rec,"[AgPB] Test_Bot: combat",{"hop":1})
+        self.verdict(meta,item,"pending","owner/goal/hop")
+        meta,item=locomotion_case()
+        for rec in item["stages"]["reengaged"]:edit_log(rec,"[AgPB lifecycle]",{"move":"(0,0,0)"})
+        self.verdict(meta,item,"pending","actual displacement")
+        meta,item=locomotion_case();item["stages"]["quiet"][0]["command"]="agpb_bot_info 0; agpb_bot_combat_info 0; agpb_wp_probe_combat"
+        self.verdict(meta,item,"pending","explicit native stop")
+
+    def test_locomotion_rejects_external_position_change_and_precision_stop_drift(self):
+        meta,item=locomotion_case();item["stages"]["run"][1]["command"]+="; setpos 110 0 0"
+        self.verdict(meta,item,"pending","External movement")
+        meta,item=locomotion_case("precision_stop")
+        edit_log(item["stages"]["run"][1],"[AgPB lifecycle]",{"vel":"(10,0,0)"})
+        self.verdict(meta,item,"pending","Precision-stop")
+
+    def test_locomotion_contract_does_not_silently_accept_legacy_cases(self):
+        meta,item=make_case("visible_damage_resume");meta["acceptance_contract"]=LOCOMOTION_CONTRACT
+        with self.assertRaisesRegex(ValueError,"only its explicit"):
+            evaluate(dict(schema_version=1,metadata=meta,cases=[item]))
+
+    def test_locomotion_cannot_use_damage_from_later_reengagement(self):
+        meta,item=locomotion_case()
+        for stage in item["stages"].values():
+            for rec in stage:
+                edit_log(rec,"event=weapon_fire ",{"tick":1400,"t":14})
+                edit_log(rec,"event=player_hurt ",{"tick":1400,"t":14})
+        self.verdict(meta,item,"pending","Shot is not before")
+
+    def test_locomotion_accepts_real_braking_and_posture_transitions_in_both_engagements(self):
+        for stage in ("run", "reengaged"):
+            for state in ("braking", "posture-settling"):
+                with self.subTest(stage=stage, state=state):
+                    meta,item=locomotion_case("precision_stop")
+                    rec=item["stages"][stage][0]
+                    edit_log(rec,"[AgPB] Test_Bot: combat",{"state":state})
+                    edit_log(rec,"[AgPB lifecycle]",{"buttons":"0x0"})
+                    self.verdict(meta,item)
+
+    def test_legacy_owned_state_allowlist_is_unchanged(self):
+        for kind in ("visible_damage_resume", "stop_interrupt"):
+            for state in ("braking", "posture-settling"):
+                with self.subTest(kind=kind, state=state):
+                    meta,item=make_case(kind)
+                    edit_log(item["stages"]["run"][0],"[AgPB] Test_Bot: combat",{"state":state})
+                    self.verdict(meta,item,"pending","combat ownership")
+
+    def test_locomotion_still_rejects_unknown_owned_states(self):
+        for stage in ("run", "reengaged"):
+            meta,item=locomotion_case("precision_stop")
+            edit_log(item["stages"][stage][0],"[AgPB] Test_Bot: combat",{"state":"unknown-new-policy"})
+            self.verdict(meta,item,"pending","combat ownership" if stage=="run" else "Reengagement")
+
+    def test_transition_states_do_not_relax_motion_or_measured_damage(self):
+        meta,item=locomotion_case("precision_stop")
+        edit_log(item["stages"]["run"][0],"[AgPB] Test_Bot: combat",{"state":"braking"})
+        edit_log(item["stages"]["run"][1],"[AgPB lifecycle]",{"move":"(10,0,0)"})
+        self.verdict(meta,item,"pending","Precision-stop")
+        meta,item=locomotion_case("precision_stop")
+        edit_log(item["stages"]["run"][0],"[AgPB] Test_Bot: combat",{"state":"posture-settling"})
+        for stage in item["stages"].values():
+            for rec in stage:edit_log(rec,"[WP_COMBAT_PLAYER]",{"health":100})
+        self.verdict(meta,item,"pending","health decrease")
+
+    def test_precision_snapshot_aliasing_accepts_counter_with_native_fire_and_damage(self):
+        meta,item=locomotion_case("precision_stop")
+        for stage in ("run", "reengaged"):
+            for rec in item["stages"][stage]:
+                edit_log(rec,"[AgPB lifecycle]",{"buttons":"0x0"})
+        result=self.verdict(meta,item)
+        for key in ("locomotion", "reengaged_locomotion"):
+            self.assertEqual(result[key]["attack_command_proof"],"in_window_counter_increase")
+        for window in result["precision_fire_windows"].values():
+            self.assertEqual(window["real_fire_events"],1)
+            self.assertEqual(window["real_hurt_events"],1)
+
+    def test_precision_stale_counter_cannot_replace_missed_attack_bit(self):
+        for stage,attacks in (("run",0),("reengaged",1)):
+            with self.subTest(stage=stage):
+                meta,item=locomotion_case("precision_stop")
+                for rec in item["stages"][stage]:
+                    edit_log(rec,"[AgPB lifecycle]",{"buttons":"0x0"})
+                    edit_log(rec,"[AgPB] Test_Bot: combat",{"attackcmds":attacks})
+                self.verdict(meta,item,"pending","submitted primary attack")
+
+    def test_precision_counter_needs_native_fire_inside_each_owned_window(self):
+        for fire,hurt,t,tick in ((112001,112002,12.2,1220),(137001,137002,14.8,1480)):
+            with self.subTest(fire=fire):
+                meta,item=locomotion_case("precision_stop")
+                for stage in item["stages"].values():
+                    for rec in stage:
+                        edit_log(rec,f"seq={fire} ",{"tick":tick,"t":t})
+                        edit_log(rec,f"seq={hurt} ",{"tick":tick,"t":t})
+                self.verdict(meta,item,"pending","window lacks matching native weapon_fire")
+
+    def test_precision_cannot_borrow_damage_after_owned_last_tick(self):
+        for fire,hurt,fire_t,fire_tick,hurt_t,hurt_tick in (
+                (112001,112002,12,1200,12.2,1220),
+                (137001,137002,14.5,1450,14.7,1470)):
+            with self.subTest(hurt=hurt):
+                meta,item=locomotion_case("precision_stop")
+                for stage in item["stages"].values():
+                    for rec in stage:
+                        edit_log(rec,f"seq={fire} ",{"tick":fire_tick,"t":fire_t})
+                        edit_log(rec,f"seq={hurt} ",{"tick":hurt_tick,"t":hurt_t})
+                self.verdict(meta,item,"pending","window lacks matching native hurt")
+
+    def test_precision_needs_independent_health_change_in_each_owned_window(self):
+        for stage,health in (("run",100),("reengaged",70)):
+            with self.subTest(stage=stage):
+                meta,item=locomotion_case("precision_stop")
+                for rec in item["stages"][stage]:
+                    edit_log(rec,"slot=3 userid=103 serial=259 fake=1",{"health":health})
+                self.verdict(meta,item,"pending","window lacks matching native hurt")
+
+    def test_precision_native_fire_must_match_declared_weapon(self):
+        meta,item=locomotion_case("precision_stop")
+        for stage in item["stages"].values():
+            for rec in stage:
+                edit_log(rec,"seq=112001 ",{"weapon":"m4a1"})
+                edit_log(rec,"seq=112002 ",{"weapon":"m4a1"})
+        self.verdict(meta,item,"pending","window lacks matching native weapon_fire")
 
 
 if __name__ == "__main__":

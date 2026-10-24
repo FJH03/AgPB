@@ -33,6 +33,8 @@ ROOT = Path(__file__).resolve().parent.parent
 WEB_ROOT = Path(__file__).resolve().parent / 'agpw3d_web'
 HEADER = struct.Struct('<III32s32s')
 RECORD = struct.Struct('<3fIBB8h8Hf')
+RECORD_V2 = struct.Struct('<3fIBB8h8Hf24f')
+RECORDS = {1: RECORD, 2: RECORD_V2}
 _TEXTURE_CACHE = OrderedDict()
 _TEXTURE_CACHE_BYTES = 0
 _TEXTURE_CACHE_LIMIT = 64 * 1024 * 1024
@@ -59,26 +61,33 @@ def parse_waypoints(data, source_name):
     if len(data) < HEADER.size:
         raise ValueError('waypoint header is truncated')
     magic, version, count, map_bytes, author = HEADER.unpack_from(data)
-    if magic != 0x50424741 or version != 1:
-        raise ValueError('unsupported waypoint magic/version (expected AGPB v1)')
-    if count > 8192 or len(data) < HEADER.size + count * RECORD.size:
+    if magic != 0x50424741 or version not in RECORDS:
+        raise ValueError('unsupported waypoint magic/version (expected AGPB v1/v2)')
+    record = RECORDS[version]
+    if count > 8192 or len(data) < HEADER.size + count * record.size:
         raise ValueError('invalid waypoint count or truncated records')
     warnings = []
     points = []
     for index in range(count):
-        row = RECORD.unpack_from(data, HEADER.size + index * RECORD.size)
-        if not all(math.isfinite(value) for value in (*row[:3], row[-1])):
+        row = record.unpack_from(data, HEADER.size + index * record.size)
+        if not all(math.isfinite(value) for value in (*row[:3], row[22])):
             raise ValueError('non-finite coordinate/gravity at waypoint #%d' % index)
-        links = [[target, flags] for target, flags in zip(row[6:14], row[14:22]) if target >= 0]
+        velocity = [list(row[23 + slot * 3:26 + slot * 3]) if version == 2 else [0.0, 0.0, 0.0]
+                    for slot in range(8)]
+        if not all(math.isfinite(value) and -2000 <= value <= 2000 for vector in velocity for value in vector):
+            raise ValueError('invalid jumpVelocity at waypoint #%d' % index)
+        link_slots = [list(pair) for pair in zip(row[6:14], row[14:22])]
+        links = [[target, flags] for target, flags in link_slots if target >= 0]
         if any(target >= count or target == index for target, flags in links):
             warnings.append('Waypoint #%d contains an invalid or self link.' % index)
         if len({target for target, flags in links}) != len(links):
             warnings.append('Waypoint #%d contains duplicate outgoing links.' % index)
         points.append(dict(origin=list(row[:3]), flags=row[3], radius=row[4],
-                           mesh=row[5], gravity=row[-1], links=links))
-    if len(data) > HEADER.size + count * RECORD.size:
+                           mesh=row[5], gravity=row[22], jumpVelocity=velocity,
+                           links=links, linkSlots=link_slots))
+    if len(data) > HEADER.size + count * record.size:
         warnings.append('Waypoint file has trailing data; it is left untouched.')
-    return dict(path=str(source_name),
+    return dict(path=str(source_name), version=version,
                 map_name=map_bytes.split(b'\0', 1)[0].decode('utf-8', 'replace'),
                 author=author.split(b'\0', 1)[0].decode('utf-8', 'replace'),
                 points=points, warnings=warnings)

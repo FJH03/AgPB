@@ -6,10 +6,11 @@
 
 | 文件 | 用途 |
 |---|---|
-| [verify_combat.py](verify_combat.py) | 离线重算同队拒绝、遮挡拒绝、真实伤害后续路、开火中停止四类证据 |
+| [verify_combat.py](verify_combat.py) | 离线重算原四类最小战斗证据，或显式选择独立地面战斗移动 / 续路 / 停止样本契约 |
 | [test_verify_combat.py](test_verify_combat.py) | 战斗证据验证器的离线回归 |
 | [fixtures/agpb_combat_probe.sp](fixtures/agpb_combat_probe.sp) | 只读玩家身份、武器、射线及真实开火 / 伤害 / 死亡事件 |
 | [fixtures/agpb_native_match_probe.sp](fixtures/agpb_native_match_probe.sp) | 只读多对手交锋事件、装备与计数，供探索性短测使用 |
+| [fixtures/agpb_locomotion_fixture.sp](fixtures/agpb_locomotion_fixture.sp) | 一次性准备装备 / 位置，控制目标显隐，以及有限地面交战取样；主体执行仍由本地核心负责 |
 
 控制台传输复用 [Invoke-GameConsole.ps1](../waypoint-workflow/Invoke-GameConsole.ps1)；身份与停点判断复用既有纯离线解析模块。agent 意图接口与客户端的用法集中在 COMMANDS。
 
@@ -52,6 +53,36 @@ py -B .\combat-tests\test_verify_combat.py
 
 正向续路记录须同时证明真实伤害、战斗期间原 owner / goal / hop 保留、失敌后无新 goto 自动续路；停止记录须跨 tick 确认输入释放及无新攻击。缺证据保留 pending。验证器只认证提交的采样。
 
+### 地面战斗移动样本
+
+`agpb_locomotion_fixture` 仅用于已授权的受控敌方场景。准备前停止两个核心，原始快照确认主体释放输入；绑定活着、ACTIVE 的主体 / 低 slot 同队真人 / 敌方 fake 三个身份。`agpb_loco_prepare` 一次设置主体位置、枪械、弹药与双方测试生命值，随后仅目标输入受锁；`agpb_loco_hide` / `agpb_loco_show [x y z yaw]` 改变目标位置并打印真实读回。运行期不写主体位置、视角、血量或弹药。
+
+`agpb_loco_sample core_index delay count interval` 定时执行四条只读诊断。完整闭环使用 `agpb_bot_goto core_index goal; agpb_loco_sequence core_index nonce reShowX reShowY reShowZ reShowYaw`：在真实导航后取 before，再按目标显隐取 run / resumed / reengaged，最后通过唯一一次原生 stop 取 quiet，共 26 组快照。阶段打印真正的 `AGPB_SESSION_BEGIN_<nonce><phase>` / END，保留原始调用、实际执行命令与全部 ACK 外字节；`agpb_loco_clear` 清理绑定并取消定时取样。准备参数完整语法由 `agpb_loco_prepare` 无参数回显。
+
+旧证据默认使用 `legacy_minimum_combat_v1`；原 `visible_damage_resume` 仍要求战斗拥有期间实际三轴移动命令为零，不因新增移动行为放宽。新样本在 metadata 显式设置 `acceptance_contract: "sampled_combat_locomotion_v1"`，只放独立 `kind: "locomotion_damage_resume_stop"` case。该契约认证一份明确场景的样本即可，不要求同时提交旧四类或全部进退 / 横移 / 停枪矩阵。
+
+每个新 case 保留原有六项 binding 与身份字段，另需 `goal`、`locomotion_policy: "sypb_ground_v1"` 及以下场景边界（示例值须换成本次实际范围）：
+
+```json
+{"locomotion": {"expected_motion": "approach", "weapon_class": "weapon_m4a1", "distance_range": [250, 700], "movement_context": "ground_walk"}}
+```
+
+`expected_motion` 选 `approach`、`retreat`、`strafe` 或 `precision_stop`；`distance_range` 是主体与目标实际 3D 距离的闭区间，单位为游戏单位，两个数须有限且满足 `0 <= min < max <= 8192`。该边界与当前武器类必须和每份拥有目标的快照一致，不能以场景标签代替采样。它只核对所声明动作确实执行，不证明该武器或距离下的决策规则已全面正确。
+
+| stage | 必需原始证据 |
+|---|---|
+| `before` | 唯一一次原生 goto、当前 route / owner / goal / hop / node 与准备后实际身份 |
+| `run` | 同一目标被战斗拥有；至少三份严格递增快照，跨至少 0.8 秒、相邻至多 1.5 秒；原 route / owner / goal / hop / node 保留；新真实开火及归属一致、独立 HP 降低的伤害 |
+| `resumed` | 真实失敌 / 死亡 / 原生释放反馈；至少两份存活原 route 的运动快照，owner / goal 保留；不重发 goto |
+| `reengaged` | 同一目标重新被拥有；保留恢复后那一刻的 route / owner / goal / hop / node；再次满足 `run` 的地面动作采样窗口，随后执行 stop |
+| `quiet` | 明确原生 `agpb_bot_stop`，至少三份跨 0.8 秒快照；route / task / combat 清理，实际 CUserCmd 按键与三轴移动全释放，无新增真实开火 / 弹药变化 |
+
+移动窗口使用实际 lifecycle `move` / `view` 将 CUserCmd 转成世界方向，再对照跨 tick 的玩家位置。进退须有朝向目标 / 背离目标的命令及至少 4 单位对应位移；横移须有侧向命令及至少 4 单位侧向位移。仅有非零命令、速度值或目标自身移动不能通过。命令 XY 长度不超过 450，位移不超过 `400 * dt + 4`，相邻位置高度差不超过 18；这些是本次地面取样边界，不扩展为跳跃 / 梯子 / 空中验收。`precision_stop` 要求三轴命令归零、实际速度至多 5、整个窗口位置在首样本 4 单位内，并有提交的主攻击命令。窗口均须接地、非冻结、无 jump / upmove / pending velocity；不允许用 setpos、noclip 或调试移动命令制造位移。
+
+真实伤害、完整句柄身份、guard、资产哈希、原始回执、无友伤与无替代 goto 等原有断言继续生效。`run` 的伤害不能由后续重新交火替代；stop 在 `reengaged` 的战斗拥有后执行。进退 / 横移 / 停枪的其它场景、穿透与敌情调查均需另行取样，本契约不认证这些未提交范围。
+
+精确停枪可用窗口内采到的 IN_ATTACK，或过滤后已提交攻击计数 `attackcmds` 的严格增长，补证定时快照可能漏掉的单帧按键。两段停稳窗口还各自要求身份 / 武器匹配的原生开火，以及由该窗 HP 样本独立夹证的真实伤害，均须落在首尾快照的 tick 范围内；窗口外或 resumed 的伤害不可替代。速度、位移及零移动命令限制保持不变。
+
 结束时清观测、踢本轮 bot，恢复并独立读回设置，卸载本轮夹具；证据交付到被 ignore 的 build 输出目录。临时资料仅列完整路径供用户自行删除。
 
 ## 5v5 观战演示
@@ -64,6 +95,12 @@ CT 以 `agpb_difficulty 4` 创建五名 AgPB，T 以 `bot_difficulty 3` 和五�
 
 结束时先停止可选分区协调器，再 `agpb_kick all; bot_kick`，独立核对零 fake，再 `agpb_showmatch_enable 0; sm plugins unload disabled/agpb_showmatch` 并恢复本次记录的设置原值，独立读回后按用户要求退出游戏。演示期间不换图或切主机队伍。临时资料仅列完整路径供用户自行删除。
 
+
+## 已有武器选择
+
+纯策略由 `tools/test_weapon_selection.cpp` 独立验证偏好、弹药 / 距离、等待确认、冷却、失败重试与状态重置。实机准备继续使用停住 bot 的 `agpb_bot_testweapon`，只在准备阶段用诊断入口设置弹药；运行时不可补弹或代替 AI 切枪。
+
+同队冒烟用 `agpb_bot_weapon_info` 核对完整武器句柄、owner 对应的库存、弹夹 / 备弹和 pending；开启 `agpb_weapons_debug 1` 记录实际提交的 CUserCmd 与装备读回。应覆盖有弹无备弹切枪、空闲换弹、蹲行段切枪、原路线 / owner 续行和 stop 后跨 tick 释放输入。真实交战的备枪替换、距离选择与反复切换需另取样，不能由同队冒烟代替。
 
 ## 本地自主与控制层回归
 

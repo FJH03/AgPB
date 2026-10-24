@@ -19,6 +19,7 @@
 #include "game_mode.h"
 #include "waypoint.h"
 #include "bomb_escape_policy.h"
+#include "holding_policy.h"
 
 extern CGlobalVars *gpGlobals;
 extern bool AgPB_IsRoundFrozen();
@@ -34,6 +35,52 @@ static void SetTaskPosition( AgPBTask &task, const Vector &position )
 {
 	task.hasPosition = true;
 	for ( int i = 0; i < 3; ++i ) task.position[i] = position[i];
+}
+
+bool CAgPB::IsHoldingTaskPosition() const
+{
+	const AgPBTask &task = m_Tasks.Current();
+	if ( gpGlobals == NULL || !AgPBHolding::Active( task, m_Tasks.State( task.token ), gpGlobals->curtime,
+		IsAlive(), AgPB_GameMode() == AgPB_MODE_NORMAL,
+		AgPB_IsRoundFrozen() || ( GetNetVarInt( "m_fFlags" ) & FL_FROZEN ) != 0 ) ||
+		!AgPBHolding::AgentValid( task, m_AgentIntent.token, m_AgentIntent.waypoint,
+			m_AgentIntent.deadline, gpGlobals->curtime ) ) return false;
+	return AgPBHolding::HoldsPosition( task, m_AgentIntent.camp, m_AgentIntent.arrived );
+}
+
+bool CAgPB::NavigationRequiresCrouch( unsigned int flags )
+{
+	// SyPB basecode.cpp: navigation excludes CAMP from authored crouch.
+	// CAMP+CROUCH selects the posture only after entering a holding task.
+	return AgPBHolding::NavigationCrouch( ( flags & AgPB_WP_CROUCH ) != 0,
+		( flags & AgPB_WP_CAMP ) != 0 );
+}
+
+bool CAgPB::TaskRequiresCrouch() const
+{
+	const AgPBTask &task = m_Tasks.Current();
+	if ( gpGlobals == NULL || !AgPBHolding::Active( task, m_Tasks.State( task.token ), gpGlobals->curtime,
+		IsAlive(), AgPB_GameMode() == AgPB_MODE_NORMAL,
+		AgPB_IsRoundFrozen() || ( GetNetVarInt( "m_fFlags" ) & FL_FROZEN ) != 0 ) ||
+		!AgPBHolding::AgentValid( task, m_AgentIntent.token, m_AgentIntent.waypoint,
+			m_AgentIntent.deadline, gpGlobals->curtime ) ) return false;
+	const AgPBPath *holding = BotWaypoints().Get( task.waypoint );
+	const AgPBPath *node = BotWaypoints().Get( RouteNode( m_iRouteIndex ) );
+	const AgPBPath *previous = BotWaypoints().Get( RouteNode( m_iRouteIndex - 1 ) );
+	const bool previousCrouch = previous != NULL && NavigationRequiresCrouch( previous->flags );
+	const float previousDistance = previousCrouch && m_pInfo != NULL
+		? ( previous->origin - m_pInfo->GetAbsOrigin() ).Length2D() : 64.0f;
+	return AgPBHolding::RequiresCrouch( task, IsHoldingTaskPosition(),
+		holding != NULL && ( holding->flags & AgPB_WP_CROUCH ) != 0,
+		m_uRouteTaskToken, node != NULL && NavigationRequiresCrouch( node->flags ),
+		previousCrouch, previousDistance );
+}
+
+void CAgPB::ApplyTaskPosture( CBotCmd &cmd ) const
+{
+	// Never release crouch requested by combat, geometry or explicit input.
+	// Think starts a fresh command each tick, so invalidated tasks add nothing.
+	if ( TaskRequiresCrouch() ) cmd.buttons |= IN_DUCK;
 }
 
 void CAgPB::ResetTaskUse()
@@ -53,10 +100,12 @@ void CAgPB::ResetBombEscape()
 
 void CAgPB::ResetTaskSystem( const char *reason )
 {
+	ResetPlayerAvoidance();
 	++m_uTaskResetCount;
 	m_pszTaskResetReason = reason;
 	ClearAgentIntent( reason );
 	ClearCombat( reason );
+	ResetWeaponSelection( reason );
 	ResetSearch();
 	ResetAutonomy( gpGlobals != NULL ? gpGlobals->curtime : 0.0f );
 	ClearRoute();
@@ -68,18 +117,22 @@ void CAgPB::ResetTaskSystem( const char *reason )
 	ResetTaskUse();
 	ResetBombEscape();
 	m_bHasVelOverride = false;
+	m_bPendingJumpLaunch = false;
 	m_vVelOverride.Init();
 }
 
 void CAgPB::SuspendTaskActions( float now )
 {
+	ResetPlayerAvoidance();
 	ClearCombat( "frozen" );
+	ResetWeaponSelection( "frozen" );
 	ClearBreakable();
 	ResetTaskUse();
 	ResetRouteProgress( now );
 	// A terminal arrival needs one uninterrupted unfrozen settling interval.
 	m_flRouteSettleSince = -1.0f;
 	m_bHasVelOverride = false;
+	m_bPendingJumpLaunch = false;
 	m_vVelOverride.Init();
 }
 
@@ -267,7 +320,7 @@ bool CAgPB::NavigateTaskTo( const Vector &position, int preferredWaypoint, float
 	}
 	const AgPBPath *node = BotWaypoints().Get( preferredWaypoint );
 	const bool crouch = ( GetNetVarInt( "m_fFlags" ) & FL_DUCKING ) != 0 ||
-		( node != NULL && ( node->flags & AgPB_WP_CROUCH ) != 0 );
+		( node != NULL && NavigationRequiresCrouch( node->flags ) );
 	if ( delta.Length2D() > 512.0f || !CanWalkToTaskPosition( walkTarget, crouch ) )
 	{
 		CompleteCurrentTask( "objective final approach is not walkable", true ); return false;
@@ -352,7 +405,7 @@ bool CAgPB::PlanPlantedBombTask( CGlobalVars *globals, bool urgentOnly )
 			const AgPBPath *node = wp.Get( i );
 			if ( !wp.IsPassable( i, team ) || !node->origin.IsValid() ) continue;
 			const float distance = ( node->origin - here ).Length();
-			const bool crouch = ( node->flags & AgPB_WP_CROUCH ) != 0;
+			const bool crouch = NavigationRequiresCrouch( node->flags );
 			if ( distance > 512.0f || !CanWalkToTaskPosition( node->origin, crouch ) ) continue;
 			AgPBBombRouteSeed entry = { i, 0.5f + AgPB_BombTravelSeconds( distance, speed,
 				crouch, ( node->flags & AgPB_WP_LADDER ) != 0, false ), distance };
@@ -369,7 +422,7 @@ bool CAgPB::PlanPlantedBombTask( CGlobalVars *globals, bool urgentOnly )
 			     ( flags & AgPB_PATH_DOUBLE ) != 0 ) return false;
 			length = ( to->origin - from->origin ).Length();
 			seconds = AgPB_BombTravelSeconds( length, speed,
-				( ( from->flags | to->flags ) & AgPB_WP_CROUCH ) != 0,
+				NavigationRequiresCrouch( from->flags ) || NavigationRequiresCrouch( to->flags ),
 				( ( from->flags | to->flags ) & AgPB_WP_LADDER ) != 0, ( flags & AgPB_PATH_JUMP ) != 0 );
 			return true;
 		}, routes );
@@ -382,7 +435,7 @@ bool CAgPB::PlanPlantedBombTask( CGlobalVars *globals, bool urgentOnly )
 		if ( !defusing && team == AgPB_TEAM_CT && d <= 512.0f )
 		{
 			const float approach = AgPB_BombTravelSeconds( MAX( 0.0f, d - 44.0f ), speed,
-				( node->flags & AgPB_WP_CROUCH ) != 0, false, false );
+				NavigationRequiresCrouch( node->flags ), false, false );
 			const float budget = route.seconds + approach + defuseDuration;
 			// Preserve the normal final-approach target: the reachable node
 			// closest to C4, rather than an optimistic cross-wall shortcut.
@@ -642,11 +695,9 @@ void CAgPB::UpdateTasks( CGlobalVars *globals, CBotCmd &cmd )
 		return;
 	}
 	if ( UpdateEnemyInvestigation( globals, cmd ) ) return;
-	if ( task.id == AgPBTaskId::Camp || task.id == AgPBTaskId::Pause ||
-	     ( task.id == AgPBTaskId::AgentIntention && m_AgentIntent.camp && m_AgentIntent.arrived ) )
+	if ( IsHoldingTaskPosition() )
 	{
-		const AgPBPath *node = BotWaypoints().Get( task.waypoint );
-		if ( node != NULL && ( node->flags & AgPB_WP_CROUCH ) != 0 ) cmd.buttons |= IN_DUCK;
+		ApplyTaskPosture( cmd );
 		if ( !UpdateEnemyMemoryLook( globals, cmd ) ) UpdateIdleLook( globals, cmd );
 		return;
 	}

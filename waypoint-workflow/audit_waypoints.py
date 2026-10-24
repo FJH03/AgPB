@@ -8,9 +8,10 @@ import hashlib
 import json
 import math
 import re
+import struct
 from pathlib import Path, PureWindowsPath
 
-from export_manual_plan import HEADER, NODE, MAGIC, VERSION, export, integer
+from export_manual_plan import HEADER, NODES, MAGIC, export, integer, jump_velocity
 import stop_policy
 
 # src/waypoint.h and waypoint.cpp: IsWaypointPassable/GetLinkCost/FindPath.
@@ -77,21 +78,41 @@ def decode_agpw(data):
     if len(data) < HEADER.size:
         raise ValueError('truncated AGPW header')
     magic, version, count, map_raw, author_raw = HEADER.unpack_from(data)
-    if magic != MAGIC or version != VERSION or not 0 < count <= 8192:
+    if magic != MAGIC or version not in NODES or not 0 < count <= 8192:
         raise ValueError('invalid AGPW magic/version/node count')
-    if len(data) != HEADER.size + count * NODE.size:
+    record = NODES[version]
+    if len(data) != HEADER.size + count * record.size:
         raise ValueError('AGPW size does not match node count')
     fields = ['x', 'y', 'z', 'flags', 'radius', 'mesh'] + ['index[%d]' % i for i in range(8)] + ['connectionFlags[%d]' % i for i in range(8)] + ['gravity']
-    nodes = [dict(zip(fields, NODE.unpack_from(data, HEADER.size + index * NODE.size))) for index in range(count)]
+    nodes = []
+    for index in range(count):
+        row = record.unpack_from(data, HEADER.size + index * record.size)
+        node = dict(zip(fields, row[:23]))
+        if not all(math.isfinite(node[key]) for key in ('x', 'y', 'z', 'gravity')):
+            raise ValueError('non-finite AGPW coordinate/gravity')
+        node['jumpVelocity'] = []
+        for slot in range(8):
+            velocity = jump_velocity(list(row[23 + 3 * slot:26 + 3 * slot]) if version == 2 else [0.0, 0.0, 0.0])
+            target = node['index[%d]' % slot]
+            if any(component != 0 for component in velocity) and not (0 <= target < count and target != index and node['connectionFlags[%d]' % slot] & 1):
+                raise ValueError('nonzero AGPW jumpVelocity requires an existing PATH_JUMP edge')
+            node['jumpVelocity'].append(velocity)
+        nodes.append(node)
     return {'magic': magic, 'version': version, 'count': count,
             'map_raw': map_raw, 'author_raw': author_raw, 'nodes': nodes}
 
 
-def compare(plan, data, allow_author_change=False):
-    expected = decode_agpw(export(plan))
+def compare_agpw(expected_data, data, allow_author_change=False, labels=None):
+    """Compare every serialized field; only version and allowed author may differ.
+
+    Float32 bit identity retains the old disk check's signed-zero distinction.
+    Missing v1 jumpVelocity is represented by eight XYZ-zero vectors. No padding, link slots,
+    unknown flags, mesh or gravity fields are skipped during normalization.
+    """
+    expected = decode_agpw(expected_data)
     actual = decode_agpw(data)
     differences = []
-    for field in ('magic', 'version', 'count', 'map_raw'):
+    for field in ('magic', 'count', 'map_raw'):
         if expected[field] != actual[field]:
             differences.append({'field': field, 'expected': str(expected[field]), 'actual': str(actual[field])})
     author_change = None
@@ -101,17 +122,34 @@ def compare(plan, data, allow_author_change=False):
                          'allowed': allow_author_change}
     for index, (wanted, got) in enumerate(zip(expected['nodes'], actual['nodes'])):
         for field in wanted:
-            if wanted[field] != got[field]:
-                differences.append({'node': index, 'label': plan['nodes'][index]['label'], 'field': field,
+            if field == 'jumpVelocity':
+                for slot in range(8):
+                    for axis in range(3):
+                        before, after = wanted[field][slot][axis], got[field][slot][axis]
+                        if struct.pack('<f', before) != struct.pack('<f', after):
+                            differences.append({'node': index, 'label': labels[index] if labels else str(index),
+                                                'field': 'jumpVelocity[%d][%d]' % (slot, axis),
+                                                'expected': before, 'actual': after})
+                continue
+            same = (struct.pack('<f', wanted[field]) == struct.pack('<f', got[field])
+                    if field in ('x', 'y', 'z', 'gravity') else wanted[field] == got[field])
+            if not same:
+                differences.append({'node': index, 'label': labels[index] if labels else str(index), 'field': field,
                                     'expected': wanted[field], 'actual': got[field]})
-    teams = reachability(plan)
     matching = not differences and (author_change is None or allow_author_change)
+    return {'fields_match': matching, 'agpw_sha256': digest(data), 'author_change': author_change,
+            'differences': differences, 'expected_agpw_version': expected['version'],
+            'actual_agpw_version': actual['version']}
+
+
+def compare(plan, data, allow_author_change=False):
+    fields = compare_agpw(export(plan), data, allow_author_change, [node['label'] for node in plan['nodes']])
+    teams = reachability(plan)
     connected = all(teams[t]['strongly_connected'] for t in ('T', 'CT'))
-    return {'audit': 'compare', 'accepted': matching and connected, 'fields_match': matching,
+    return {'audit': 'compare', 'accepted': fields['fields_match'] and connected, **fields,
             'map': plan['map'], 'nodes': len(plan['nodes']), 'directed_edges': len(plan['directed_edges']),
-            'agpw_sha256': digest(data), 'author_change': author_change,
-            'differences': differences, 'reachability': teams,
-            'note': 'Float coordinates/gravity compare after float32 serialization; all link slots and flags are compared.'}
+            'reachability': teams,
+            'note': 'All float32 bits and link slots/flags are compared; v1 jumpVelocity defaults to eight XYZ-zero vectors. Header versions are reported separately.'}
 
 
 def route_indices(value):
@@ -208,7 +246,11 @@ def coverage(plan, plan_sha256, sources, console_log=None, allow_legacy=False, a
         current_assets.append({'kind': kind, 'path': str(path), 'sha256': expected_assets[kind]})
         if kind == 'agpw':
             explicit = export(plan)
-            if raw[:44] + raw[76:] != explicit[:44] + explicit[76:]:
+            try:
+                matching = compare_agpw(explicit, raw, allow_author_change=True)['fields_match']
+            except ValueError:
+                matching = False
+            if not matching:
                 current_asset_errors.append('current AGPW data/map differs from explicit plan')
     explicit_asset_binding = bool(assets)
     asset_legacy_seen = False

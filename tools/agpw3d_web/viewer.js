@@ -964,8 +964,33 @@ function appendWaypointEditor(parent, index) {
   const point = editor.getPoint(index);
   const form = element('form', undefined, 'waypoint-edit');
   form.id = 'waypoint-edit-form';
-  form.append(element('h3', '编辑半径与 Flags'));
+  form.append(element('h3', '编辑路点属性'));
   for (const field of editor.fields.filter((field) => field.key !== 'flags')) {
+    if (field.key === 'jumpVelocity') {
+      const group = element('fieldset', undefined, 'edit-flags');
+      group.style.gridTemplateColumns = '1fr';
+      group.append(element('legend', '跳跃出边初速度 XYZ (units/s)'));
+      let count = 0;
+      for (const [slot, [target]] of (state.points[index].linkSlots || []).entries()) {
+        if (!editor.jumpSlots[index][slot]) continue;
+        group.append(element('p', `#${index} → #${target} · 槽 ${slot} · JUMP`));
+        for (const [axis, name] of ['X', 'Y', 'Z'].entries()) {
+          const label = element('label', undefined, 'edit-number');
+          label.append(element('span', name));
+          const input = element('input');
+          input.type = 'number'; input.step = 'any'; input.required = true;
+          input.min = String(field.min); input.max = String(field.max);
+          input.value = String(point.jumpVelocity[slot][axis]);
+          input.dataset.velocitySlot = String(slot); input.dataset.velocityAxis = String(axis);
+          input.setAttribute('aria-label', `到路点 ${target} 的跳跃初速度 ${name}`);
+          label.append(input); group.append(label);
+        }
+        count++;
+      }
+      group.append(element('p', count ? '0, 0, 0 表示未设置；每个方向独立保存。' : '没有可编辑的 JUMP 出边。', 'hint'));
+      form.append(group);
+      continue;
+    }
     const label = element('label', undefined, 'edit-number');
     label.append(element('span', field.label || field.key));
     const input = element('input');
@@ -999,6 +1024,11 @@ function appendWaypointEditor(parent, index) {
     if (state.loading || state.saving || state.editor !== editor) return;
     const updates = {};
     for (const input of form.querySelectorAll('[data-editor-field]')) updates[input.dataset.editorField] = input.value;
+    const velocityInputs = form.querySelectorAll('[data-velocity-slot]');
+    if (velocityInputs.length) {
+      updates.jumpVelocity = editor.getPoint(index).jumpVelocity;
+      for (const input of velocityInputs) updates.jumpVelocity[Number(input.dataset.velocitySlot)][Number(input.dataset.velocityAxis)] = input.value;
+    }
     if (editor.fields.some((field) => field.key === 'flags')) {
       let known = 0;
       for (const input of form.querySelectorAll('[data-flag-bit]')) if (input.checked) known = (known | Number(input.dataset.flagBit)) >>> 0;
@@ -1071,6 +1101,11 @@ function selectWaypoint(index, focus = false) {
   addFlags(flagContainer, point.flags, WP_FLAGS);
   list.append(flagContainer);
   appendWaypointEditor(panel, index);
+  for (const [slot, [target, flags]] of (point.linkSlots || []).entries()) {
+    if (target >= 0 && flags & 1) {
+      panel.append(element('p', `跳跃 → #${target} · XYZ: ${point.jumpVelocity[slot].join(', ')} units/s`, 'hint'));
+    }
+  }
   showEdgeList(panel, '出边', point.links || []);
   showEdgeList(panel, '入边', state.incoming[index] || [], true);
   state.labels.forEach((label, i) => label.classList.toggle('selected', i === index));

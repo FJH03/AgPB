@@ -1,6 +1,7 @@
 """Evidence integrity regressions. File fixtures stay in TEMP for user cleanup."""
 import copy
 import json
+import struct
 import tempfile
 import unittest
 from unittest.mock import patch
@@ -8,7 +9,7 @@ from pathlib import Path
 
 import audit_waypoints as audit
 import stop_policy
-from export_manual_plan import HEADER, NODE, export
+from export_manual_plan import HEADER, NODE, NODE_V2, export
 
 
 def plan_fixture():
@@ -45,6 +46,94 @@ class ExportAndCompareTests(unittest.TestCase):
         del self.plan['nodes'][0]['radius']
         with self.assertRaisesRegex(ValueError, 'radius'):
             export(self.plan)
+
+    def test_legacy_bytes_unchanged_and_zero_v2_is_semantically_equivalent(self):
+        legacy = export(self.plan)
+        self.assertEqual((HEADER.unpack_from(legacy)[1], NODE.size, NODE_V2.size), (1, 54, 150))
+        explicit_zero = copy.deepcopy(self.plan)
+        for edge in explicit_zero['directed_edges']:
+            edge['jumpVelocity'] = [0, 0, 0]
+        self.assertEqual(export(explicit_zero), legacy)
+        explicit_zero['agpw_version'] = 2
+        upgraded = export(explicit_zero)
+        self.assertEqual(len(upgraded), HEADER.size + 3 * 150)
+        result = audit.compare(self.plan, upgraded)
+        self.assertTrue(result['accepted'], result)
+        self.assertEqual((result['expected_agpw_version'], result['actual_agpw_version']), (1, 2))
+        self.assertEqual(audit.decode_agpw(legacy)['nodes'], audit.decode_agpw(upgraded)['nodes'])
+        self.assertEqual(audit.decode_agpw(legacy)['nodes'][0]['jumpVelocity'], [[0, 0, 0] for _ in range(8)])
+
+    def test_jump_velocity_is_per_directed_slot_and_never_reuses_gravity(self):
+        plan = copy.deepcopy(self.plan)
+        plan['agpw_version'] = 1
+        plan['nodes'][0]['gravity'] = 0.75
+        plan['directed_edges'][0].update(flags=1, jumpVelocity=[100.125, -200.5, 300.75])
+        plan['directed_edges'][1].update(flags=1, jumpVelocity=[-10, 20, -30])
+        data = export(plan)
+        decoded = audit.decode_agpw(data)
+        self.assertEqual(decoded['version'], 2)
+        self.assertEqual(decoded['nodes'][0]['gravity'], 0.75)
+        self.assertEqual(decoded['nodes'][0]['jumpVelocity'][0], [100.125, -200.5, 300.75])
+        self.assertEqual(decoded['nodes'][1]['jumpVelocity'][0], [-10, 20, -30])
+        self.assertEqual(decoded['nodes'][1]['jumpVelocity'][1], [0, 0, 0])
+        self.assertEqual(struct.unpack_from('<3f', data, HEADER.size + 54), (100.125, -200.5, 300.75))
+        self.assertTrue(audit.compare(plan, data)['accepted'])
+
+    def test_jump_velocity_requires_explicit_jump_and_valid_components(self):
+        for value in (None, (), [0, 0], [0, 0, 0, 0], ['1', 0, 0], [True, 0, 0],
+                      [float('nan'), 0, 0], [float('inf'), 0, 0], [10**400, 0, 0], [2000.01, 0, 0], [-2000.01, 0, 0]):
+            with self.subTest(value=value):
+                plan = copy.deepcopy(self.plan)
+                plan['directed_edges'][0].update(flags=1, jumpVelocity=value)
+                with self.assertRaisesRegex(ValueError, 'jumpVelocity'):
+                    export(plan)
+        plan = copy.deepcopy(self.plan)
+        plan['directed_edges'][0]['jumpVelocity'] = [1, 0, 0]
+        with self.assertRaisesRegex(ValueError, 'PATH_JUMP'):
+            export(plan)
+        self.assertEqual(plan['directed_edges'][0]['flags'], 0)
+        plan['directed_edges'][0].update(flags=1, jumpVelocity=[-2000, 2000, 0])
+        self.assertTrue(audit.compare(plan, export(plan))['accepted'])
+
+    def test_agpw_version_is_independent_of_plan_schema_and_must_be_supported(self):
+        for value in (True, '2', 2.0, 0, 3):
+            plan = copy.deepcopy(self.plan)
+            plan['agpw_version'] = value
+            with self.assertRaisesRegex(ValueError, 'agpw_version'):
+                export(plan)
+        plan = copy.deepcopy(self.plan)
+        plan.update(plan_version=1, agpw_version=2)
+        self.assertEqual(audit.decode_agpw(export(plan))['version'], 2)
+
+    def test_v2_decoder_rejects_truncation_nonfinite_and_unbound_velocity(self):
+        plan = copy.deepcopy(self.plan)
+        plan['agpw_version'] = 2
+        valid = export(plan)
+        for invalid in (valid[:-1], valid + b'x'):
+            with self.assertRaises(ValueError):
+                audit.decode_agpw(invalid)
+        for slot, value in ((0, [1, 0, 0]), (7, [1, 0, 0]),
+                            (0, [float('nan'), 0, 0]), (0, [2001, 0, 0])):
+            invalid = bytearray(valid)
+            struct.pack_into('<3f', invalid, HEADER.size + 54 + slot * 12, *value)
+            with self.assertRaisesRegex(ValueError, 'jumpVelocity'):
+                audit.decode_agpw(invalid)
+
+    def test_normalized_comparison_keeps_every_original_field_and_float_bit(self):
+        before = export(self.plan)
+        for offset, fmt, value in ((HEADER.size + 17, '<B', 7),
+                                   (HEADER.size + 48, '<H', 0xABCD),
+                                   (HEADER.size, '<f', -0.0), (40, '<B', 65)):
+            after = bytearray(before)
+            struct.pack_into(fmt, after, offset, value)
+            result = audit.compare_agpw(before, after, allow_author_change=True)
+            self.assertFalse(result['fields_match'], (offset, result))
+        plan = copy.deepcopy(self.plan)
+        plan['directed_edges'][0].update(flags=1, jumpVelocity=[100, 200, 300])
+        after = bytearray(export(plan))
+        struct.pack_into('<f', after, HEADER.size + 54, 101)
+        result = audit.compare(plan, after)
+        self.assertEqual([row['field'] for row in result['differences']], ['jumpVelocity[0][0]'])
 
     def test_duplicate_directed_edge_rejected_even_identical(self):
         self.plan['directed_edges'].append(dict(self.plan['directed_edges'][0]))
@@ -360,6 +449,22 @@ class CoverageTests(unittest.TestCase):
         self.wrapper['metadata']['bsp_sha256'] = 'bad'
         for allowed in (False, True):
             self.assertFalse(self.run_audit(allow_legacy=allowed)['accepted'])
+
+    def test_current_zero_v2_normalizes_but_new_vector_cannot_hide_behind_hash(self):
+        self.asset_metadata()
+        upgraded = copy.deepcopy(self.plan)
+        upgraded['agpw_version'] = 2
+        current = export(upgraded)
+        self.wrapper['metadata']['agpw_sha256'] = audit.digest(current)
+        with patch('audit_waypoints.Path.read_bytes', return_value=current):
+            self.assertTrue(self.run_audit(assets={'agpw': 'current.agpw'})['accepted'])
+        upgraded['directed_edges'][0].update(flags=1, jumpVelocity=[100, 0, 300])
+        current = export(upgraded)
+        self.wrapper['metadata']['agpw_sha256'] = audit.digest(current)
+        with patch('audit_waypoints.Path.read_bytes', return_value=current):
+            result = self.run_audit(assets={'agpw': 'current.agpw'})
+        self.assertFalse(result['accepted'])
+        self.assertIn('current AGPW data/map differs from explicit plan', result['files'][0]['errors'])
 
     def test_plan_only_compatibility_explicitly_reports_incomplete_assets(self):
         result = self.run_audit()

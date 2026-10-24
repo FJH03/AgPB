@@ -11,6 +11,8 @@ for sdk_target in MMSPlugin.sdk_targets:
     'src/plugin.cpp',
     'src/bot.cpp',
     'src/bot_combat.cpp',
+    'src/bot_weapons.cpp',
+    'src/bot_avoidance.cpp',
     'src/bot_autonomy.cpp',
     'src/bot_search.cpp',
     'src/obstacle.cpp',

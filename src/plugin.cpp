@@ -1007,8 +1007,9 @@ static void Cmd_WpList( const CCommand &args )
 			if ( p->index[s] < 0 )
 				continue;
 
-			META_CONPRINTF( "%s%d/0x%X", ( nLink > 0 ) ? "," : "->",
-			                (int)p->index[s], (unsigned int)p->connectionFlags[s] );
+			META_CONPRINTF( "%s%d/0x%X velocity=(%.6f,%.6f,%.6f)", ( nLink > 0 ) ? "," : "->",
+			                (int)p->index[s], (unsigned int)p->connectionFlags[s],
+			                p->connectionVelocity[s].x, p->connectionVelocity[s].y, p->connectionVelocity[s].z );
 			++nLink;
 		}
 
@@ -1554,6 +1555,21 @@ static void Cmd_BotCombatInfo( const CCommand &args )
 	if ( g_Bots.Count() == 0 ) META_CONPRINTF( "[AgPB] agpb_bot_combat_info: no bots\n" );
 }
 
+static void Cmd_BotWeaponInfo( const CCommand &args )
+{
+	if ( args.ArgC() > 2 )
+	{ META_CONPRINTF( "[AgPB] usage: agpb_bot_weapon_info [idx|all]\n" ); return; }
+	if ( args.ArgC() == 2 && V_stricmp( args.Arg( 1 ), "all" ) != 0 )
+	{
+		CAgPB *bot = g_Bots.Get( V_atoi( args.Arg( 1 ) ) );
+		if ( bot == NULL ) { META_CONPRINTF( "[AgPB] invalid bot index\n" ); return; }
+		bot->ReportWeaponSelection();
+		return;
+	}
+	for ( int i = 0; i < g_Bots.Count(); ++i ) g_Bots.Get( i )->ReportWeaponSelection();
+	if ( g_Bots.Count() == 0 ) META_CONPRINTF( "[AgPB] agpb_bot_weapon_info: no bots\n" );
+}
+
 static void Cmd_BotDifficulty( const CCommand &args )
 {
 	if ( args.ArgC() != 3 || args.Arg( 2 )[0] < '0' || args.Arg( 2 )[0] > '4' || args.Arg( 2 )[1] != '\0' )
@@ -1668,6 +1684,7 @@ static ConCommand agpb_bot_info_cmd( "agpb_bot_info", Cmd_BotInfo, "Read-only bo
 static ConCommand agpb_bot_clearance_cmd( "agpb_bot_clearance", Cmd_BotClearance, "Read-only obstacle clearance and submitted-command snapshot: [idx|all].", FCVAR_GAMEDLL );
 static ConCommand agpb_bot_combat_cmd( "agpb_bot_combat", Cmd_BotCombat, "Enable local normal-mode combat: <idx|all> [0|1].", FCVAR_GAMEDLL );
 static ConCommand agpb_bot_combat_info_cmd( "agpb_bot_combat_info", Cmd_BotCombatInfo, "Read-only enemy selection, visibility, aim and combat command snapshot: [idx|all].", FCVAR_GAMEDLL );
+static ConCommand agpb_bot_weapon_info_cmd( "agpb_bot_weapon_info", Cmd_BotWeaponInfo, "Read-only owned inventory and CUserCmd weapon-selection state: [idx|all].", FCVAR_GAMEDLL );
 static ConCommand agpb_bot_difficulty_cmd( "agpb_bot_difficulty", Cmd_BotDifficulty, "Set SyPB normal-mode difficulty: <idx|all> <0..4>.", FCVAR_GAMEDLL );
 static ConCommand agpb_agent_state_cmd( "agpb_agent_state", Cmd_AgentState, "Read current agent map/round scope, bot identities and bounded intent leases.", FCVAR_GAMEDLL );
 static ConCommand agpb_agent_intent_cmd( "agpb_agent_intent", Cmd_AgentIntent, "Submit bounded waypoint intent in current map/round scope; query agpb_agent_state first.", FCVAR_GAMEDLL );
@@ -1732,6 +1749,8 @@ static ConCommand agpb_wp_flag_cmd( "agpb_wp_flag", AgPB_Cmd_Flag,
                                  "Toggle a flag on the nearest waypoint: agpb_wp_flag <flag|clear>", FCVAR_GAMEDLL );
 static ConCommand agpb_wp_radius_cmd( "agpb_wp_radius", AgPB_Cmd_Radius,
                                  "Set the nearest waypoint's radius: agpb_wp_radius <0..255>", FCVAR_GAMEDLL );
+static ConCommand agpb_wp_jumpvel_cmd( "agpb_wp_jumpvel", AgPB_Cmd_JumpVelocity,
+                                 "Read/set an existing directed jump's pre-jump XYZ velocity: agpb_wp_jumpvel [from to] [x y z]", FCVAR_GAMEDLL );
 static ConCommand agpb_wp_connect_cmd( "agpb_wp_connect", AgPB_Cmd_Connect,
                                  "Link nearest -> target: agpb_wp_connect <out|in|both|jump|boost|visible>", FCVAR_GAMEDLL );
 static ConCommand agpb_wp_cut_cmd( "agpb_wp_cut", AgPB_Cmd_Cut,

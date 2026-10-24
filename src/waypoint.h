@@ -33,7 +33,7 @@ struct edict_t;
 
 // 照 EBot core.h:265-272
 #define AgPB_WP_MAGIC            0x50424741u   // 'AGPB'，小端写入
-#define AgPB_WP_VERSION          1
+#define AgPB_WP_VERSION          2
 #define AgPB_WP_MAX_PATH_INDEX   8             // EBot Const_MaxPathIndex
 #define AgPB_WP_MAX              8192          // EBot Const_MaxWaypoints
 
@@ -110,6 +110,7 @@ struct AgPBPath
 	short           index[AgPB_WP_MAX_PATH_INDEX];              // 邻居路点下标，-1 = 空槽
 	unsigned short  connectionFlags[AgPB_WP_MAX_PATH_INDEX];    // 每个邻居对应的 PATHFLAG_*
 	float           gravity;         // 该点的重力，弹道跳要用
+	Vector          connectionVelocity[AgPB_WP_MAX_PATH_INDEX]; // SyPB authored launch velocity per directed jump.
 };
 
 /**
@@ -233,6 +234,8 @@ public:
 	bool Load();
 	/** 写回文件（目录不存在会自动建）。 */
 	bool Save();
+	bool SetJumpVelocity( int from, int to, const Vector &velocity );
+	Vector JumpVelocity( int from, int to ) const;
 
 	const char *Status() const { return m_szStatus; }
 	const char *MapName() const { return m_szMapName; }
@@ -246,6 +249,7 @@ private:
 	bool GetLinkCost( int iFrom, int iTo, unsigned int uLinkFlags, float &flCost ) const;
 
 	CUtlVector< AgPBPath > m_Paths;
+	unsigned int m_FileVersion;
 
 	char m_szMapName[64];
 	char m_szFile[192];

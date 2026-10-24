@@ -18,7 +18,8 @@ import subprocess
 import time
 import threading
 
-from export_manual_plan import export
+from export_manual_plan import export, jump_velocity
+from audit_waypoints import compare_agpw
 import stop_policy
 
 STATE = re.compile(
@@ -27,6 +28,7 @@ STATE = re.compile(
     r"pos=\(([^)]+)\) vel=\(([^)]+)\)(?: zone=(-?\d+) defusing=(-?\d+))?")
 BOT = re.compile(r"^\s*\[(\d+)\] (.+) slot=(\d+) team=(-?\d+) want=(-?\d+) hp=(-?\d+) wpn=", re.M)
 POINT = re.compile(r"^\s*\[\s*(\d+)\] (-?\d+) (-?\d+) (-?\d+)\s+flags=0x([0-9A-Fa-f]+)\s+r=(\d+)\s+(.*)$", re.M)
+EDGE = re.compile(r"(\d+)/0x([0-9A-Fa-f]+)(?:\s+velocity=(\([^)]*\)))?")
 TEAM = {"T": 2, "CT": 3}
 SETTLE_SPEED = stop_policy.MAX_SPEED
 SETTLE_DURATION = stop_policy.MIN_DURATION
@@ -267,14 +269,30 @@ def validate_waypoints(log, plan):
     labels = {node["label"]: i for i, node in enumerate(plan["nodes"])}
     edges = [dict() for _ in plan["nodes"]]
     for edge in plan["directed_edges"]:
-        edges[labels[edge["from"]]][labels[edge["to"]]] = edge.get("flags", 0)
+        edges[labels[edge["from"]]][labels[edge["to"]]] = (edge.get("flags", 0), jump_velocity(edge.get("jumpVelocity", [0.0, 0.0, 0.0])))
     for index, node in enumerate(plan["nodes"]):
         row = rows[index]
         if any(abs(float(row[j + 2]) - float(node[key])) > 0.501 for j, key in enumerate(("x", "y", "z"))):
             raise ValueError("In-memory waypoint coordinates differ from plan at #" + str(index))
-        links = {int(target): int(flags, 16) for target, flags in re.findall(r"(\d+)/0x([0-9A-Fa-f]+)", row[7])}
-        if int(row[5], 16) != node.get("flags", 0) or int(row[6]) != node["radius"] or links != edges[index]:
+        edge_rows = list(EDGE.finditer(row[7]))
+        links = {int(edge[1]): int(edge[2], 16) for edge in edge_rows}
+        if len(edge_rows) != len(links) or int(row[5], 16) != node.get("flags", 0) or int(row[6]) != node["radius"] or links != {target: value[0] for target, value in edges[index].items()}:
             raise ValueError("In-memory waypoint flags/radius/links differ at #" + str(index))
+        if len(re.findall(r"\bvelocity=", row[7])) != sum(edge[3] is not None for edge in edge_rows):
+            raise ValueError("Malformed/ambiguous in-memory jumpVelocity at #" + str(index))
+        for edge in edge_rows:
+            expected_velocity = edges[index][int(edge[1])][1]
+            if edge[3] is None:
+                if any(component != 0 for component in expected_velocity):
+                    raise ValueError("Missing in-memory jumpVelocity at #" + str(index))
+                continue
+            try:
+                actual_velocity = [float(component) for component in re.split(r"[,\s]+", edge[3][1:-1].strip())]
+            except ValueError as exc:
+                raise ValueError("Invalid in-memory jumpVelocity at #" + str(index)) from exc
+            # Native list prints six decimals; disk comparison remains bit-exact f32.
+            if len(actual_velocity) != 3 or not all(math.isfinite(component) and abs(component) <= 2000 for component in actual_velocity) or any(abs(actual - expected) > 0.000000501 for actual, expected in zip(actual_velocity, expected_velocity)):
+                raise ValueError("In-memory jumpVelocity differs from plan at #" + str(index))
 
 
 def disk_evidence(plan, expected):
@@ -286,10 +304,12 @@ def disk_evidence(plan, expected):
     game_dir = Path(match[1])
     path = game_dir / "addons" / "AgPB" / "waypoints" / (plan["map"] + ".agpw")
     actual = path.read_bytes()
-    if actual[:44] + actual[76:] != expected[:44] + expected[76:]:
+    comparison = compare_agpw(expected, actual, allow_author_change=True)
+    if not comparison['fields_match']:
         raise ValueError("Deployed AGPW data/map differs from the explicit plan: " + str(path))
     result = {"agpw_file": str(path), "agpw_sha256": sha256(actual),
-              "agpw_author_differs": actual[44:76] != expected[44:76]}
+               "agpw_author_differs": actual[44:76] != expected[44:76],
+               "agpw_version": comparison['actual_agpw_version']}
     for name, file in (("bsp", game_dir / "maps" / (plan["map"] + ".bsp")),
                        ("dll", game_dir / "addons" / "AgPB" / "bin" / "win64" / "agpb_mm.dll")):
         if file.is_file():

@@ -75,6 +75,7 @@ void CAgPBWaypoints::RebuildFile()
 void CAgPBWaypoints::Clear()
 {
 	m_Paths.RemoveAll();
+	m_FileVersion = 1;
 	m_szMapName[0] = '\0';
 	m_szFile[0] = '\0';
 	m_szStatus[0] = '\0';
@@ -90,6 +91,7 @@ bool CAgPBWaypoints::SetMapName( const char *pszMapName )
 		return ( m_Paths.Count() > 0 );
 
 	m_Paths.RemoveAll();
+	m_FileVersion = 1;
 
 	Q_strncpy( m_szMapName, pszMapName, sizeof( m_szMapName ) );
 	Q_strncpy( s_szLoadAttempted, pszMapName, sizeof( s_szLoadAttempted ) );
@@ -132,6 +134,7 @@ int CAgPBWaypoints::Add( const Vector &vOrigin, unsigned int flags )
 	{
 		path.index[s] = -1;
 		path.connectionFlags[s] = 0;
+		path.connectionVelocity[s].Init();
 	}
 
 	m_Paths.AddToTail( path );
@@ -160,6 +163,7 @@ void CAgPBWaypoints::Delete( int i )
 			{
 				path.index[s] = -1;
 				path.connectionFlags[s] = 0;
+				path.connectionVelocity[s].Init();
 			}
 			else if ( path.index[s] > i )
 			{
@@ -245,6 +249,31 @@ static int FindFreeSlot( const AgPBPath &path )
 	return -1;
 }
 
+static bool ValidJumpVelocity( const Vector &velocity )
+{
+	return velocity.IsValid() && fabsf( velocity.x ) <= 2000.0f &&
+		fabsf( velocity.y ) <= 2000.0f && fabsf( velocity.z ) <= 2000.0f;
+}
+
+bool CAgPBWaypoints::SetJumpVelocity( int from, int to, const Vector &velocity )
+{
+	if ( !IsValid( from ) || !IsValid( to ) || !ValidJumpVelocity( velocity ) ) return false;
+	AgPBPath &path = m_Paths[from];
+	const int slot = FindLinkSlot( path, to );
+	if ( slot < 0 || ( path.connectionFlags[slot] & AgPB_PATH_JUMP ) == 0 ) return false;
+	path.connectionVelocity[slot] = velocity;
+	return true;
+}
+
+Vector CAgPBWaypoints::JumpVelocity( int from, int to ) const
+{
+	const AgPBPath *path = Get( from );
+	if ( path == NULL ) return Vector( 0, 0, 0 );
+	const int slot = FindLinkSlot( *path, to );
+	return slot >= 0 && ( path->connectionFlags[slot] & AgPB_PATH_JUMP ) != 0
+		? path->connectionVelocity[slot] : Vector( 0, 0, 0 );
+}
+
 bool CAgPBWaypoints::AddLink( int iFrom, int iTo, unsigned int flags )
 {
 	if ( !IsValid( iFrom ) || !IsValid( iTo ) || iFrom == iTo )
@@ -259,11 +288,15 @@ bool CAgPBWaypoints::AddLink( int iFrom, int iTo, unsigned int flags )
 	if ( iExisting >= 0 )
 	{
 		a.connectionFlags[iExisting] = (unsigned short)flags;
+		if ( ( flags & AgPB_PATH_JUMP ) == 0 ) a.connectionVelocity[iExisting].Init();
 
 		const int iBack = FindLinkSlot( b, iFrom );
 
 		if ( iBack >= 0 )
+		{
 			b.connectionFlags[iBack] = (unsigned short)flags;
+			if ( ( flags & AgPB_PATH_JUMP ) == 0 ) b.connectionVelocity[iBack].Init();
+		}
 
 		return false;
 	}
@@ -279,9 +312,11 @@ bool CAgPBWaypoints::AddLink( int iFrom, int iTo, unsigned int flags )
 
 	a.index[iSlotA] = (short)iTo;
 	a.connectionFlags[iSlotA] = (unsigned short)flags;
+	a.connectionVelocity[iSlotA].Init();
 
 	b.index[iSlotB] = (short)iFrom;
 	b.connectionFlags[iSlotB] = (unsigned short)flags;
+	b.connectionVelocity[iSlotB].Init();
 
 	return true;
 }
@@ -299,6 +334,7 @@ bool CAgPBWaypoints::AddLinkDirected( int iFrom, int iTo, unsigned int flags )
 	if ( iExisting >= 0 )
 	{
 		a.connectionFlags[iExisting] = (unsigned short)flags;
+		if ( ( flags & AgPB_PATH_JUMP ) == 0 ) a.connectionVelocity[iExisting].Init();
 		return false;
 	}
 
@@ -312,6 +348,7 @@ bool CAgPBWaypoints::AddLinkDirected( int iFrom, int iTo, unsigned int flags )
 
 	a.index[iSlot] = (short)iTo;
 	a.connectionFlags[iSlot] = (unsigned short)flags;
+	a.connectionVelocity[iSlot].Init();
 
 	return true;
 }
@@ -329,6 +366,7 @@ bool CAgPBWaypoints::RemoveLink( int iFrom, int iTo )
 	{
 		m_Paths[iFrom].index[iSlotA] = -1;
 		m_Paths[iFrom].connectionFlags[iSlotA] = 0;
+		m_Paths[iFrom].connectionVelocity[iSlotA].Init();
 		bAny = true;
 	}
 
@@ -338,6 +376,7 @@ bool CAgPBWaypoints::RemoveLink( int iFrom, int iTo )
 	{
 		m_Paths[iTo].index[iSlotB] = -1;
 		m_Paths[iTo].connectionFlags[iSlotB] = 0;
+		m_Paths[iTo].connectionVelocity[iSlotB].Init();
 		bAny = true;
 	}
 
@@ -758,7 +797,8 @@ float CAgPBWaypoints::PathDistance( int iFrom, int iTo, int iTeam, int iAvoidWay
 //   char[32] mapname   char[32] author
 //   count × {
 //       float x,y,z  |  u32 flags  |  u8 radius  u8 mesh
-//       8 × i16 index  |  8 × u16 connectionFlags  |  float gravity
+//       8 x i16 index | 8 x u16 connectionFlags | float gravity
+//       v2 only: 8 x Vector connectionVelocity (XYZ, pre-jump velocity)
 //   }
 //
 // mapname / author 用定长数组 + Put / Get，不用 PutString：
@@ -779,9 +819,17 @@ bool CAgPBWaypoints::Save()
 	}
 
 	CUtlBuffer buf( 4096, 0 );
+	unsigned int version = m_FileVersion;
+	for ( int i = 0; i < m_Paths.Count(); ++i )
+		for ( int slot = 0; slot < AgPB_WP_MAX_PATH_INDEX; ++slot )
+		{
+			const Vector &velocity = m_Paths[i].connectionVelocity[slot];
+			if ( !ValidJumpVelocity( velocity ) ) { SetStatus( "invalid jump velocity" ); return false; }
+			if ( velocity.LengthSqr() != 0.0f ) version = 2;
+		}
 
 	buf.PutUnsignedInt( AgPB_WP_MAGIC );
-	buf.PutUnsignedInt( AgPB_WP_VERSION );
+	buf.PutUnsignedInt( version );
 	buf.PutUnsignedInt( (unsigned int)m_Paths.Count() );
 
 	char szMap[32] = { 0 };
@@ -811,6 +859,9 @@ bool CAgPBWaypoints::Save()
 			buf.PutUnsignedShort( p.connectionFlags[s] );
 
 		buf.PutFloat( p.gravity );
+		if ( version >= 2 )
+			for ( int slot = 0; slot < AgPB_WP_MAX_PATH_INDEX; ++slot )
+				for ( int axis = 0; axis < 3; ++axis ) buf.PutFloat( p.connectionVelocity[slot][axis] );
 	}
 
 	s_pFileSystem->CreateDirHierarchy( "addons/AgPB/waypoints", "GAME" );
@@ -822,6 +873,7 @@ bool CAgPBWaypoints::Save()
 	}
 
 	char szMsg[176];
+	m_FileVersion = version;
 	Q_snprintf( szMsg, sizeof( szMsg ), "saved %d point(s), %d link(s) -> %s",
 	            m_Paths.Count(), LinkCount(), m_szFile );
 	SetStatus( szMsg );
@@ -886,7 +938,7 @@ bool CAgPBWaypoints::Load()
 		return false;
 	}
 
-	if ( iVersion != AgPB_WP_VERSION )
+	if ( iVersion != 1 && iVersion != AgPB_WP_VERSION )
 	{
 		char szMsg[128];
 		Q_snprintf( szMsg, sizeof( szMsg ),
@@ -903,14 +955,17 @@ bool CAgPBWaypoints::Load()
 		SetStatus( "bad waypoint count" );
 		return false;
 	}
+	const unsigned int recordSize = iVersion == 1 ? 54 : 150;
+	if ( nSize < 76 || iCount > ( (unsigned int)nSize - 76 ) / recordSize )
+	{ SetStatus( "waypoint file truncated" ); return false; }
 
 	char szMap[32] = { 0 };
 	char szAuthor[32] = { 0 };
 	buf.Get( szMap, sizeof( szMap ) );
 	buf.Get( szAuthor, sizeof( szAuthor ) );
 
-	m_Paths.RemoveAll();
-	m_Paths.EnsureCapacity( (int)iCount );
+	CUtlVector< AgPBPath > loaded;
+	loaded.EnsureCapacity( (int)iCount );
 
 	for ( unsigned int i = 0; i < iCount && buf.IsValid(); ++i )
 	{
@@ -931,19 +986,30 @@ bool CAgPBWaypoints::Load()
 			p.connectionFlags[s] = buf.GetUnsignedShort();
 
 		p.gravity = buf.GetFloat();
+		for ( int slot = 0; slot < AgPB_WP_MAX_PATH_INDEX; ++slot )
+		{
+			p.connectionVelocity[slot].Init();
+			if ( iVersion >= 2 )
+				for ( int axis = 0; axis < 3; ++axis ) p.connectionVelocity[slot][axis] = buf.GetFloat();
+			if ( !ValidJumpVelocity( p.connectionVelocity[slot] ) )
+			{ SetStatus( "invalid jump velocity in waypoint file" ); return false; }
+		}
+		if ( !p.origin.IsValid() || !IsFinite( p.gravity ) )
+		{ SetStatus( "non-finite waypoint data" ); return false; }
 
 		if ( !buf.IsValid() )
 			break;
 
-		m_Paths.AddToTail( p );
+		loaded.AddToTail( p );
 	}
 
-	if ( !buf.IsValid() || (unsigned int)m_Paths.Count() != iCount )
+	if ( !buf.IsValid() || (unsigned int)loaded.Count() != iCount )
 	{
-		m_Paths.RemoveAll();
 		SetStatus( "waypoint file truncated" );
 		return false;
 	}
+	m_Paths.Swap( loaded );
+	m_FileVersion = iVersion;
 
 	char szMsg[176];
 	Q_snprintf( szMsg, sizeof( szMsg ), "loaded %d point(s), %d link(s) from %s",

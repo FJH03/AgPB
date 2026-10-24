@@ -4,10 +4,12 @@ import json
 from pathlib import Path
 import queue
 import subprocess
+import struct
 import unittest
 from unittest.mock import patch
 
-from verify_routes import CommandFailure, ConsoleSender, RouteVerifier, states
+from verify_routes import CommandFailure, ConsoleSender, RouteVerifier, disk_evidence, states, validate_waypoints
+from export_manual_plan import HEADER, export, jump_velocity
 
 
 PLAN = {"map": "fixture_map", "nodes": [{"label": "goal", "x": 10.0, "y": 20.0, "z": 30.0, "radius": 24, "flags": 0}], "directed_edges": []}
@@ -252,6 +254,77 @@ class RouteTests(unittest.TestCase):
         self.assertEqual(result["records"][0]["status"], "interrupted")
         self.assertIn("agpb_bot_stop 2", sender.commands)
         self.assertEqual(saved[-1]["records"][0]["status"], "interrupted")
+
+
+class JumpVelocityBindingTests(unittest.TestCase):
+    def plan(self, velocity=None):
+        plan = copy.deepcopy(PLAN)
+        plan['nodes'].append(dict(label='other', x=40, y=20, z=30, radius=24, flags=0))
+        plan['directed_edges'] = [dict(**{'from':'goal', 'to':'other'}, flags=1),
+                                  dict(**{'from':'other', 'to':'goal'}, flags=0)]
+        if velocity is not None:
+            plan['directed_edges'][0]['jumpVelocity'] = velocity
+        return plan
+
+    def log(self, first='', second=''):
+        return ('[AgPB] map=fixture_map file=fixture_map.agpw\n'
+                '[AgPB] 2 waypoint(s), 2 link(s) | ready\n'
+                '  [  0] 10 20 30 flags=0x0 r=24 1/0x1' + first + '\n'
+                '  [  1] 40 20 30 flags=0x0 r=24 0/0x0' + second + '\n')
+
+    def test_old_zero_logs_and_explicit_zero_vectors_are_compatible(self):
+        validate_waypoints(self.log(), self.plan())
+        validate_waypoints(self.log(' velocity=(0.000000,0.000000,0.000000)',
+                                    ' velocity=(0,0,0)'), self.plan([0,0,0]))
+
+    def test_nonzero_vector_requires_matching_target_and_float32_console_rounding(self):
+        velocity = [1000.1234567, -222.333333, 300.123456]
+        actual = jump_velocity(velocity)
+        text = ' velocity=(' + ','.join('%.6f' % value for value in actual) + ')'
+        validate_waypoints(self.log(text), self.plan(velocity))
+        for log in (self.log(), self.log('', text), self.log(' velocity=(1,2,3)')):
+            with self.assertRaisesRegex(ValueError, 'jumpVelocity'):
+                validate_waypoints(log, self.plan(velocity))
+
+    def test_invalid_duplicate_or_nonzero_unexpected_vectors_are_rejected(self):
+        for value in ('(1,0,0)', '(nan,0,0)', '(inf,0,0)', '(0,0)', '(0,0,0,0)', '(2001,0,0)', ''):
+            with self.subTest(value=value):
+                with self.assertRaisesRegex(ValueError, 'jumpVelocity'):
+                    validate_waypoints(self.log(' velocity=' + value), self.plan())
+        with self.assertRaisesRegex(ValueError, 'jumpVelocity'):
+            validate_waypoints(self.log(' velocity=(0,0,0) velocity=(0,0,0)'), self.plan())
+        with self.assertRaisesRegex(ValueError, 'links differ'):
+            validate_waypoints(self.log(' 1/0x1'), self.plan())
+
+    def disk(self, plan, actual):
+        with patch('verify_routes.Path.read_text', return_value='- 部署目标： `E:\\fixture_game`\n'), \
+                patch('verify_routes.Path.read_bytes', return_value=actual), \
+                patch('verify_routes.Path.is_file', return_value=False):
+            return disk_evidence(plan, export(plan))
+
+    def test_disk_normalization_allows_version_and_author_only(self):
+        plan = self.plan()
+        current = copy.deepcopy(plan)
+        current.update(agpw_version=2, author='native save')
+        result = self.disk(plan, export(current))
+        self.assertEqual(result['agpw_version'], 2)
+        self.assertTrue(result['agpw_author_differs'])
+        for offset, fmt, value in ((HEADER.size + 16, '<B', 23),
+                                   (HEADER.size + 17, '<B', 7),
+                                   (HEADER.size + 48, '<H', 3),
+                                   (HEADER.size + 50, '<f', 0.5)):
+            altered = bytearray(export(current))
+            struct.pack_into(fmt, altered, offset, value)
+            with self.assertRaisesRegex(ValueError, 'data/map differs'):
+                self.disk(plan, altered)
+
+    def test_disk_cannot_certify_missing_or_changed_jump_vector(self):
+        plan = self.plan([100, -20, 300])
+        with self.assertRaisesRegex(ValueError, 'data/map differs'):
+            self.disk(plan, export(self.plan()))
+        changed = self.plan([101, -20, 300])
+        with self.assertRaisesRegex(ValueError, 'data/map differs'):
+            self.disk(plan, export(changed))
 
 
 class MemoryReadPipe:

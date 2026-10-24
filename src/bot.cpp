@@ -25,6 +25,8 @@
 
 #include <vstdlib/random.h>
 
+extern ConVar agpb_weapons_debug;
+
 extern CGlobalVars *gpGlobals;
 extern bool AgPB_IsRoundFrozen();
 
@@ -59,9 +61,6 @@ static ConVar agpb_obstacle_debug( "agpb_obstacle_debug", "0", FCVAR_GAMEDLL,
 #define AgPB_ROAM_TRIES      16
 // 漫游选点避开别的 bot（站着的 / 正走向的），太挤就换一个点
 #define AgPB_ROAM_SPREAD     400.0f
-
-// 队友让行：正前方这个距离内站着别的 bot 就错身让路（EBot 窄道让路的简化版）
-#define AgPB_FRIEND_BLOCK_DIST 72.0f
 
 /**
  * 在"服务端本地"执行一条客户端命令。
@@ -310,6 +309,10 @@ void CAgPB::Think( CGlobalVars *pGlobals )
 		m_bWasAlive = true;
 		UpdateAgentIntent( pGlobals );
 		if ( !UpdateCombat( pGlobals, cmd ) ) UpdateTasks( pGlobals, cmd );
+		// Task posture survives every command owner, including the released
+		// target-loss frame, weapon selection and a route already cleared at camp.
+		ApplyTaskPosture( cmd );
+		UpdatePlayerAvoidance( pGlobals, cmd );
 	}
 
 	// 【弹道跳/调试】把本 tick 的速度覆盖值写进引擎（真成员地址），
@@ -325,6 +328,8 @@ void CAgPB::Think( CGlobalVars *pGlobals )
 	cmd.tick_count = pGlobals->tickcount;
 	// 线性同余凑一个每帧不同的种子（武器散布随机流用），省掉 <stdlib.h> 的 rand()
 	cmd.random_seed = (int)( (unsigned int)pGlobals->tickcount * 1103515245u + 12345u );
+	float jumpPreviousMax = 0.0f;
+	const bool injectedJump = ApplyJumpLaunch( pGlobals, cmd, jumpPreviousMax );
 
 	m_LastSubmittedCmd = cmd;
 	if ( ( cmd.buttons & IN_ATTACK ) != 0 )
@@ -333,6 +338,27 @@ void CAgPB::Think( CGlobalVars *pGlobals )
 		m_iLastSubmittedAttackTick = cmd.tick_count;
 	}
 	m_pController->RunPlayerMove( &cmd );
+	if ( agpb_weapons_debug.GetBool() && ( cmd.weaponselect != 0 || ( cmd.buttons & IN_RELOAD ) != 0 ) )
+	{
+		uintp held = (uintp)INVALID_EHANDLE_INDEX;
+		GetNetVarHandleValue( "m_hActiveWeapon", &held );
+		edict_t *weapon = HandleToEdict( held );
+		RouteReport( "weapon command v=1 tick=%d select=%d buttons=0x%X move=(%.3f,%.3f,%.3f) active=0x%llX class=%s task=%s token=%llu",
+			cmd.tick_count, cmd.weaponselect, cmd.buttons, cmd.forwardmove, cmd.sidemove, cmd.upmove,
+			(unsigned long long)held, weapon != NULL ? weapon->GetClassName() : "none",
+			AgPBTaskName( m_Tasks.Current().id ), (unsigned long long)m_Tasks.Current().token );
+	}
+	if ( injectedJump )
+	{
+		// Only this player's launch command bypasses the bunny cap. Restore
+		// immediately, including a rejected takeoff; no global cvar is changed.
+		SetNetVarFloat( "m_flMaxspeed", jumpPreviousMax );
+		RouteReport( "jump launch v=1 count=%u tick=%d owner=%llu edge=%d->%d requested=(%.6f,%.6f,%.6f) after=(%.6f,%.6f,%.6f) flags=0x%X max-before=%.6f max-after=%.6f view=(%.6f,%.6f)",
+			m_uJumpLaunchCount, pGlobals->tickcount, (unsigned long long)m_uJumpLaunchOwner,
+			m_JumpLaunch.from, m_JumpLaunch.to, m_vJumpLaunchVelocity.x, m_vJumpLaunchVelocity.y, m_vJumpLaunchVelocity.z,
+			GetNetVarFloat( "m_vecVelocity[0]" ), GetNetVarFloat( "m_vecVelocity[1]" ), GetNetVarFloat( "m_vecVelocity[2]" ),
+			GetNetVarInt( "m_fFlags" ), jumpPreviousMax, GetNetVarFloat( "m_flMaxspeed" ), cmd.viewangles.x, cmd.viewangles.y );
+	}
 }
 
 bool CAgPB::IsAlive() const
@@ -374,6 +400,7 @@ void CAgPB::RouteReport( const char *pszFormat, ... ) const
 
 void CAgPB::ClearRoute()
 {
+	ResetPlayerAvoidance();
 	ClearBreakable();
 	m_vecRoute.RemoveAll();
 	m_iRouteIndex = 0;
@@ -384,6 +411,9 @@ void CAgPB::ClearRoute()
 	m_bRouteArrived = false;
 	m_flRouteSettleSince = -1.0f;
 	m_bRouteLegAirborne = false;
+	AgPBJump::Reset( m_JumpLaunch );
+	m_bPendingJumpLaunch = false;
+	m_uJumpLaunchOwner = 0;
 	m_uRouteTaskToken = 0;
 	ResetRouteProgress( 0.0f );
 }
@@ -780,10 +810,11 @@ static int CompareRouteEntries( const AgPBRouteEntryCandidate *a, const AgPBRout
 class CAgPBRouteEntryFilter : public CTraceFilter
 {
 public:
-	CAgPBRouteEntryFilter( IEngineTrace *trace, IHandleEntity *ignore ) : m_Trace( trace ), m_Ignore( ignore ) {}
+	CAgPBRouteEntryFilter( IEngineTrace *trace, IHandleEntity *ignore, IHandleEntity *exitContact = NULL )
+		: m_Trace( trace ), m_Ignore( ignore ), m_ExitContact( exitContact ) {}
 	bool ShouldHitEntity( IHandleEntity *entity, int contentsMask )
 	{
-		if ( entity == m_Ignore ) return false;
+		if ( entity == m_Ignore || entity == m_ExitContact ) return false;
 		ICollideable *collide = m_Trace->GetCollideable( entity );
 		if ( collide == NULL ) return true;
 		if ( collide->GetSolid() == SOLID_NONE || ( collide->GetSolidFlags() & FSOLID_NOT_SOLID ) != 0 )
@@ -810,6 +841,7 @@ public:
 private:
 	IEngineTrace *m_Trace;
 	IHandleEntity *m_Ignore;
+	IHandleEntity *m_ExitContact;
 };
 
 // SyPB/CS-EBOT choose a nearby reachable node before graph navigation. In Source
@@ -818,7 +850,8 @@ private:
 // Step-up / forward / step-down and the floor normal follow Source StepMove.
 static bool CanWalkToRouteStart( IEngineTrace *trace, IHandleEntity *self,
                                 const Vector &from, const Vector &to,
-                                bool crouch, float stepSize )
+                                bool crouch, float stepSize, bool requireTargetHeight = true,
+                                IHandleEntity *exitContact = NULL )
 {
 	if ( trace == NULL || !from.IsValid() || !to.IsValid() ||
 	     !IsFinite( stepSize ) || stepSize <= 0.0f )
@@ -826,7 +859,7 @@ static bool CanWalkToRouteStart( IEngineTrace *trace, IHandleEntity *self,
 	const Vector mins( -AgPB_HULL_RADIUS, -AgPB_HULL_RADIUS, 0.0f );
 	const Vector maxs( AgPB_HULL_RADIUS, AgPB_HULL_RADIUS,
 	                  crouch ? AgPB_HullDuckHeight() : AgPB_HullStandHeight() );
-	CAgPBRouteEntryFilter filter( trace, self );
+	CAgPBRouteEntryFilter filter( trace, self, exitContact );
 	const float epsilon = 0.1f;
 	Vector current = from + Vector( 0, 0, epsilon );
 	const Vector delta = to - from;
@@ -873,7 +906,7 @@ static bool CanWalkToRouteStart( IEngineTrace *trace, IHandleEntity *self,
 		current = hit.endpos + Vector( 0, 0, epsilon );
 	}
 	// A clear path on a different floor is not an approach to this waypoint.
-	return fabsf( current.z - epsilon - to.z ) < AgPB_ROUTE_ENTRY_TOLERANCE;
+	return !requireTargetHeight || fabsf( current.z - epsilon - to.z ) < AgPB_ROUTE_ENTRY_TOLERANCE;
 }
 
 // SyPB/CS-EBOT account for motion when approaching precise waypoints. Limit
@@ -898,6 +931,65 @@ static bool ReadRouteVelocity( const CAgPB &bot, Vector &velocity )
 		velocity[i] = NetVar_GetFloat( base, *field );
 	}
 	return velocity.IsValid();
+}
+
+AgPBJump::Conditions CAgPB::JumpLaunchConditions( CGlobalVars *globals ) const
+{
+	AgPBJump::Conditions conditions;
+	const int flags = GetNetVarInt( "m_fFlags" );
+	conditions.grounded = ( flags & FL_ONGROUND ) != 0 && GetNetVarInt( "movetype" ) == MOVETYPE_WALK &&
+		GetNetVarInt( "m_nWaterLevel" ) < 2;
+	conditions.previousJump = ( m_LastSubmittedCmd.buttons & IN_JUMP ) != 0;
+	// SyPB JumpAction does not reject crouched launches. Source also accepts
+	// them and selects its native crouched impulse from the actual posture.
+	conditions.paused = globals == NULL || !IsFinite( globals->frametime ) || globals->frametime <= 0.0f;
+	conditions.frozen = AgPB_IsRoundFrozen() || ( flags & FL_FROZEN ) != 0;
+	conditions.routeOwned = IsAlive() && HasRoute() && m_uRouteTaskToken != 0 && m_uRouteTaskToken == m_Tasks.Current().token;
+	const BotNetVar *field = FindNetVar( "m_vecBaseVelocity" );
+	conditions.externalBaseVelocity = field == NULL || field->type != DPT_Vector ||
+		!GetNetVarVector( "m_vecBaseVelocity" ).IsValid() || GetNetVarVector( "m_vecBaseVelocity" ).LengthSqr() > 0.0001f ||
+		( flags & FL_BASEVELOCITY ) != 0;
+	// CheckMovingGround can replace basevelocity on conveyors before consuming
+	// it. Until non-world supports can be verified through public state, do not
+	// claim an authored impulse on a dynamic/entity support.
+	uintp support = (uintp)INVALID_EHANDLE_INDEX;
+	if ( !GetNetVarHandleValue( "m_hGroundEntity", &support ) || !NetVar_HandleIsValid( support ) ||
+	     NetVar_HandleEntry( support ) != 0 ) conditions.externalBaseVelocity = true;
+	return conditions;
+}
+
+bool CAgPB::ApplyJumpLaunch( CGlobalVars *globals, CBotCmd &cmd, float &previousMaxSpeed )
+{
+	if ( !m_bPendingJumpLaunch ) return false;
+	m_bPendingJumpLaunch = false;
+	const AgPBJump::Vector3 authored( m_vJumpLaunchVelocity.x, m_vJumpLaunchVelocity.y, m_vJumpLaunchVelocity.z );
+	if ( ( cmd.buttons & IN_JUMP ) == 0 || m_uJumpLaunchOwner != m_uRouteTaskToken ||
+	     !AgPBJump::ShouldInject( m_JumpLaunch, authored, JumpLaunchConditions( globals ) ) )
+	{ cmd.buttons &= ~IN_JUMP; return false; }
+	Vector current;
+	AgPBJump::Vector3 delta;
+	previousMaxSpeed = GetNetVarFloat( "m_flMaxspeed", 0.0f );
+	static ConVarRef gravity( "sv_gravity" );
+	const float playerGravity = GetNetVarFloat( "m_flGravity", 1.0f );
+	const float effectiveGravity = ( gravity.IsValid() ? gravity.GetFloat() : 800.0f ) * ( playerGravity == 0.0f ? 1.0f : playerGravity );
+	const float temporaryMax = AgPBJump::BunnyMaxSpeed( authored, previousMaxSpeed, effectiveGravity, globals->interval_per_tick );
+	if ( !ReadRouteVelocity( *this, current ) || temporaryMax <= 0.0f ||
+	     !AgPBJump::BaseVelocityDelta( authored, AgPBJump::Vector3( current.x, current.y, current.z ), globals->interval_per_tick, delta ) ||
+	     !SetNetVarFloat( "m_flMaxspeed", temporaryMax ) )
+	{ cmd.buttons &= ~IN_JUMP; return false; }
+	// Source's public basevelocity path applies an absolute impulse before
+	// SetupMove and synchronizes its velocity cache. Raw m_vecVelocity writes
+	// alone do not provide that contract. Only unused basevelocity is owned here.
+	if ( !SetNetVarVector( "m_vecBaseVelocity", Vector( delta.x, delta.y, delta.z ) ) )
+	{
+		SetNetVarFloat( "m_flMaxspeed", previousMaxSpeed );
+		cmd.buttons &= ~IN_JUMP;
+		return false;
+	}
+	AgPBJump::MarkIssued( m_JumpLaunch );
+	++m_uJumpLaunchCount;
+	m_iLastJumpLaunchTick = globals->tickcount;
+	return true;
 }
 
 void CAgPB::ReportLifecycle() const
@@ -941,6 +1033,7 @@ void CAgPB::ReportLifecycle() const
 		m_LastSubmittedCmd.command_number, m_LastSubmittedCmd.tick_count, m_LastSubmittedCmd.buttons,
 		m_LastSubmittedCmd.forwardmove, m_LastSubmittedCmd.sidemove, m_LastSubmittedCmd.upmove,
 		m_LastSubmittedCmd.viewangles.x, m_LastSubmittedCmd.viewangles.y );
+	ReportPlayerAvoidance();
 }
 
 void CAgPB::ReportClearance() const
@@ -1015,14 +1108,68 @@ bool CAgPB::CanWalkToTaskPosition( const Vector &position, bool crouch ) const
 		m_pInfo->GetAbsOrigin(), position, crouch, GetNetVarFloat( "m_flStepSize", 18.0f ) );
 }
 
+bool CAgPB::CanCombatStep( const Vector &worldWish, bool crouch, float interval ) const
+{
+	if ( m_pInfo == NULL || m_Ctx.pTrace == NULL || !worldWish.IsValid() ||
+	     !IsFinite( interval ) || interval <= 0.0f ||
+	     ( GetNetVarInt( "m_fFlags" ) & FL_ONGROUND ) == 0 ) return false;
+	IServerNetworkable *network = m_pEdict != NULL && !m_pEdict->IsFree() && m_pEdict->GetUnknown() != NULL
+		? m_pEdict->GetNetworkable() : NULL;
+	if ( network == NULL ) return false;
+	// SyPB CombatFight checks walls and the predicted drop before strafing.
+	// Reuse the actual movement hull/step/floor query, including other players.
+	// The prediction follows nearby slopes, not a waypoint on a fixed Z plane.
+	Vector prediction = worldWish * 0.2f;
+	const float distance = prediction.Length2D();
+	if ( distance < 0.01f ) return false;
+	if ( distance < AgPB_HULL_RADIUS ) prediction *= AgPB_HULL_RADIUS / distance;
+	Vector velocity;
+	if ( ReadRouteVelocity( *this, velocity ) )
+		prediction += Vector( velocity.x, velocity.y, 0 ) * MIN( interval, 0.05f );
+	const Vector origin = m_pInfo->GetAbsOrigin();
+	return CanWalkToRouteStart( m_Ctx.pTrace, network->GetEntityHandle(), origin,
+		origin + prediction, crouch, GetNetVarFloat( "m_flStepSize", 18.0f ), false );
+}
+
+bool CAgPB::CanPlayerAvoidStep( const Vector &wish, bool crouch, float interval, edict_t *contact ) const
+{
+	if ( CanCombatStep( wish, crouch, interval ) ) return true;
+	if ( contact == NULL || contact->IsFree() || m_Ctx.pTrace == NULL || m_pInfo == NULL ||
+		!wish.IsValid() || !IsFinite( interval ) || interval <= 0.0f || wish.Length2DSqr() < 0.01f ||
+		( GetNetVarInt( "m_fFlags" ) & FL_ONGROUND ) == 0 ) return false;
+	IPlayerInfo *other = m_Ctx.pPlayerInfoManager->GetPlayerInfo( contact );
+	if ( other == NULL || !other->IsPlayer() || other->IsObserver() || other->IsDead() ||
+		other->GetTeamIndex() != m_pInfo->GetTeamIndex() ||
+		AgPB_ReadNetVarInt( contact, "m_lifeState", -1 ) != LIFE_ALIVE ) return false;
+	const Vector origin = m_pInfo->GetAbsOrigin(), away = origin - other->GetAbsOrigin();
+	// Only an existing overlapping/touching same-team hull can be omitted,
+	// and only for a path whose separation is monotonically non-decreasing.
+	// Every wall, floor and other player remains in the full movement trace.
+	const Vector selfLow = origin + m_pInfo->GetPlayerMins(), selfHigh = origin + m_pInfo->GetPlayerMaxs();
+	const Vector otherLow = other->GetAbsOrigin() + other->GetPlayerMins();
+	const Vector otherHigh = other->GetAbsOrigin() + other->GetPlayerMaxs();
+	// Source uses axis-aligned player boxes: a diagonal corner overlap can
+	// exist beyond twice the hull radius measured as a center-circle distance.
+	for ( int axis = 0; axis < 3; ++axis )
+		if ( selfHigh[axis] + 0.1f < otherLow[axis] || otherHigh[axis] + 0.1f < selfLow[axis] ) return false;
+	Vector delta = wish * 0.2f;
+	const float length = delta.Length2D();
+	if ( length < AgPB_HULL_RADIUS ) delta *= AgPB_HULL_RADIUS / length;
+	Vector velocity;
+	if ( !ReadRouteVelocity( *this, velocity ) ) return false;
+	delta += Vector( velocity.x, velocity.y, 0 ) * MIN( interval, 0.05f );
+	if ( delta.x * away.x + delta.y * away.y < 0.0f ||
+		( away + delta ).Length2DSqr() <= away.Length2DSqr() + 0.01f ) return false;
+	IServerNetworkable *network = m_pEdict->GetNetworkable();
+	IServerNetworkable *otherNetwork = contact->GetNetworkable();
+	if ( network == NULL || otherNetwork == NULL ) return false;
+	return CanWalkToRouteStart( m_Ctx.pTrace, network->GetEntityHandle(), origin,
+		origin + delta, crouch, GetNetVarFloat( "m_flStepSize", 18.0f ), false, otherNetwork->GetEntityHandle() );
+}
+
 bool CAgPB::BuildRoute( int iGoalWaypoint, char *error, size_t maxlen )
 {
 	CAgPBWaypoints &wp = BotWaypoints();
-
-	ClearRoute();
-
-
-
 	if ( !IsValid() )
 	{
 		Q_strncpy( error, "bot is not valid (spawned yet?)", (int)maxlen );
@@ -1083,12 +1230,15 @@ bool CAgPB::BuildRoute( int iGoalWaypoint, char *error, size_t maxlen )
 	entries.Sort( CompareRouteEntries );
 	bool foundEntry = false;
 	CUtlVector<int> vecPath;
+	// A bot leaving a real low ceiling may still need its observed duck hull.
+	// CAMP controls authored posture, not whether the native hull fits here.
+	const bool enteringDucked = ( GetNetVarInt( "m_fFlags" ) & FL_DUCKING ) != 0;
 	for ( int e = 0; e < entries.Count(); ++e )
 	{
 		const int i = entries[e].index;
 		const AgPBPath *node = wp.Get( i );
 		if ( !CanWalkToRouteStart( m_Ctx.pTrace, self, vPos, node->origin,
-		                          ( node->flags & AgPB_WP_CROUCH ) != 0, stepSize ) )
+		                          NavigationRequiresCrouch( node->flags ) || enteringDucked, stepSize ) )
 			continue;
 		foundEntry = true;
 		if ( wp.FindPath( i, iGoalWaypoint, vecPath, team ) )
@@ -1103,6 +1253,8 @@ bool CAgPB::BuildRoute( int iGoalWaypoint, char *error, size_t maxlen )
 
 	// The graph starts at vecPath[0], not at the bot's arbitrary current position.
 	// Reach that anchor before consuming the first hand-authored edge.
+	// Keep the old owned route until the new manual-graph candidate is valid.
+	ClearRoute();
 	m_vecRoute = vecPath;
 	m_iRouteIndex = 0;
 	m_iGoalWaypoint = iGoalWaypoint;
@@ -1258,12 +1410,20 @@ void CAgPB::UpdateRoute( CGlobalVars *pGlobals, CBotCmd &cmd )
 	const Vector vDelta = pNode->origin - vPos;
 	const float flDist2D = vDelta.Length2D();
 	const bool bJumpLeg = ( uLegFlags & AgPB_PATH_JUMP ) != 0;
+	AgPBJump::SetLeg( m_JumpLaunch, bJumpLeg ? RouteNode( m_iRouteIndex - 1 ) : -1, bJumpLeg ? iNode : -1 );
 	unsigned int nextLegFlags = 0;
 	const bool bTakeoff = m_iRouteIndex + 1 < m_vecRoute.Count() &&
 		wp.IsConnected( iNode, m_vecRoute[m_iRouteIndex + 1], &nextLegFlags ) &&
 		( nextLegFlags & AgPB_PATH_JUMP ) != 0;
 	const bool bEntry = m_iRouteIndex == 0;
 	const bool bGrounded = ( GetNetVarInt( "m_fFlags" ) & FL_ONGROUND ) != 0;
+	if ( PlayerAvoidanceActive( pGlobals->curtime ) )
+	{
+		// The final player layer owns its bounded yield/replan cycle; a live
+		// teammate must not consume the static-obstacle failure budget.
+		m_flStuckCheckTime = pGlobals->curtime + AgPB_STUCK_WINDOW;
+		m_flStuckRecoveryUntil = 0.0f;
+	}
 	const bool bTerminal = m_iRouteIndex + 1 == m_vecRoute.Count();
 	Vector velocity;
 	if ( !ReadRouteVelocity( *this, velocity ) )
@@ -1314,6 +1474,7 @@ void CAgPB::UpdateRoute( CGlobalVars *pGlobals, CBotCmd &cmd )
 		++m_iRouteIndex;
 		m_flRouteSettleSince = -1.0f;
 		m_bRouteLegAirborne = false;
+		AgPBJump::Reset( m_JumpLaunch );
 		ResetRouteProgress( pGlobals->curtime );
 
 		if ( m_iRouteIndex >= m_vecRoute.Count() )
@@ -1364,7 +1525,7 @@ void CAgPB::UpdateRoute( CGlobalVars *pGlobals, CBotCmd &cmd )
 
 	// 前进（USP 跑速上限 250）
 	cmd.forwardmove = AgPB_WALK_SPEED;
-	if ( ( bEntry || bTakeoff ) && ( pNode->flags & AgPB_WP_CROUCH ) == 0 &&
+	if ( ( bEntry || bTakeoff ) && !NavigationRequiresCrouch( pNode->flags ) &&
 	     ( GetNetVarInt( "m_fFlags" ) & FL_DUCKING ) == 0 )
 	{
 		// Very small wish speeds cannot overcome Source's stop-speed friction.
@@ -1402,65 +1563,18 @@ void CAgPB::UpdateRoute( CGlobalVars *pGlobals, CBotCmd &cmd )
 		cmd.sidemove = DotProduct( worldWish, right );
 	}
 
-	// ---- 队友让行（最简版）----
-	// 最小导航没有避让：正前方站着队友时，序号大的那个错身让路，
-	// 避免一群 bot 互相堵在门口。EBot 的窄道/互锁让路
-	// （navigate.cpp:2833-2950：优先级 + 碰撞探针 + 僵持暂停）是完整版，这里是缩小版。
-	{
-		CAgPBManager &bots = AgPB_Bots();
-		CAgPB *pBlocking = NULL;
-
-		for ( int i = 0; i < bots.Count(); ++i )
-		{
-			CAgPB *pOther = bots.Get( i );
-
-			if ( pOther == NULL || pOther == this )
-				continue;
-
-			IPlayerInfo *pOtherInfo = pOther->PlayerInfo();
-
-			if ( !pOther->IsAlive() )
-				continue;
-
-			const Vector vTo = pOtherInfo->GetAbsOrigin() - vPos;
-
-			if ( vTo.Length2D() > AgPB_FRIEND_BLOCK_DIST || fabsf( vTo.z ) > AgPB_FRIEND_BLOCK_DIST )
-				continue;
-
-			QAngle angFace( 0.0f, cmd.viewangles.y, 0.0f );
-			Vector vFwd;
-			AngleVectors( angFace, &vFwd );
-			vFwd.z = 0.0f;
-			VectorNormalize( vFwd );
-
-			Vector vDir( vTo.x, vTo.y, 0.0f );
-			VectorNormalize( vDir );
-
-			if ( DotProduct( vFwd, vDir ) < 0.5f )     // 只看正前方 ±60°
-				continue;
-
-			pBlocking = pOther;
-			break;
-		}
-
-		// 对方 edict 序号更小 = 来得更早 → 让他：自己错身 + 减速
-		if ( pBlocking != NULL && pBlocking->Index() < m_iIndex )
-		{
-			cmd.sidemove = AgPB_WALK_SPEED * 0.6f * ( ( m_iIndex & 1 ) ? 1.0f : -1.0f );
-			cmd.forwardmove *= 0.25f;
-		}
-	}
-
-	// 蹲：EBot 的 WAYPOINT_CROUCH 意思是"必须蹲着才能到达这个点"
-	//   - 正要走向的点带 CROUCH → 一路按着蹲
-	//   - 刚离开的点带 CROUCH 而且离得还近（人还在矮区里）→ 继续蹲，别站起来顶天花板
-	bool bCrouch = ( ( pNode->flags & AgPB_WP_CROUCH ) != 0 );
+	// SyPB distinguishes passage crouch from the posture of a CAMP point.
+	// Ordinary CROUCH applies while travelling; CAMP+CROUCH applies on hold.
+	// Preserve the low-passage overlap when leaving an ordinary crouch node.
+	const bool lowCeiling = bGrounded && ( GetNetVarInt( "m_fFlags" ) & FL_DUCKING ) != 0 &&
+		!CanWalkToTaskPosition( vPos, false );
+	bool bCrouch = NavigationRequiresCrouch( pNode->flags ) || lowCeiling;
 
 	if ( !bCrouch && m_iRouteIndex > 0 )
 	{
 		const AgPBPath *pPrev = wp.Get( m_vecRoute[m_iRouteIndex - 1] );
 
-		if ( pPrev != NULL && ( pPrev->flags & AgPB_WP_CROUCH ) != 0 )
+		if ( pPrev != NULL && NavigationRequiresCrouch( pPrev->flags ) )
 		{
 			if ( ( pPrev->origin - vPos ).Length2D() < 64.0f )
 				bCrouch = true;
@@ -1470,7 +1584,7 @@ void CAgPB::UpdateRoute( CGlobalVars *pGlobals, CBotCmd &cmd )
 	const AgPBPath *nextNode = m_iRouteIndex + 1 < m_vecRoute.Count()
 		? wp.Get( m_vecRoute[m_iRouteIndex + 1] ) : NULL;
 	const AgPBTerminal::RoutePosture posture = AgPBTerminal::ComputeRoutePosture(
-		bCrouch, nextNode != NULL && ( nextNode->flags & AgPB_WP_CROUCH ) != 0,
+		bCrouch, nextNode != NULL && NavigationRequiresCrouch( nextNode->flags ),
 		bTakeoff, flDist2D, bJumpLeg, bLandedJumpLeg, bGrounded,
 		m_flStuckRecoveryUntil > 0.0f );
 
@@ -1490,13 +1604,10 @@ void CAgPB::UpdateRoute( CGlobalVars *pGlobals, CBotCmd &cmd )
 		}
 	}
 
-	// ---- 按钮：跳 / 蹲 —— 严格照 CS:S 引擎的真实机制（cs_gamemovement.cpp）
-	//
-	// 1) 跳跃边：站地上就按跳，**不按蹲** —— 站着跳 57、蹲着跳只有 42（:723-728）
-	// 2) 起跳那一 tick 只要没按蹲，引擎会自动给 bot 接上 crouch-jump：
-	//    m_duckUntilOnGround = true + FinishDuck()（:767-772），空中它还替 bot 按着蹲（:173-178），
-	//    落地后自己决定何时站起（:1017+）；空中蹲会把脚抬起 8.5 单位，更容易上高台
-	// 3) 起跳/空中不追加 IN_DUCK；该边已正确落地后可衔接手工 CROUCH 段。
+	// SyPB permits authored CROUCH and PATH_JUMP together. Preserve the
+	// passage posture through takeoff/flight; Source selects the corresponding
+	// native jump impulse. Without authored crouch, the engine still owns its
+	// automatic bot crouch-jump. Do not force a standing launch or clear flags.
 	if ( posture.jump ) cmd.buttons |= IN_JUMP;
 	if ( posture.crouch ) cmd.buttons |= IN_DUCK;
 
@@ -1543,6 +1654,35 @@ void CAgPB::UpdateRoute( CGlobalVars *pGlobals, CBotCmd &cmd )
 		             vPos.x, vPos.y, vPos.z, iNode, flDist2D,
 		             m_iRouteIndex, m_vecRoute.Count() - 1 );
 		ClearRoute();
+	}
+	if ( HasRoute() && ( cmd.buttons & IN_JUMP ) != 0 && bJumpLeg )
+	{
+		const Vector authored = wp.JumpVelocity( RouteNode( m_iRouteIndex - 1 ), iNode );
+		const Vector launchDirection = authored.Length2DSqr() > 0.0001f
+			? Vector( authored.x, authored.y, 0 ) : Vector( vDelta.x, vDelta.y, 0 );
+		// Snap the launch view after all movement/avoidance calculations.
+		// Flight and landing remain engine-controlled; no air tick reinjects.
+		if ( launchDirection.Length2DSqr() > 0.0001f )
+		{
+			QAngle launch; VectorAngles( launchDirection, launch );
+			cmd.viewangles.Init( 0, launch.y, 0 );
+			cmd.sidemove = 0.0f;
+		}
+		const AgPBJump::Vector3 requested( authored.x, authored.y, authored.z );
+		if ( AgPBJump::NonZero( requested ) )
+		{
+			if ( AgPBJump::ShouldInject( m_JumpLaunch, requested, JumpLaunchConditions( pGlobals ) ) )
+			{
+				m_vJumpLaunchVelocity = authored;
+				m_uJumpLaunchOwner = m_uRouteTaskToken;
+				m_bPendingJumpLaunch = true;
+			}
+			else
+			{
+				cmd.buttons &= ~IN_JUMP;
+				if ( !m_JumpLaunch.issued ) cmd.forwardmove = cmd.sidemove = cmd.upmove = 0.0f;
+			}
+		}
 	}
 }
 

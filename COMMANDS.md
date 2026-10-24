@@ -46,8 +46,12 @@ CUserCmd，读取时可能早于当前 tick。停止、死亡、换队或回合�
 
 ## 普通模式战斗与难度
 
-`agpb_combat` 默认 `1`。本地战斗沿用 SyPB 普通模式机制，EBot 作实现对照：
-使用当前持有武器，在地面停步瞄准、按冷却脉冲开火或换弹；每次开火复核实际指向与玩家遮挡。
+`agpb_combat` 默认 `1`。已实现的本地战斗以 SyPB 普通模式机制为基线，EBot 作实现对照：
+从实际拥有的枪械中按弹药、距离与 SyPB 偏好选择武器，通过 CUserCmd 切枪并等待实际装备确认；空闲时可换弹。交战时优先使用有弹枪械，避免空主武器反复抢回已装弹的副武器；霰弹枪远距、狙击枪近距优先考虑其它可用枪械。切换有冷却和超时重试，跳跃 / 梯子 / 清障及地图目标任务优先执行。
+地面战斗按武器与局势进退、横移或停步瞄准。射击与走位决定最多按 15 Hz 更新，决定之间把攻击按钮与走位提案锁存到每个原生 tick 的 CUserCmd；目标身份、实际指向、玩家遮挡、弹药、姿态与几何安全仍逐 tick 复核，必要时立即停火或停止移动。
+普通 Fight 执行沿用 SyPB 调用顺序：先计算开火前的移动，再执行射击；只有 `skill>=60` 额外按本帧攻击状态重算移动。因此低技能、足够血量 / 进攻倾向的步枪 bot 可以移动开火，高技能会执行相应停枪 / 停步选择；CAMP 等有效持位任务仍保持位置。换弹清可选蹲伏计时，保留必要蹲姿与近距本帧请求的蹲姿。
+射击采用 SyPB 的 `primaryFireHold` 分类：hold 类持续请求 `IN_ATTACK`，穿越原生武器冷却；非 hold 类按武器基础延时和 skill 随机延时决定下一次请求。实际射速仍由原生武器控制，按钮保持不等于每 tick 都发射。近距 `<256` 不增加这段 AI 延时，也绕过距离后坐力暂停；非 hold 的近距请求仍需释放上一攻击按钮。
+当前范围是已拥有库存的武器选择与 primary attack（主攻击）；尚无购买和经济决策，未实现开镜（scope）、连发模式切换（burst）、消音器切换（silencer）及投掷物（grenade）行为。
 失去视线时保留最后观测位置与时间，并释放攻击；本地可据近期目视或真实开火 / 脚步事件发起有期限的局部调查，沿已有手工图巡查，线索耗尽后续原任务。调查不刷新遮挡后敌人的坐标，不覆盖有效高层意图；空中和梯子阶段不接管导航。战斗保留原任务 / 路线归属；
 逃爆及正在安放 / 拆除等优先交互仍由本地核心处理。开启战斗不会解除手动 stop。
 
@@ -55,14 +59,22 @@ CUserCmd，读取时可能早于当前 tick。停止、死亡、换队或回合�
 |---|---|
 | `agpb_bot_combat <idx\|all> [0\|1]` | 切换指定 bot 的本地战斗；省略开关等于 `1`，还须全局 `agpb_combat=1` |
 | `agpb_bot_combat_info [idx\|all]` | 只读目标完整句柄 / userid、武器、瞄准、实际攻击命令 / 弹药消耗、任务与路线归属，以及 difficulty / skill / 反应和后坐力状态 |
+| `agpb_bot_weapon_info [idx\|all]` | 只读列出实际拥有武器的完整句柄、弹夹 / 备弹、偏好及当前装备；同时回显选择、等待确认、冷却 / 重试与累计切枪命令数 |
 | `agpb_bot_difficulty <idx\|all> <0..4>` | 给已有 bot 设置 SyPB 难度并在该档范围内重新选择 skill；清当前战斗目标，不改自主开关 |
 
 五档预设的 skill 范围为 `0=1–29`、`1=30–49`、`2=50–79`、`3=80–99`、`4=100`；
-内部技能表有六行，按 `skill / 20` 选择反应与后坐力参数。`agpb_difficulty` 默认 `3`，只影响之后创建的 bot。
+内部技能表有六行，按 `skill / 20` 选择反应与后坐力参数；六段后坐力阈值依次为 `50 / 40 / 35 / 30 / 23 / 20`。远距射击依据实际 punch 与距离计算是否超阈值，Godlike（skill 100）对应阈值 20、后坐力暂停 0.4 游戏秒；不是固定打 N 发就暂停。`agpb_difficulty` 默认 `3`，只影响之后创建的 bot。
 瞄准同时区分反应、头部选择、低技能误差与弹道暂停；SyPB 的直接对准条件是已产生开火意图且
 `skill >= 70`（狙击武器也有该分支），因此也覆盖档位 2 的高 skill 和档位 3，并非最高档独有。
 
 普通巡逻到点后继续选择新目标；驻守只在有效 CAMP / SNIPER 点，或符合防守局势、占用和冷却条件的目标区执行。驻守会每 2–5 秒选择当前可通视的既有路点方向观察，不改变点、边或跳跃标志。`agpb_bot_tasks` 回显人格、战术、选点、观察点和控制层；`agpb_bot_combat_info` 同时回显目视 / 听觉线索身份、快照、期限及调查进度。
+
+CAMP 任务保持位置，路点的 CROUCH 标志决定是否持续下蹲；CAMP 单独存在时可以站立驻守。按 SyPB，CAMP + CROUCH 在到达并进入驻守后才施加蹲姿，接近、途经或离开时不单凭该组合蹲行；普通 CROUCH 点继续要求蹲着通行，实际低矮空间仍由体积检查与原生蹲起约束处理。交战、失敌释放和切枪不会解除仍有效的任务姿态；Pause 与已到位的 agent camp 复用该规则。驻守 deadline 使用游戏时间，不因交战延长；到期、stop、死亡或冻结后不再施加原任务的蹲姿要求。
+
+`agpb_bot_combat_info` 的 `combat movement` 行回显 `sypb_ground_v1` 策略、进退 / 横移 / 停留意图、三维距离、面向敌人的期望移动、几何约束命中及实际速度；最终提交输入仍以 `agpb_bot_info` 的 `move/view/buttons` 为准。`braking` 表示精确射击等待降速，`posture-settling` 表示蹲起视点过渡期间停火；这些状态不代表已实际开火或伤害。
+`combat fire` 行回显 `sypb_primary_v1` 的 `state`、hold 分类、下一 AI 射击期限 `next-ai`、决定编号 / 期限 `decision` / `decision-next`，以及 `holding-position`、`task-crouch` 和 `sniper-stop`；真实开火与伤害仍以原生事件和血量变化确认。
+
+地面玩家避碰参考 SyPB 的最近同队玩家预测和 EBot 的通用优先级：真人 / 外部控制者优先，AgPB 之间以稳定 slot 排序；正在持位 / 交互或明确停住的队友受到保护。侧让、斜退、后退候选均检查真实玩家体积、墙、台阶及地面支撑，侧向选择保留短期限；连续阻挡定期沿现有手工图重算同一目标，失败保留原路线。`agpb_bot_info` 的 `player avoidance` 行回显阻挡者完整身份、owner、让行状态和重规划次数。此层只调整已有非零地面移动，不改视角 / 攻击 / 蹲跳按键，不激活 stop、持位、精确停枪或跳跃 / 梯子阶段的移动。
 
 ## 可选 agent 意图
 
@@ -95,6 +107,7 @@ CUserCmd，读取时可能早于当前 tick。停止、死亡、换队或回合�
 | `agpb_wp_del <idx>` | 删路点（后面下标前移，连边自动修正） |
 | `agpb_wp_link <from> <to> [flags]` | 连边（双向）；flags：1=跳 2=连跳 4=仅通视 |
 | `agpb_wp_unlink <from> <to>` | 断开连边 |
+| `agpb_wp_jumpvel [from to] [x y z]` | 查询 / 设置现有有向跳边的三维初速度；省略 from/to 时使用最近点 → 准星目标 |
 | `agpb_wp_list [max]` | 打印路点与连边 |
 | `agpb_wp_nearest` | 离你最近 / 最远的路点下标 |
 | `agpb_wp_save` / `agpb_wp_load` | 存盘 / 重读 `addons/AgPB/waypoints/<map>.agpw` |
@@ -130,15 +143,26 @@ CUserCmd，读取时可能早于当前 tick。停止、死亡、换队或回合�
 加点默认到达半径（固定值，自动算已删）：精确类（`AVOID` / `LADDER` / `GOAL` / `RESCUE` / `CROUCH`）= **0**，
 `CAMP` = **32**，`JUMP` 起跳点 = **4**，其它（普通 / T / CT）= **64**；要改就 `agpb_wp_radius <n>`。
 
+跳跃初速度沿用 SyPB 的**起跳前世界坐标 XYZ 速度**，单位 units/s，每分量 -2000..2000，默认 `0 0 0` 保留普通跳跃与原有动量。非零向量在该次连接起跳时只注入一次；Z 随后叠加游戏原生的竖直跳跃冲量。起跳视角直接对准向量的水平朝向；零向量或纯竖直向量使用落点方向。
+
+```text
+agpb_wp_jumpvel                 // 查询最近点 -> 准星目标的已有跳边
+agpb_wp_jumpvel 0 480 60        // 设置这条跳边的世界 XYZ 初速度
+agpb_wp_jumpvel 109 110 0 480 60 // 显式指定起点、终点与 XYZ
+agpb_wp_save
+```
+
+命令仅修改已有 `PATH_JUMP` 方向，不创建连线或补跳标志。`0 0 0` 解除该方向的自定义初速度。保存非零速度时升级为 AGPW v2；旧 v1 自动读取为零，v2 保存不降级。3D 工具也可按目标编号编辑跳边 XYZ。普通 CROUCH 可与跳跃同存，不因已蹲或蹲起过渡拒绝起跳；原生引擎依据实际姿态选择跳跃冲量。当前非零注入仅覆盖静态世界地面支撑；冻结、水中及实体 / 移动支撑等待或按原有限恢复退出。每次起跳按需临时调整当前 bot 的限速字段，提交后立即恢复；全局连跳设置保持原值。设计与验收顺序见[手工弹道跳设计](waypoint-workflow/README.md#手工弹道跳设计)：先实际看多视角截图和碰撞，再手工调参及逐向实走。
+
 ## 最小导航
 
 | 命令 | 说明 |
 |---|---|
-| `agpb_bot_goto <idx> [wp]` | 切到手动模式并让 bot 沿现有手工路点图的 A* 路线走到目标（不给 wp = 准星指向 / 缓存点）；到达后若目标点带 CAMP 标志会蹲守 |
+| `agpb_bot_goto <idx> [wp]` | 切到手动模式并让 bot 沿现有手工路点图的 A* 路线走到目标（不给 wp = 准星指向 / 缓存点）；到达后若目标点带 CAMP 标志会驻守，另有 CROUCH 标志时持续下蹲 |
 | `agpb_bot_stop <idx\|all>` | 清任务和路线，关闭自主任务与漫游，停止行走；恢复自主须显式执行 `agpb_bot_auto <idx> 1` |
 | `agpb_bot_obstacle <idx> [wp\|-1] [stuck=0\|1]` | **只读诊断**：按 ZBot 思路扫路径体积；默认检查当前路线，显式 wp 则从 bot 当前坐标直扫该点（不寻路）。`stuck=1` 扩大近处检测体积；停止后需显式给 wp。输出实体、碰撞组、位置、可见性与可破坏候选，未知受伤属性报 `unknown` |
-| `agpb_bot_roam <idx\|all> [0\|1]` | 切到手动模式并清当前任务 / 路线；`1` 沿现有路点图随机漫游（无路线时选可达点，到达后再选），`0` 停止。会避开别的 bot 的目标点，正前方有队友时按序号错身让路；不加参数 = 开 |
-| `agpb_bot_vel <idx> <x> <y> <z>` | **开发用**：下一 tick 直接写 `m_vecVelocity`（弹道跳原语） |
+| `agpb_bot_roam <idx\|all> [0\|1]` | 切到手动模式并清当前任务 / 路线；`1` 沿现有路点图随机漫游（无路线时选可达点，到达后再选），`0` 停止。会避开别的 bot 的目标点，地面移动共用玩家避碰执行；不加参数 = 开 |
+| `agpb_bot_vel <idx> <x> <y> <z>` | **开发用**：下一 tick 直接覆盖 `m_vecVelocity`；不代替正式跳边的 XYZ 初速度执行路径 |
 | `agpb_bot_testweapon <idx> <weapon_m4a1\|weapon_usp\|weapon_knife> [only]` | **sv_cheats 测试夹具**：仅活着且无路线的 bot 可用；公开 IBotController 创建 / 配备武器，`only` 先清空物品。仅用于构造武器测试条件，不参与 AI 决策 |
 
 行走时会自动处理可见、符合筛选的可破坏障碍：使用持有枪械瞄准 / 开火 / 换弹，近处持刀可挥刀，
@@ -164,6 +188,9 @@ M3a / M3b 采样流程见 [路点工作流](waypoint-workflow/README.md)，战�
 | `agpb_wp_probe_clearance_watch name\|ent value` | 独立clearance probe：按唯一targetname或实体idx锁定已有物件的完整SM EntRef，最多16个；需SDKHooks实际加载成功 |
 | `agpb_wp_probe_clearance slot` | 查询所有被观测物件、该玩家真实武器状态、伤害 / 破坏 / 开火计数及64条真实事件缓存 |
 | `agpb_wp_probe_clearance_clear` | 仅取消clearance观测与钩子，不删除或改变游戏物件 |
+| `agpb_jump_probe_arm <bot-slot> <human-slot> [seconds]` / `agpb_jump_probe_clear` | 只读跳跃探针：绑定同队身份，限时观察真实跳跃、逐tick位置 / 速度 / 限速与落地 |
+| `agpb_jump_probe_sweep <bot-slot> sx sy sz tx ty tz` | 只读实际玩家体积扫掠及五层高度射线，打印碰撞位置 / 实体 |
+| `agpb_jump_prepare <bot-slot> <human-slot> x y z [yaw]` | 独立准备夹具，需sv_cheats=1、唯一同队AgPB且输入释放；仅把bot放到明确起点并清速度，后续两帧只读回报 |
 | `agpb_wp_probe_combat_watch subject_bot_slot human_slot [target_slot]` | 独立只读战斗探针：绑定实际身份与事件；主体 bot 与低 slot 真人保持同队，第三参数仅供另获明确授权的受控敌对场景 |
 | `agpb_wp_probe_combat` | 读取已绑定玩家 / 武器、真实开火 / 伤害 / 死亡事件与射线观察 |
 | `agpb_wp_probe_combat_clear` | 仅取消战斗观测，不改变玩家或游戏设置 |
@@ -202,6 +229,7 @@ fire-arm 绑定双方userid / serial，clear、卸载、换图、断线或身份
 | `agpb_combat` | 1 | 普通模式本地战斗总开关；还须对应 bot 的战斗开关开启 |
 | `agpb_difficulty` | 3 | 新建 bot 的 SyPB 难度 `0..4`；已有 bot 用 `agpb_bot_difficulty` 修改 |
 | `agpb_combat_debug` | 0 | 输出战斗目标取得 / 释放诊断 |
+| `agpb_weapons_debug` | 0 | 输出实际提交的切枪 / 换弹命令、任务归属及提交后实际装备读回；持续换弹输入可能产生多条日志 |
 | `agpb_bomb_blast_radius` | 0 | C4最终伤害半径覆盖值（单位）；0按地图初始实体配置读取，并显示来源。若管理员运行期用 `map_setbombradius` 改值，需同步设置为实际伤害半径；用 `map_showbombradius` 核对。不是地图原始damage参数 |
 | `agpb_obstacle_debug` | 0 | 1 = 行走时每 0.25 秒输出路径障碍变化；卡住时输出扩大检测结果。只控制额外日志，自主破坏 / 续路不依赖此开关 |
 | `agpb_wp_show` | 0 | 绘制路点 |
@@ -211,7 +239,7 @@ fire-arm 绑定双方userid / serial，clear、卸载、换图、断线或身份
 | `agpb_wp_xray` | 1 | 连线穿墙可见 |
 | `agpb_wp_maxjump` | 57 | 几何判定的最大跳跃高度（CS:S 站立跳） |
 | `agpb_wp_hullmode` | 0 | 0=自动 / 1=老 CS:S 体积 / 2=CS:GO 风格体积 |
-| `agpb_camp_min` / `agpb_camp_max` | 8 / 20 | 到 CAMP 点后原地蹲守的随机时长（秒） |
+| `agpb_camp_min` / `agpb_camp_max` | 8 / 20 | 到 CAMP 点后驻守的随机时长（游戏秒），不因交战延长 |
 
 ## 用法速查
 

@@ -42,17 +42,16 @@ inline RoutePosture ComputeRoutePosture(bool authoredCrouch, bool nextCrouch,
                                         bool nextJump, float targetDistance,
                                         bool jumpLeg, bool landedJump,
                                         bool grounded, bool recovering) {
-    const bool canCrouch = !jumpLeg || landedJump;
+    const bool canAnticipateCrouch = !jumpLeg || landedJump;
     // A nearby authored crouch section can begin before the preceding anchor.
     // In particular, a completed jump may land just short of a low opening.
     // This changes command posture only; authored flags/radii are untouched.
-    bool crouch = authoredCrouch || (grounded && canCrouch && nextCrouch &&
-                                    !nextJump && targetDistance < 64.0f);
-    // Source needs time to unduck before takeoff. Pending/in-flight jumps
-    // retain their engine-owned crouch-jump sequence without added IN_DUCK.
-    if (canCrouch && nextJump && targetDistance < 120.0f) crouch = false;
+    // SyPB's current CROUCH target remains crouched on a jump connection.
+    // Only anticipation of a later section waits for this jump to land.
+    const bool crouch = authoredCrouch || (grounded && canAnticipateCrouch &&
+        nextCrouch && !nextJump && targetDistance < 64.0f);
     RoutePosture result = {jumpLeg && !landedJump && grounded && !recovering,
-                           crouch && canCrouch};
+                           crouch};
     return result;
 }
 struct Wish { float x; float y; };

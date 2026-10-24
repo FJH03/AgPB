@@ -12,6 +12,7 @@
 #include <engine/IEngineTrace.h>
 #include <ihandleentity.h>
 #include <iserverunknown.h>
+#include <cstdlib>
 
 #include "plugin.h"
 #include "bot.h"
@@ -1380,6 +1381,50 @@ void AgPB_Cmd_Flag( const CCommand &args )
 	}
 
 	AgPB_EditToggleFlag( pHost, uFlag, args.Arg( 1 ) );
+}
+
+void AgPB_Cmd_JumpVelocity( const CCommand &args )
+{
+	edict_t *host = AgPB_FindHost();
+	AgPB_RefreshHost();
+	int from = BotWaypointEditor().iNearest, to = AgPB_EditTargetWaypoint();
+	const bool explicitEdge = args.ArgC() == 3 || args.ArgC() == 6;
+	const bool set = args.ArgC() == 4 || args.ArgC() == 6;
+	if ( args.ArgC() != 1 && !explicitEdge && !set )
+	{ PrintTo( host, "usage: agpb_wp_jumpvel [from to] [x y z] (nearest -> aimed target by default)\n" ); return; }
+	if ( explicitEdge )
+	{
+		char *end = NULL;
+		const long parsedFrom = strtol( args.Arg( 1 ), &end, 10 );
+		if ( end == args.Arg( 1 ) || *end != '\0' || parsedFrom < 0 || parsedFrom >= AgPB_WP_MAX )
+		{ PrintTo( host, "invalid source waypoint\n" ); return; }
+		from = (int)parsedFrom;
+		const long parsedTo = strtol( args.Arg( 2 ), &end, 10 );
+		if ( end == args.Arg( 2 ) || *end != '\0' || parsedTo < 0 || parsedTo >= AgPB_WP_MAX )
+		{ PrintTo( host, "invalid target waypoint\n" ); return; }
+		to = (int)parsedTo;
+	}
+	unsigned int flags = 0;
+	CAgPBWaypoints &wp = BotWaypoints();
+	if ( !wp.IsConnected( from, to, &flags ) || ( flags & AgPB_PATH_JUMP ) == 0 )
+	{ PrintTo( host, "select an existing directed jump link; no links or flags were changed\n" ); return; }
+	if ( set )
+	{
+		Vector velocity;
+		for ( int axis = 0; axis < 3; ++axis )
+		{
+			const char *text = args.Arg( ( explicitEdge ? 3 : 1 ) + axis );
+			char *end = NULL;
+			velocity[axis] = strtof( text, &end );
+			if ( end == text || *end != '\0' || !IsFinite( velocity[axis] ) || fabsf( velocity[axis] ) > 2000.0f )
+			{ PrintTo( host, "jump velocity components must be finite and within -2000..2000\n" ); return; }
+		}
+		if ( !wp.SetJumpVelocity( from, to, velocity ) )
+		{ PrintTo( host, "jump velocity update rejected\n" ); return; }
+	}
+	const Vector velocity = wp.JumpVelocity( from, to );
+	PrintTo( host, "jump velocity #%d -> #%d = (%.6f,%.6f,%.6f), pre-jump world units/s%s\n",
+		from, to, velocity.x, velocity.y, velocity.z, set ? "; save explicitly with agpb_wp_save" : "" );
 }
 
 void AgPB_Cmd_Radius( const CCommand &args )

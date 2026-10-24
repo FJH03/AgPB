@@ -29,6 +29,11 @@
 #include "tasks.h"
 #include "local_planner.h"
 #include "search_policy.h"
+#include "combat_movement.h"
+#include "jump_control.h"
+#include "weapon_selection.h"
+#include "firing_policy.h"
+#include "player_avoidance.h"
 
 class IServerTools;
 
@@ -191,6 +196,7 @@ public:
 	void SetCombat( bool enable );
 	bool IsCombatEnabled() const { return m_bCombatEnabled; }
 	void ReportCombat() const;
+	void ReportWeaponSelection() const;
 	void ReportSearch() const;
 	void OnPerceptionEvent( edict_t *source, const Vector &eventOrigin, float now, float radius, float ttl );
 	bool SetSkill( int skill );
@@ -256,16 +262,33 @@ private:
 	bool UpdateEnemyInvestigation( CGlobalVars *globals, CBotCmd &cmd );
 	bool UpdateEnemyMemoryLook( CGlobalVars *globals, CBotCmd &cmd );
 	bool CanWalkToTaskPosition( const Vector &position, bool crouch ) const;
+	bool CanCombatStep( const Vector &worldWish, bool crouch, float interval ) const;
+	AgPBJump::Conditions JumpLaunchConditions( CGlobalVars *globals ) const;
+	bool ApplyJumpLaunch( CGlobalVars *globals, CBotCmd &cmd, float &previousMaxSpeed );
 	int PickTaskWaypoint( const Vector &position, unsigned int requiredFlags = 0 ) const;
 	void ResetRouteProgress( float now );
 	void SuspendTaskActions( float now );
+	bool IsHoldingTaskPosition() const;
+	static bool NavigationRequiresCrouch( unsigned int flags );
+	bool TaskRequiresCrouch() const;
+	void ApplyTaskPosture( CBotCmd &cmd ) const;
+	void ResetPlayerAvoidance();
+	void UpdatePlayerAvoidance( CGlobalVars *globals, CBotCmd &cmd );
+	bool PlayerAvoidanceActive( float now ) const;
+	bool CanPlayerAvoidStep( const Vector &wish, bool crouch, float interval, edict_t *contact ) const;
+	void ReportPlayerAvoidance() const;
 	void InitializeCombatSkill();
+	void ResetWeaponSelection( const char *reason = "reset" );
+	bool UpdateWeaponSelection( CGlobalVars *globals, CBotCmd &cmd, bool enemyVisible, float distance );
 	void ClearCombat( const char *reason = "reset" );
 	bool UpdateCombat( CGlobalVars *globals, CBotCmd &cmd );
+	void UpdateCombatMovement( CGlobalVars *globals, CBotCmd &cmd, edict_t *target,
+	                           edict_t *weapon, bool fireIntent, bool reloadIntent, bool decisionTick );
 	void PauseCombatOwner( CGlobalVars *globals );
 	bool IsCombatEnemy( edict_t *target, int expectedUserId = 0 ) const;
 	bool CombatAimPoint( edict_t *target, const Vector &eye, Vector &point, bool requireViewCone, unsigned int *visibility = NULL ) const;
 	edict_t *CurrentCombatWeapon( uintp &handle, bool &knife, int &clip, int &reserve ) const;
+	static AgPBWeaponSelect::Weapon ClassifyWeapon( edict_t *weapon );
 	void ClearBreakable();
 	bool BeginBreakable( const AgPBObstacle &obstacle, float now, bool crouch );
 	bool UpdateBreakable( CGlobalVars *pGlobals, CBotCmd &cmd );
@@ -306,6 +329,12 @@ private:
 	bool   m_bRouteArrived;
 	float  m_flRouteSettleSince;
 	bool   m_bRouteLegAirborne;
+	AgPBJump::State m_JumpLaunch;
+	bool m_bPendingJumpLaunch = false;
+	Vector m_vJumpLaunchVelocity = Vector( 0, 0, 0 );
+	std::uint64_t m_uJumpLaunchOwner = 0;
+	unsigned int m_uJumpLaunchCount = 0;
+	int m_iLastJumpLaunchTick = -1;
 	float  m_flNextObstacleCheck;
 	uintp  m_uLastObstacleHandle;
 	bool   m_bLastObstacleFound;
@@ -363,6 +392,8 @@ private:
 	int m_iCombatDifficulty = 3;
 	float m_flCombatIdealReaction = 0.1f;
 	float m_flCombatActualReaction = 0.1f;
+	float m_flCombatReactionLastTime = -1.0f;
+	float m_flCombatReactionNextAt = 0.0f;
 	float m_flCombatSurpriseUntil;
 	float m_flCombatRearCheckAt;
 	float m_flCombatFirePause;
@@ -373,14 +404,37 @@ private:
 	uintp m_uCombatWeapon;
 	int m_iCombatEnemyUserId;
 	int m_iCombatLastClip;
-	std::uint64_t m_uCombatOwnerToken;
+	std::uint64_t m_uCombatOwnerToken = 0;
 	float m_flCombatLastTime;
-	float m_flCombatNextAttack;
 	float m_flCombatAimError;
 	bool m_bCombatRelease;
 	unsigned int m_uCombatAttackCommands;
 	unsigned int m_uCombatConfirmedShots;
 	const char *m_pszCombatState;
+	AgPBCombatMove::State m_CombatMovement;
+	AgPBCombatMove::Output m_CombatMovePlan;
+	bool m_bCombatMovePlanValid = false;
+	bool m_bCombatSniperStop = false;
+	AgPBFiring::State m_CombatFire;
+	const char *m_pszCombatFire = "idle";
+	bool m_bCombatFireHold = false;
+	const char *m_pszCombatMotion = "idle";
+	float m_flCombatMoveForward = 0.0f, m_flCombatMoveSide = 0.0f;
+	float m_flCombatMoveDistance = 0.0f, m_flCombatMoveSpeed = 0.0f;
+	bool m_bCombatMoveBlocked = false;
+	bool m_bCombatDuckWanted = false;
+	float m_flCombatEyeZ = -1.0f, m_flCombatEyeStableSince = 0.0f;
+	AgPBWeaponSelect::State m_WeaponSelection;
+	AgPBPlayerAvoid::State m_PlayerAvoidance;
+	const char *m_pszPlayerAvoidance = "idle";
+	float m_flPlayerAvoidanceAt = -1.0f;
+	bool m_bPlayerAvoidanceActive = false;
+	bool m_bPlayerAvoidanceYielding = false;
+	unsigned int m_uPlayerAvoidanceReplans = 0;
+	const char *m_pszWeaponSelection = "idle";
+	uintp m_uWeaponSelected = (uintp)INVALID_EHANDLE_INDEX;
+	unsigned int m_uWeaponSelectCommands = 0;
+	int m_iWeaponSelectTick = -1;
 
 	// 随机漫游（agpb_bot_roam）
 	bool   m_bRoam;

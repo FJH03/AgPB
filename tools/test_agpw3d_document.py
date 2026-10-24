@@ -4,14 +4,28 @@ import struct
 import unittest
 
 from agpw3d_document import (AgpwDocument, DocumentConflict, FIELD_SPECS,
-                             HEADER_SIZE, KNOWN_FLAGS_MASK, RECORD_SIZE, schema)
+                             HEADER_SIZE, KNOWN_FLAGS_MASK, RECORD_SIZE, RECORD_SIZE_V2, schema)
 
 
-def complex_bytes():
+def zero_velocity():
+    return [[0.0, 0.0, 0.0] for _ in range(8)]
+
+
+def fixture_velocity(index):
+    result = zero_velocity()
+    result[1][0] = -0.0
+    if index == 2:
+        result[4] = [2000.0, -123.0, 300.0]
+    if index == 0:
+        result[7] = [41.0, 42.0, -43.0]  # Opaque velocity in an unused slot must survive.
+    return result
+
+
+def complex_bytes(version=1):
     # Deliberately invalid UTF-8 plus embedded NULs and nonzero padding bytes.
     map_name = b'test_map\0\xff\x80' + bytes(range(21))
     author = bytes(range(255, 223, -1))
-    header = struct.pack('<III32s32s', 0x50424741, 1, 3, map_name, author)
+    header = struct.pack('<III32s32s', 0x50424741, version, 3, map_name, author)
     record = struct.Struct('<3fIBB8h8Hf')
     origins = ((-0.0, 1.25, -4.0), (100, -200, 0.125), (2, 3, 4))
     flags = ((1 << 31) | (1 << 8) | (1 << 2) | (1 << 29), 0, 0xFFFFFFFF)
@@ -23,6 +37,8 @@ def complex_bytes():
         link_flags = (0xFFFF, 0x8000, 0x1234, 0xFEDC, 1, 0xCCCC, 0, 0xABCD)
         chunks.append(record.pack(*origins[index], flags[index], 17 + index, 243 - index,
                                   *links, *link_flags, -0.0 if index == 1 else 0.75))
+        if version == 2:
+            chunks.append(struct.pack('<24f', *(value for vector in fixture_velocity(index) for value in vector)))
     return header + b''.join(chunks) + b'\x00TRAILER\xff\x80\x01\x02'
 
 
@@ -85,6 +101,96 @@ class DocumentChecks(unittest.TestCase):
         struct.pack_into('<I', expected, record_offset(2) + 12, 0xFFFFFFFF)
         self.assertEqual(exported, bytes(expected))
 
+    def test_v1_zero_velocity_and_float32_underflow_keep_original_version_and_bytes(self):
+        for value in (0, 0.0, -0.0, 1e-100):
+            with self.subTest(value=value):
+                velocity = zero_velocity()
+                velocity[4][0] = value
+                self.assertEqual(self.document.export_changes([{'index': 1, 'jumpVelocity': velocity}]), self.raw)
+        self.assertEqual(self.document.version, 1)
+
+    def test_nonzero_velocity_upgrade_copies_each_original_record_and_preserves_tail(self):
+        velocity = zero_velocity()
+        velocity[4] = [123.456789, -234.56789, 300.0]
+        flags = old_flags(self.raw, 0) | (1 << 27)
+        exported = self.document.export_changes([
+            {'index': 0, 'flags': flags}, {'index': 1, 'jumpVelocity': velocity, 'radius': 93}])
+        expected = bytearray(self.raw[:HEADER_SIZE])
+        struct.pack_into('<I', expected, 4, 2)
+        for index in range(3):
+            expected.extend(self.raw[record_offset(index):record_offset(index) + RECORD_SIZE])
+            vectors = velocity if index == 1 else zero_velocity()
+            expected.extend(struct.pack('<24f', *(value for vector in vectors for value in vector)))
+        expected.extend(self.raw[HEADER_SIZE + 3 * RECORD_SIZE:])
+        struct.pack_into('<I', expected, HEADER_SIZE + 12, flags)
+        expected[HEADER_SIZE + RECORD_SIZE_V2 + 16] = 93
+        self.assertEqual(exported, bytes(expected))
+        upgraded = AgpwDocument(exported, 'upgraded.agpw')
+        self.assertEqual(upgraded.version, 2)
+        self.assertEqual(upgraded.export_changes([]), exported)
+        self.assertEqual(self.document.data, self.raw)
+
+    def test_v2_equal_values_preserve_signed_zero_and_other_edits_preserve_velocity_bytes(self):
+        raw = complex_bytes(version=2)
+        document = AgpwDocument(raw, 'v2.agpw')
+        self.assertEqual((document.version, RECORD_SIZE_V2), (2, 150))
+        self.assertEqual(document.export_changes([]), raw)
+        self.assertEqual(document.export_changes([{'index': 1, 'jumpVelocity': zero_velocity()}]), raw)
+        exported = document.export_changes([{'index': 2, 'radius': 99},
+                                            {'index': 0, 'flags': old_flags(raw, 0) | (1 << 27)}])
+        expected = bytearray(raw)
+        expected[HEADER_SIZE + 2 * RECORD_SIZE_V2 + 16] = 99
+        struct.pack_into('<I', expected, HEADER_SIZE + 12, old_flags(raw, 0) | (1 << 27))
+        self.assertEqual(exported, bytes(expected))
+        reset = document.export_changes([{'index': 2, 'jumpVelocity': zero_velocity()}])
+        expected = bytearray(raw)
+        struct.pack_into('<3f', expected, HEADER_SIZE + 2 * RECORD_SIZE_V2 + 54 + 4 * 12, 0, 0, 0)
+        self.assertEqual(reset, bytes(expected))
+        self.assertEqual(AgpwDocument(reset, 'zero.agpw').version, 2)
+
+    def test_v2_float_changes_patch_only_float_bytes_and_round_to_float32(self):
+        raw = complex_bytes(version=2)
+        document = AgpwDocument(raw, 'v2.agpw')
+        for component in (0, -0.1, 123.456789, -2000, 2000):
+            with self.subTest(component=component):
+                velocity = fixture_velocity(2)
+                velocity[4][0] = component
+                exported = document.export_changes([{'index': 2, 'jumpVelocity': velocity}])
+                expected = bytearray(raw)
+                struct.pack_into('<f', expected, HEADER_SIZE + 2 * RECORD_SIZE_V2 + 54 + 4 * 12, component)
+                self.assertEqual(exported, bytes(expected))
+
+    def test_invalid_velocity_values_reject_whole_transaction(self):
+        for value in (True, False, None, '0', [], {}, float('nan'), float('inf'),
+                      -float('inf'), -2000.01, 2000.0001, 1e308, 10 ** 1000):
+            with self.subTest(value=repr(value)[:40]):
+                velocity = zero_velocity()
+                velocity[4][0] = value
+                with self.assertRaises(ValueError):
+                    self.document.export_changes([{'index': 0, 'radius': 3},
+                                                  {'index': 1, 'jumpVelocity': velocity}])
+                self.assertEqual(self.document.data, self.raw)
+        for value in (None, [], [[0, 0, 0]] * 7, [[0, 0]] * 8):
+            with self.subTest(matrix=value), self.assertRaises(ValueError):
+                self.document.export_changes([{'index': 1, 'jumpVelocity': value}])
+
+    def test_velocity_edits_require_existing_valid_jump_edge_and_do_not_create_flags(self):
+        for index, slot in ((0, 0), (0, 1), (0, 3), (0, 6), (1, 3)):
+            velocity = zero_velocity()
+            velocity[slot] = [100, -100, 200]
+            with self.subTest(index=index, slot=slot), self.assertRaisesRegex(ValueError, 'PATH_JUMP'):
+                self.document.export_changes([{'index': index, 'jumpVelocity': velocity}])
+
+    def test_v2_invalid_velocities_and_truncation_are_rejected(self):
+        raw = complex_bytes(version=2)
+        for component in (float('nan'), float('inf'), -2000.25, 2000.25):
+            invalid = bytearray(raw)
+            struct.pack_into('<f', invalid, HEADER_SIZE + 54, component)
+            with self.subTest(component=component), self.assertRaisesRegex(ValueError, 'jumpVelocity'):
+                AgpwDocument(invalid, 'invalid.agpw')
+        with self.assertRaises(ValueError):
+            AgpwDocument(raw[:HEADER_SIZE + 3 * RECORD_SIZE_V2 - 1], 'short.agpw')
+
     def test_unknown_flag_bits_cannot_be_cleared_or_added(self):
         original = old_flags(self.raw, 0)
         for value in (0, original ^ (1 << 31), original | (1 << 0)):
@@ -142,9 +248,11 @@ class DocumentChecks(unittest.TestCase):
     def test_schema_lists_exact_current_bits_and_returns_independent_objects(self):
         metadata = schema()
         fields = {field['key']: field for field in metadata['fields']}
-        self.assertEqual(set(fields), {'radius', 'flags'})
+        self.assertEqual(set(fields), {'radius', 'flags', 'jumpVelocity'})
         self.assertEqual((fields['radius']['type'], fields['radius']['min'], fields['radius']['max']), ('integer', 0, 255))
         self.assertEqual((fields['flags']['min'], fields['flags']['max']), (0, 0xFFFFFFFF))
+        self.assertEqual((fields['jumpVelocity']['type'], fields['jumpVelocity']['min'], fields['jumpVelocity']['max']),
+                         ('vector3_array', -2000, 2000))
         expected_bits = [1, 2, 3, 4, 5, 6, 7, 9, 11, 12, 17, 26, 27, 28, 29, 30]
         self.assertEqual([flag['bit'] for flag in metadata['flags']], [1 << bit for bit in expected_bits])
         self.assertEqual(metadata['known_flags_mask'], sum(1 << bit for bit in expected_bits))
@@ -156,6 +264,7 @@ class DocumentChecks(unittest.TestCase):
         self.assertEqual(schema()['flags'][0]['bit'], 2)
         self.assertEqual(FIELD_SPECS['radius'].offset, 16)
         self.assertEqual(FIELD_SPECS['flags'].offset, 12)
+        self.assertEqual(FIELD_SPECS['jumpVelocity'].offset, 54)
 
     def test_malformed_headers_records_and_nonfinite_values_are_rejected(self):
         invalid = [b'AGPW', 'not bytes']

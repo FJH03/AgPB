@@ -7,7 +7,11 @@ controlled_enemy_authorized, guard_expected_crc and prelude receipt array.
 Each case has kind, binding (same six hashes), target_identity (slot/userid/serial)
 and optional identity overrides for subject_slot/userid/name/serial and human_slot/userid/serial
 and stages. Negative cases use before/run; visible_damage_resume additionally
-uses resumed and goal; stop_interrupt uses quiet. Optional target is the original
+uses resumed and goal; stop_interrupt uses quiet. The optional standalone
+locomotion_damage_resume_stop contract uses before/run/resumed/reengaged/quiet,
+locomotion_policy=sypb_ground_v1 and explicit locomotion scene boundaries.
+Its document selects metadata.acceptance_contract=sampled_combat_locomotion_v1.
+Legacy evidence keeps the original stationary assertion. Optional target is the original
 route endpoint {index,x,y,z,radius}. Receipt/observed_log rules match M3a/M3b.
 This checks supplied samples, not unsampled time or complete enemy perception.
 """
@@ -26,6 +30,11 @@ import verify_lifecycle as lifecycle
 
 VERSION = 1
 KINDS = ("friendly_rejection", "occluded_rejection", "visible_damage_resume", "stop_interrupt")
+LOCOMOTION_KIND = "locomotion_damage_resume_stop"
+LOCOMOTION_CONTRACT = "sampled_combat_locomotion_v1"
+LEGACY_OWNED_STATES = ("reacting", "aiming", "firing", "reloading", "fire-blocked", "recoil-pause")
+# These are real held-target movement transitions, not new legacy evidence.
+LOCOMOTION_OWNED_STATES = LEGACY_OWNED_STATES + ("braking", "posture-settling")
 HASHES = tuple(name + "_sha256" for name in ("plan", "agpw", "bsp", "dll", "probe", "server"))
 TOKEN = re.compile(r'([A-Za-z_][A-Za-z_0-9-]*)=(\([^)]*\)|"[^"\r\n]*"|[^\s]+)')
 TAGS = {"[WP_COMBAT_" + name.upper() + "] ": name for name in ("scene", "player", "weapon", "trace", "counts", "event", "damage", "team")}
@@ -220,10 +229,130 @@ def no_attack(frames, baseline, events):
     ammo_unchanged(frames, baseline)
 
 
+def owned_route(frames, route, goal):
+    require(frames and all(frame["core"]["route"] == route["route"] and
+            frame["core"]["owner"] == route["owner"] and frame["core"]["goal"] == goal and
+            frame["core"]["index"] == route["index"] and frame["core"]["node"] == route["node"] and
+            frame["combat"]["owner"] == frame["core"]["token"] for frame in frames),
+            "Combat changed original route owner/goal/hop")
+
+
+def locomotion_window(frames, boundary):
+    """Certify one explicit ground-motion sample, not the policy's choice of it."""
+    require(isinstance(boundary, dict) and set(boundary) ==
+            {"expected_motion", "weapon_class", "distance_range", "movement_context"},
+            "Missing/unknown locomotion scene boundaries")
+    motion = boundary["expected_motion"]
+    require(motion in ("approach", "retreat", "strafe", "precision_stop") and
+            boundary["movement_context"] == "ground_walk", "Unknown ground locomotion boundary")
+    weapon = boundary["weapon_class"]
+    require(isinstance(weapon, str) and re.fullmatch(r"weapon_[a-z0-9_]+", weapon),
+            "Missing explicit locomotion weapon class")
+    distances = boundary["distance_range"]
+    require(isinstance(distances, list) and len(distances) == 2 and
+            all(stop_policy.finite_number(v) for v in distances) and
+            0 <= distances[0] < distances[1] <= 8192, "Invalid locomotion distance boundary")
+    continuous(frames, 0.8)
+    directions = []
+    for frame in frames:
+        core = frame["core"]
+        require(core["flags"] & 1 and not core["flags"] & lifecycle.CORE_FL_FROZEN and
+                core["roundfrozen"] == core["airborne"] == core["pendingvel"] == 0 and
+                not core["buttons"] & 2 and abs(core["move"][2]) <= 0.001,
+                "Locomotion sample must remain grounded without jump/upmove/freeze")
+        require(frame["weapon"]["class"] == weapon and frame["victim"]["alive"] == 1,
+                "Locomotion weapon/target changed inside declared boundary")
+        delta = [frame["victim"]["pos"][i] - frame["bot"]["pos"][i] for i in range(3)]
+        distance, flat = math.sqrt(sum(v*v for v in delta)), math.hypot(*delta[:2])
+        require(distances[0] <= distance <= distances[1] and flat > 1,
+                "Observed target distance is outside declared locomotion boundary")
+        yaw = math.radians(core["view"][1]); forward, side, _ = core["move"]
+        # Source AngleVectors right is (sin(yaw), -cos(yaw), 0).
+        world = (forward * math.cos(yaw) + side * math.sin(yaw),
+                 forward * math.sin(yaw) - side * math.cos(yaw))
+        length = math.hypot(*world)
+        toward = sum(world[i] * delta[i] for i in range(2)) / flat
+        lateral = abs(world[0] * delta[1] - world[1] * delta[0]) / flat
+        require(length <= 450.001, "Locomotion CUserCmd exceeds normal ground command bounds")
+        if motion == "precision_stop":
+            require(all(abs(v) <= 0.001 for v in core["move"]) and
+                    math.sqrt(sum(v*v for v in core["vel"])) <= 5 and
+                    math.dist(frames[0]["bot"]["pos"], frame["bot"]["pos"]) <= 4,
+                    "Precision-stop sample did not stop actual commands and motion")
+            directions.append(False)
+        else:
+            directions.append(length >= 10 and
+                    (toward >= length * 0.25 if motion == "approach" else
+                     toward <= -length * 0.25 if motion == "retreat" else lateral >= length * 0.5))
+    if motion == "precision_stop":
+        sampled_attack = any(frame["core"]["buttons"] & 1 for frame in frames)
+        # The core increments this counter after movement/posture filtering, then
+        # submits that command directly. Sparse snapshots can miss its attack bit.
+        counted_attack = frames[-1]["combat"]["attackcmds"] > frames[0]["combat"]["attackcmds"]
+        require(sampled_attack or counted_attack,
+                "Precision-stop sample lacks a submitted primary attack command")
+        return {"expected_motion": motion, "owned_samples": len(frames),
+                "attack_command_proof": "sampled_button" if sampled_attack else "in_window_counter_increase",
+                "displacement": max(math.dist(frames[0]["bot"]["pos"], frame["bot"]["pos"]) for frame in frames)}
+    matched = []
+    for i, (previous, frame) in enumerate(zip(frames, frames[1:])):
+        if not (directions[i] and directions[i + 1]):
+            continue
+        delta = [frame["bot"]["pos"][j] - previous["bot"]["pos"][j] for j in range(3)]
+        toward_enemy = [previous["victim"]["pos"][j] - previous["bot"]["pos"][j] for j in range(2)]
+        flat = math.hypot(*toward_enemy); length = math.hypot(*delta[:2])
+        along = sum(delta[j] * toward_enemy[j] for j in range(2)) / flat
+        lateral = abs(delta[0] * toward_enemy[1] - delta[1] * toward_enemy[0]) / flat
+        dt = frame["core"]["time"] - previous["core"]["time"]
+        require(math.sqrt(sum(v*v for v in delta)) <= 400 * dt + 4,
+                "Observed locomotion displacement exceeds normal ground speed bounds")
+        agrees = (along >= max(4, length * 0.25) if motion == "approach" else
+                  along <= -max(4, length * 0.25) if motion == "retreat" else
+                  lateral >= max(4, length * 0.5))
+        if agrees and abs(delta[2]) <= 18:
+            matched.append(length)
+    require(matched, "No cross-tick actual displacement agrees with submitted locomotion commands")
+    return {"expected_motion": motion, "owned_samples": len(frames), "displacement": max(matched)}
+
+
+def precision_fire_window(frames, shots, hurts, boundary):
+    """Require native fire and independently observed damage in this owned window."""
+    first, last = frames[0]["core"]["tick"], frames[-1]["core"]["tick"]
+    weapon = boundary["weapon_class"].removeprefix("weapon_")
+    window_shots = [row for row in shots if first <= row["tick"] <= last and
+                    row["weapon"].removeprefix("weapon_") == weapon]
+    require(window_shots, "Precision-stop owned window lacks matching native weapon_fire")
+    known = [frame for frame in frames if frame["victim"]["health_known"] == 1]
+    hits = [row for row in hurts if first <= row["tick"] <= last and
+            row["weapon"].removeprefix("weapon_") == weapon and
+            any(frame["core"]["tick"] < row["tick"] and frame["victim"]["health"] > row["health"] for frame in known) and
+            any(frame["core"]["tick"] >= row["tick"] and frame["victim"]["health"] <= row["health"] for frame in known) and
+            any(shot["tick"] <= row["tick"] and 0 <= row["t"] - shot["t"] <= 0.25 for shot in window_shots)]
+    require(hits, "Precision-stop owned window lacks matching native hurt and independent health decrease")
+    return {"first_tick": first, "last_tick": last,
+            "real_fire_events": len(window_shots), "real_hurt_events": len(hits)}
+
+
+def stopped_window(stages, commands, subject_events, metadata, previous):
+    quiet = stages["quiet"]
+    require(previous["combat"]["owner"] > 0, "Stop was not exercised during sampled combat ownership")
+    stop_commands = [command for command in commands["quiet"] if re.search(r"\bagpb_bot_stop\s+" + str(metadata.get("subject_index", 0)) + r"\b", command)]
+    require(stop_commands and quiet[0]["core"]["reset"] == "stop", "No explicit native stop of the fighting subject")
+    no_attack(quiet, quiet[0], [row for row in subject_events if row["tick"] >= quiet[0]["core"]["tick"]])
+    for frame in quiet:
+        lifecycle.clean(frame["core"])
+        require(frame["combat"]["ent"] == -1 and frame["combat"]["owner"] == 0 and frame["combat"]["state"] == "stopped", "Stop retained combat state")
+    require(not any(row["event"] == "weapon_fire" and row["tick"] >= quiet[0]["core"]["tick"] for row in subject_events), "Real fire continued after stop")
+
+
 def evaluate_case(case, metadata):
     result = {"kind": case.get("kind"), "status": "pending", "scope": "sampled_minimum_combat_only"}
     try:
-        kind = case["kind"]; require(kind in KINDS, "Unknown combat case kind")
+        kind = case["kind"]; require(kind in (*KINDS, LOCOMOTION_KIND), "Unknown combat case kind")
+        moving = kind == LOCOMOTION_KIND
+        owned_states = LOCOMOTION_OWNED_STATES if moving else LEGACY_OWNED_STATES
+        require(case.get("locomotion_policy", "legacy_stationary") ==
+                ("sypb_ground_v1" if moving else "legacy_stationary"), "Unknown/implicit locomotion policy")
         hash_binding(metadata, case)
         override = case.get("identity", {})
         require(isinstance(override, dict) and set(override) <= set("subject_slot subject_userid subject_name subject_serial human_slot human_userid human_serial".split()), "Unknown per-case identity override")
@@ -232,7 +361,8 @@ def evaluate_case(case, metadata):
         guard_prelude(metadata, seen, offset)
         target = case["target_identity"]
         require(all(type(target[key]) is int and target[key] > 0 for key in ("slot", "userid", "serial")) and target["slot"] not in (metadata["subject_slot"], metadata["human_slot"]), "Missing/distinct controlled target identity")
-        names = ["before", "run"] + (["resumed"] if kind == "visible_damage_resume" else ["quiet"] if kind == "stop_interrupt" else [])
+        names = (["before", "run", "resumed", "reengaged", "quiet"] if moving else
+                 ["before", "run"] + (["resumed"] if kind == "visible_damage_resume" else ["quiet"] if kind == "stop_interrupt" else []))
         require(set(case["stages"]) == set(names), "Missing/unknown combat stages")
         retained, commands, logs, stages = {}, {}, [], {}
         for name in names:
@@ -263,6 +393,8 @@ def evaluate_case(case, metadata):
         for name in names[1:]:
             require(not any(re.search(r"\b(?:agpb_netwrite|ent_fire|ent_remove|ent_create|agpb_bot_testweapon|agpb_reg_lifecycle_kill|agpb_bot_team|agpb_wp_load|agpb_wp_clear|kill)\b", command) for command in commands[name]), "External mutation/forced damage during acceptance")
             require(not any(re.search(r"\bagpb_(?:bot_combat\s+\S+\s+[01]|combat\s+[01])\b", command) for command in commands[name]), "Combat enable state changed during acceptance")
+            if moving:
+                require(not any(re.search(r"\b(?:setpos(?:_exact)?|setang(?:_exact)?|noclip|agpb_bot_move|agpb_bot_look|agpb_bot_buttons)\b", command) for command in commands[name]), "External movement/view mutation during locomotion acceptance")
         if kind.endswith("rejection"):
             require(enemy == (kind == "occluded_rejection"), "Target team does not match rejection kind")
             for frame in stages["run"]:
@@ -282,25 +414,33 @@ def evaluate_case(case, metadata):
             shots = [row for row in subject_events if row["event"] == "weapon_fire" and row["weapon"] not in ("unknown", "knife")]
             require(shots, "No new real subject weapon_fire")
             owned = [frame for frame in stages["run"] if frame["combat"]["owner"] > 0 and frame["combat"]["ent"] == target["slot"] and frame["combat"]["userid"] == target["userid"]]
-            require(owned and all(frame["combat"]["state"] in ("reacting", "aiming", "firing", "reloading", "fire-blocked", "recoil-pause") for frame in owned), "No sampled combat ownership of the controlled target")
-            boundary_tick = stages["resumed"][0]["core"]["tick"] if kind == "visible_damage_resume" else stages["run"][-1]["core"]["tick"]
+            require(owned and all(frame["combat"]["state"] in owned_states for frame in owned), "No sampled combat ownership of the controlled target")
+            boundary_tick = stages["resumed"][0]["core"]["tick"] if kind == "visible_damage_resume" or moving else stages["run"][-1]["core"]["tick"]
             require(any(row["tick"] <= boundary_tick for row in shots), "Shot is not before interruption/resumption")
-            if kind == "visible_damage_resume":
+            if kind == "visible_damage_resume" or moving:
                 hurts = [row for row in subject_events if row["event"] == "player_hurt" and actor(row, target, "victim") and row["actor_team"] != row["victim_team"] and row["dmg_health"] > 0 and row["health"] >= 0]
                 known = [frame for frame in frames if frame["victim"]["health_known"] == 1]
                 hits = [row for row in hurts if any(frame["core"]["tick"] < row["tick"] and frame["victim"]["health"] > row["health"] for frame in known) and any(frame["core"]["tick"] >= row["tick"] and frame["victim"]["health"] <= row["health"] for frame in known) and any(shot["tick"] <= row["tick"] and 0 <= row["t"] - shot["t"] <= 0.25 and shot["weapon"].removeprefix("weapon_") == row["weapon"].removeprefix("weapon_") for shot in shots)]
                 require(hits, "No identity-attributed player_hurt with independently observed health decrease after a real shot")
+                if moving:
+                    require(any(owned[0]["core"]["tick"] <= row["tick"] <= boundary_tick for row in hits), "No real damage during the sampled locomotion engagement")
                 first_owned = frames.index(owned[0])
                 prior_route = [frame for frame in frames[:first_owned] if frame["core"]["route"] > 0 and frame["combat"]["owner"] == 0]
                 require(prior_route, "No pre-acquisition original route snapshot")
                 original_route = prior_route[-1]["core"]
                 initial_route = stages["before"][-1]["core"]
                 require(initial_route["owner"] == original_route["owner"] and initial_route["goal"] == original_route["goal"], "Original route was replaced before acquisition")
-                goal, owner, hop, node = case["goal"], original_route["owner"], original_route["index"], original_route["node"]
+                goal, owner = case["goal"], original_route["owner"]
                 require(original_route["route"] > 0 and original_route["goal"] == goal and owner > 0, "No original owned route before combat")
                 require(len(owned) >= 2, "Need at least two increasing owned combat snapshots; retained " + str(len(owned)))
-                require(all(frame["core"]["route"] == original_route["route"] and frame["core"]["owner"] == owner and frame["core"]["goal"] == goal and frame["core"]["index"] == hop and frame["core"]["node"] == node and frame["combat"]["owner"] == frame["core"]["token"] for frame in owned), "Combat changed original route owner/goal/hop")
-                require(all(all(abs(value) <= 0.001 for value in frame["core"]["move"]) for frame in owned), "Combat ownership did not suspend actual locomotion commands")
+                owned_route(owned, original_route, goal)
+                if moving:
+                    require(len(owned) == len(stages["run"]), "Locomotion run contains unowned target samples")
+                    result["locomotion"] = locomotion_window(owned, case.get("locomotion"))
+                    if case["locomotion"]["expected_motion"] == "precision_stop":
+                        result["precision_fire_windows"] = {"run": precision_fire_window(owned, shots, hurts, case["locomotion"])}
+                else:
+                    require(all(all(abs(value) <= 0.001 for value in frame["core"]["move"]) for frame in owned), "Combat ownership did not suspend actual locomotion commands")
                 gotos = re.findall(r"\bagpb_bot_goto\s+(\d+)\s+(\d+)", ";".join(command for name in names for command in commands[name]))
                 require(len(gotos) == 1 and int(gotos[0][0]) == metadata.get("subject_index", 0) and int(gotos[0][1]) == goal and not any(re.search(r"\bagpb_bot_goto\b", command) for command in commands["resumed"]), "Resume requires one original goto and no replacement goto")
                 resumed = stages["resumed"]
@@ -317,16 +457,18 @@ def evaluate_case(case, metadata):
                     result["endpoint"] = stop_policy.evaluate(endpoint, samples, samples[-1])
                     require(result["endpoint"]["precise_stop_passed"], "No final strict endpoint settle")
                 result.update(real_hurt_events=len(hits), route_owner=owner, goal=goal)
+                if moving:
+                    reengaged = stages["reengaged"]
+                    require(all(frame["combat"]["owner"] > 0 and frame["combat"]["ent"] == target["slot"] and frame["combat"]["userid"] == target["userid"] and frame["combat"]["state"] in owned_states for frame in reengaged), "Reengagement did not own the same controlled target")
+                    require(resumed[-1]["core"]["route"] > 0, "Reengagement lacks the live original route")
+                    owned_route(reengaged, resumed[-1]["core"], goal)
+                    result["reengaged_locomotion"] = locomotion_window(reengaged, case.get("locomotion"))
+                    if case["locomotion"]["expected_motion"] == "precision_stop":
+                        result["precision_fire_windows"]["reengaged"] = precision_fire_window(reengaged, shots, hurts, case["locomotion"])
+                    stopped_window(stages, commands, subject_events, metadata, reengaged[-1])
+                    result.update(scope="sampled_ground_combat_locomotion_resume_stop_only", locomotion_policy="sypb_ground_v1")
             else:
-                quiet = stages["quiet"]
-                require(stages["run"][-1]["combat"]["owner"] > 0, "Stop was not exercised during sampled combat ownership")
-                stop_commands = [command for command in commands["quiet"] if re.search(r"\bagpb_bot_stop\s+" + str(metadata.get("subject_index", 0)) + r"\b", command)]
-                require(stop_commands and quiet[0]["core"]["reset"] == "stop", "No explicit native stop of the fighting subject")
-                no_attack(quiet, quiet[0], [row for row in subject_events if row["tick"] >= quiet[0]["core"]["tick"]])
-                for frame in quiet:
-                    lifecycle.clean(frame["core"])
-                    require(frame["combat"]["ent"] == -1 and frame["combat"]["owner"] == 0 and frame["combat"]["state"] == "stopped", "Stop retained combat state")
-                require(not any(row["event"] == "weapon_fire" and row["tick"] >= quiet[0]["core"]["tick"] for row in subject_events), "Real fire continued after stop")
+                stopped_window(stages, commands, subject_events, metadata, stages["run"][-1])
         result.update(status="passed", samples={name: len(stage) for name, stage in stages.items()}, real_fire_events=sum(row["event"] == "weapon_fire" for row in subject_events), guard_scope="raw_active_intact_and_declared_server_hash")
     except (ValueError, KeyError, TypeError, OverflowError, IndexError) as exc:
         result["error"] = str(exc)
@@ -336,8 +478,13 @@ def evaluate_case(case, metadata):
 def evaluate(document):
     require(isinstance(document, dict) and document.get("schema_version") == VERSION, "Unknown combat evidence schema")
     results = [evaluate_case(case, document["metadata"]) for case in document.get("cases", [])]
-    missing = sorted(set(KINDS) - {row["kind"] for row in results if row["status"] == "passed"})
-    return {"schema_version": VERSION, "scope": "sampled_minimum_combat_only", "status": "passed" if not missing and all(row["status"] == "passed" for row in results) else "incomplete", "pending_kinds": missing, "cases": results}
+    contract = document["metadata"].get("acceptance_contract", "legacy_minimum_combat_v1")
+    require(contract in ("legacy_minimum_combat_v1", LOCOMOTION_CONTRACT), "Unknown combat acceptance contract")
+    required = (LOCOMOTION_KIND,) if contract == LOCOMOTION_CONTRACT else KINDS
+    if contract == LOCOMOTION_CONTRACT:
+        require(all(row["kind"] == LOCOMOTION_KIND for row in results), "Locomotion contract accepts only its explicit sampled case")
+    missing = sorted(set(required) - {row["kind"] for row in results if row["status"] == "passed"})
+    return {"schema_version": VERSION, "scope": "sampled_ground_combat_locomotion_resume_stop_only" if contract == LOCOMOTION_CONTRACT else "sampled_minimum_combat_only", "acceptance_contract": contract, "status": "passed" if not missing and all(row["status"] == "passed" for row in results) else "incomplete", "pending_kinds": missing, "cases": results}
 
 
 def main():

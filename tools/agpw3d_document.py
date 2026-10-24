@@ -14,9 +14,10 @@ from types import MappingProxyType
 
 HEADER_SIZE = 76
 RECORD_SIZE = 54
+RECORD_SIZE_V2 = 150
 MAX_WAYPOINTS = 8192
 _MAGIC = 0x50424741
-_VERSION = 1
+_RECORD_SIZES = {1: RECORD_SIZE, 2: RECORD_SIZE_V2}
 
 
 class DocumentConflict(ValueError):
@@ -25,7 +26,7 @@ class DocumentConflict(ValueError):
 
 @dataclass(frozen=True)
 class FieldSpec:
-    """One editable integer field, expressed relative to its AGPW record."""
+    """One editable field, expressed relative to its AGPW record."""
     key: str
     offset: int
     format: str
@@ -33,8 +34,24 @@ class FieldSpec:
     maximum: int
     label: str
     preserve_mask: int = 0
+    value_type: str = 'integer'
 
     def encode(self, value) -> bytes:
+        if self.value_type == 'vector3_array':
+            if not isinstance(value, list) or len(value) != 8:
+                raise ValueError('%s must contain eight XYZ vectors' % self.key)
+            flat = []
+            for vector in value:
+                if not isinstance(vector, list) or len(vector) != 3:
+                    raise ValueError('%s must contain eight XYZ vectors' % self.key)
+                for component in vector:
+                    if isinstance(component, bool) or not isinstance(component, (int, float)):
+                        raise ValueError('%s components must be numbers' % self.key)
+                    if not self.minimum <= component <= self.maximum or not math.isfinite(component):
+                        raise ValueError('%s components must be finite and between %d and %d' %
+                                         (self.key, self.minimum, self.maximum))
+                    flat.append(component)
+            return struct.pack(self.format, *flat)
         if isinstance(value, bool) or not isinstance(value, int):
             raise ValueError('%s must be an integer' % self.key)
         if not self.minimum <= value <= self.maximum:
@@ -43,8 +60,11 @@ class FieldSpec:
         return struct.pack(self.format, value)
 
     def schema(self) -> dict:
-        return dict(key=self.key, type='integer', min=self.minimum,
-                    max=self.maximum, label=self.label)
+        result = dict(key=self.key, type=self.value_type, min=self.minimum,
+                      max=self.maximum, label=self.label)
+        if self.value_type == 'vector3_array':
+            result['length'] = 8
+        return result
 
 
 # Exact supported bits from src/waypoint.h; undefined bits remain valid data.
@@ -71,11 +91,12 @@ known_flags_mask = KNOWN_FLAGS_MASK
 
 
 # Adding a field here provides its validation, serialization and UI metadata.
-# File offsets match waypoint.cpp's explicit AGPW v1 serializer, not C++ padding.
+# File offsets match waypoint.cpp's explicit AGPW serializer, not C++ padding.
 FIELD_SPECS = MappingProxyType({spec.key: spec for spec in (
     FieldSpec('radius', 16, '<B', 0, 255, '半径'),
     FieldSpec('flags', 12, '<I', 0, 0xFFFFFFFF, '标志',
               preserve_mask=(~KNOWN_FLAGS_MASK) & 0xFFFFFFFF),
+    FieldSpec('jumpVelocity', 54, '<24f', -2000, 2000, '跳跃初速度 XYZ', value_type='vector3_array'),
 )})
 
 
@@ -94,7 +115,7 @@ class AgpwDocument:
     fail rather than silently changing the requested value. All other bytes stay
     unchanged, including empty link slots and trailing data.
     """
-    __slots__ = ('_data', '_source_name', '_source_hash', '_count')
+    __slots__ = ('_data', '_source_name', '_source_hash', '_count', '_version', '_record_size')
 
     def __init__(self, data: bytes, source_name: str):
         if not isinstance(data, (bytes, bytearray, memoryview)):
@@ -103,20 +124,27 @@ class AgpwDocument:
         if len(raw) < HEADER_SIZE:
             raise ValueError('AGPW header is truncated')
         magic, version, count = struct.unpack_from('<III', raw)
-        if magic != _MAGIC or version != _VERSION:
+        if magic != _MAGIC or version not in _RECORD_SIZES:
             raise ValueError('Unsupported AGPW magic/version')
-        if count > MAX_WAYPOINTS or HEADER_SIZE + count * RECORD_SIZE > len(raw):
+        record_size = _RECORD_SIZES[version]
+        if count > MAX_WAYPOINTS or HEADER_SIZE + count * record_size > len(raw):
             raise ValueError('Invalid AGPW count or truncated records')
         for index in range(count):
-            offset = HEADER_SIZE + index * RECORD_SIZE
+            offset = HEADER_SIZE + index * record_size
             values = (*struct.unpack_from('<3f', raw, offset),
                       struct.unpack_from('<f', raw, offset + 50)[0])
             if not all(math.isfinite(value) for value in values):
                 raise ValueError('Non-finite coordinate/gravity at waypoint #%d' % index)
+            if version == 2:
+                velocity = struct.unpack_from('<24f', raw, offset + 54)
+                if not all(math.isfinite(value) and -2000 <= value <= 2000 for value in velocity):
+                    raise ValueError('Invalid jumpVelocity at waypoint #%d' % index)
         self._data = raw
         self._source_name = str(source_name)
         self._source_hash = hashlib.sha256(raw).hexdigest()
         self._count = count
+        self._version = version
+        self._record_size = record_size
 
     @property
     def data(self) -> bytes:
@@ -133,6 +161,10 @@ class AgpwDocument:
     @property
     def count(self) -> int:
         return self._count
+
+    @property
+    def version(self) -> int:
+        return self._version
 
     @property
     def known_flags_mask(self) -> int:
@@ -152,6 +184,7 @@ class AgpwDocument:
         if not isinstance(changes, list):
             raise ValueError('changes must be a list')
         updates = []
+        upgrade = False
         seen = set()
         for change in changes:
             if not isinstance(change, dict):
@@ -170,18 +203,51 @@ class AgpwDocument:
             if index in seen:
                 raise ValueError('Duplicate waypoint index in changes: %d' % index)
             seen.add(index)
-            record = HEADER_SIZE + index * RECORD_SIZE
+            record = HEADER_SIZE + index * self._record_size
             for key, spec in FIELD_SPECS.items():
                 if key in change:
                     encoded = spec.encode(change[key])
+                    if key == 'jumpVelocity':
+                        for slot in range(8):
+                            target = struct.unpack_from('<h', self._data, record + 18 + slot * 2)[0]
+                            flags = struct.unpack_from('<H', self._data, record + 34 + slot * 2)[0]
+                            for axis in range(3):
+                                relative = slot * 12 + axis * 4
+                                component = encoded[relative:relative + 4]
+                                value = struct.unpack('<f', component)[0]
+                                old_value = (0.0 if self._version == 1 else
+                                             struct.unpack_from('<f', self._data, record + spec.offset + relative)[0])
+                                # Unchanged components retain source bits, including -0.
+                                if value == old_value:
+                                    continue
+                                if not 0 <= target < self._count or target == index or not flags & 1:
+                                    raise ValueError('jumpVelocity may only edit existing valid PATH_JUMP edges')
+                                upgrade |= self._version == 1
+                                updates.append((index, spec.offset + relative, component))
+                        continue
+                    value = struct.unpack(spec.format, encoded)[0]
+                    old_value = struct.unpack_from(spec.format, self._data, record + spec.offset)[0]
                     if spec.preserve_mask:
-                        old_value = struct.unpack_from(spec.format, self._data, record + spec.offset)[0]
                         if (change[key] & spec.preserve_mask) != (old_value & spec.preserve_mask):
                             raise ValueError('Unknown flag bits must be preserved')
-                    updates.append((record + spec.offset, encoded))
+                    if value == old_value:
+                        continue
+                    updates.append((index, spec.offset, encoded))
         if not updates:
             return self._data
-        result = bytearray(self._data)
-        for offset, encoded in updates:
+        if upgrade:
+            # Copy each v1 record verbatim; never reconstruct opaque source data.
+            result = bytearray(self._data[:HEADER_SIZE])
+            struct.pack_into('<I', result, 4, 2)
+            for index in range(self._count):
+                offset = HEADER_SIZE + index * RECORD_SIZE
+                result.extend(self._data[offset:offset + RECORD_SIZE])
+                result.extend(b'\0' * 96)
+            result.extend(self._data[HEADER_SIZE + self._count * RECORD_SIZE:])
+        else:
+            result = bytearray(self._data)
+        record_size = RECORD_SIZE_V2 if upgrade else self._record_size
+        for index, field_offset, encoded in updates:
+            offset = HEADER_SIZE + index * record_size + field_offset
             result[offset:offset + len(encoded)] = encoded
         return bytes(result)

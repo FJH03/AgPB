@@ -88,6 +88,7 @@ void AgPB_Cmd_Cache( const CCommand &args );
 void AgPB_Cmd_Type( const CCommand &args );
 void AgPB_Cmd_Flag( const CCommand &args );
 void AgPB_Cmd_Radius( const CCommand &args );
+void AgPB_Cmd_JumpVelocity( const CCommand &args );
 void AgPB_Cmd_Connect( const CCommand &args );
 void AgPB_Cmd_Cut( const CCommand &args );
 void AgPB_Cmd_Teleport( const CCommand &args );
