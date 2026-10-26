@@ -130,13 +130,15 @@ static void Classify( const BotEngineContext &ctx, AgPBObstacle &result )
 	result.broken = ReadInt( result.entity, "m_bIsBroken", broken ) && broken != 0;
 	// CBreakableSurface::TraceAttack breaks an intact pane independently of
 	// its health. Only m_bIsBroken confirms that surface is already shattered.
-	if ( !surface && ( brush || physics ) && result.healthKnown && result.health <= 0 )
+	if ( !surface && brush && result.healthKnown && result.health <= 0 )
 		result.broken = true;
 	int physicsMode = 0, minDamage = 0;
 	const bool nonSolidPhysics = Q_stricmp( name, "prop_physics_multiplayer" ) == 0 &&
 		ReadKeyInt( ctx, result.entity, "physicsmode", physicsMode ) && physicsMode != kSolidPhysicsMode;
 	const bool largeDamageRequired = ReadKeyInt( ctx, result.entity, "minhealthdmg", minDamage ) && minDamage >= 50;
-	result.breakableCandidate = ( brush || physics ) && groupAllowed && !result.broken &&
+	// Physics health zero also means an intact, indestructible prop. Missing
+	// public health is not proof that shooting this physics object helps.
+	result.breakableCandidate = ( brush || ( physics && AgPBPropAvoid::KnownBreakHealth( result.healthKnown, result.health ) ) ) && groupAllowed && !result.broken &&
 		!nonSolidPhysics && !largeDamageRequired &&
 		( !result.healthKnown || ( ( surface || result.health > 0 ) && result.health <= 200 ) ) &&
 		( !result.damageKnown || result.damage == DAMAGE_YES );
@@ -428,4 +430,232 @@ bool AgPB_FindPathBreakable( const BotEngineContext &ctx, edict_t *self,
 		return true;
 	return ScanPath( ctx, self, origin, eye, points, ids, count,
 	                 kFarDistance, crouched, false, result, anyHandle, true );
+}
+
+// SyPB CheckTerrain uses full local collision probes and finite collision memory;
+// CS-EBOT is the comparison for alternate side/back recovery. Source SDK
+// StepMove supplies only the physical step/floor contract, not bot decisions.
+static bool NavigationSolid( ICollideable *collide )
+{
+	if ( collide == NULL || collide->GetSolid() == SOLID_NONE ) return false;
+	const int group = collide->GetCollisionGroup();
+	if ( group != COLLISION_GROUP_PUSHAWAY &&
+		( collide->GetSolidFlags() & ( FSOLID_TRIGGER | FSOLID_NOT_SOLID ) ) != 0 ) return false;
+	switch ( group )
+	{
+	case COLLISION_GROUP_DEBRIS:
+	case COLLISION_GROUP_DEBRIS_TRIGGER:
+	case COLLISION_GROUP_INTERACTIVE_DEBRIS:
+	case COLLISION_GROUP_IN_VEHICLE:
+	case COLLISION_GROUP_WEAPON:
+	case COLLISION_GROUP_VEHICLE_CLIP:
+	case COLLISION_GROUP_DOOR_BLOCKER:
+	case COLLISION_GROUP_DISSOLVING:
+		return false;
+	default:
+		return true;
+	}
+}
+
+static bool IsPhysicsClass( const char *name )
+{
+	return name != NULL && ( Q_stricmp( name, "prop_physics" ) == 0 ||
+		Q_stricmp( name, "prop_physics_multiplayer" ) == 0 || Q_stricmp( name, "prop_physics_override" ) == 0 );
+}
+
+class CNavigationHullFilter : public CTraceFilter
+{
+public:
+	CNavigationHullFilter( IEngineTrace *trace, IHandleEntity *self, IHandleEntity *exitContact )
+		: m_Trace( trace ), m_Self( self ), m_ExitContact( exitContact ) {}
+	bool ShouldHitEntity( IHandleEntity *entity, int )
+	{
+		return entity != m_Self && entity != m_ExitContact && NavigationSolid( m_Trace->GetCollideable( entity ) );
+	}
+private:
+	IEngineTrace *m_Trace;
+	IHandleEntity *m_Self;
+	IHandleEntity *m_ExitContact;
+};
+
+class CNavigationPropEnumerator : public IEntityEnumerator
+{
+public:
+	CNavigationPropEnumerator( const BotEngineContext &ctx, IHandleEntity *self,
+		const Ray_t &ray, trace_t &hit, IHandleEntity *exitContact )
+		: m_Ctx( ctx ), m_Self( self ), m_Ray( ray ), m_Hit( hit ), m_ExitContact( exitContact ) {}
+	bool EnumEntity( IHandleEntity *entity )
+	{
+		if ( entity == NULL || entity == m_Self || entity == m_ExitContact ) return true;
+		ICollideable *collide = m_Ctx.pTrace->GetCollideable( entity );
+		if ( !NavigationSolid( collide ) ) return true;
+		const uintp handle = (uintp)entity->GetRefEHandle().ToInt();
+		const int index = NetVar_HandleEntry( handle );
+		edict_t *edict = NetVar_HandleIsValid( handle ) && index > 0 && index < MAX_EDICTS
+			? m_Ctx.pEngine->PEntityOfEntIndex( index ) : NULL;
+		if ( edict == NULL || edict->IsFree() || AgPB_RefEHandle( edict ) != handle ||
+			( collide->GetCollisionGroup() != COLLISION_GROUP_PUSHAWAY && !IsPhysicsClass( edict->GetClassName() ) ) ) return true;
+		trace_t candidate;
+		// Pushaway objects can affect the player while missing MASK_PLAYERSOLID.
+		// Clip their real collision shape, never their visual/OBB bounding box.
+		m_Ctx.pTrace->ClipRayToCollideable( m_Ray, MASK_ALL, collide, &candidate );
+		if ( candidate.DidHit() && ( !m_Hit.DidHit() ||
+			( !m_Hit.startsolid && !m_Hit.allsolid &&
+			( candidate.startsolid || candidate.allsolid || candidate.fraction < m_Hit.fraction ) ) ) ) m_Hit = candidate;
+		return true;
+	}
+private:
+	const BotEngineContext &m_Ctx;
+	IHandleEntity *m_Self;
+	const Ray_t &m_Ray;
+	trace_t &m_Hit;
+	IHandleEntity *m_ExitContact;
+};
+
+static void NavigationHullTrace( const BotEngineContext &ctx, IHandleEntity *self,
+                                 const Vector &from, const Vector &to,
+                                 const Vector &mins, const Vector &maxs, trace_t &hit, IHandleEntity *exitContact = NULL )
+{
+	Ray_t ray; ray.Init( from, to, mins, maxs );
+	CNavigationHullFilter filter( ctx.pTrace, self, exitContact );
+	ctx.pTrace->TraceRay( ray, MASK_PLAYERSOLID, &filter, &hit );
+	CNavigationPropEnumerator props( ctx, self, ray, hit, exitContact );
+	ctx.pTrace->EnumerateEntities( ray, false, &props );
+}
+
+static edict_t *NavigationHitEntity( const BotEngineContext &ctx, const trace_t &hit )
+{
+	return ctx.pGameEnts != NULL && hit.m_pEnt != NULL ? ctx.pGameEnts->BaseEntityToEdict( hit.m_pEnt ) : NULL;
+}
+
+static bool NavigationFloor( const BotEngineContext &ctx, const trace_t &hit )
+{
+	if ( hit.startsolid || hit.allsolid || hit.fraction >= 1.0f || hit.plane.normal.z < 0.7f ) return false;
+	edict_t *entity = NavigationHitEntity( ctx, hit );
+	if ( entity == NULL ) return true; // World/static-prop collision.
+	if ( entity->IsFree() ) return false;
+	const char *name = entity->GetClassName();
+	return name != NULL && Q_stricmp( name, "player" ) != 0 && !IsPhysicsClass( name ) &&
+		Q_strncmp( name, "func_door", 9 ) != 0 && Q_strncmp( name, "prop_door", 9 ) != 0;
+}
+
+bool AgPB_FindGroundProp( const BotEngineContext &ctx, edict_t *self,
+                          const Vector &from, const Vector &to, bool crouched,
+                          AgPBObstacle &result )
+{
+	result = AgPBObstacle();
+	if ( ctx.pTrace == NULL || ctx.pEngine == NULL || ctx.pGameEnts == NULL ||
+		!from.IsValid() || !to.IsValid() || EntityHandle( self ) == NULL ) return false;
+	const Vector mins( -AgPB_HULL_RADIUS, -AgPB_HULL_RADIUS, 0 );
+	const Vector maxs( AgPB_HULL_RADIUS, AgPB_HULL_RADIUS,
+		crouched ? AgPB_HullDuckHeight() : AgPB_HullStandHeight() );
+	trace_t hit;
+	NavigationHullTrace( ctx, EntityHandle( self ), from + Vector( 0, 0, 0.1f ),
+		to + Vector( 0, 0, 0.1f ), mins, maxs, hit );
+	if ( !hit.DidHit() ) return false;
+	AgPB_ClassifyObstacle( ctx, NavigationHitEntity( ctx, hit ), result );
+	if ( !result.found ) { result.found = true; result.kind = "world-or-static"; }
+	result.hitPosition = hit.endpos;
+	result.pathDistance = ( to - from ).Length2D() * ( hit.startsolid || hit.allsolid ? 0.0f : hit.fraction );
+	result.nearProbe = true; result.expanded = true;
+	return Q_stricmp( result.kind, "physics-prop" ) == 0;
+}
+
+// Pushaway forces can leave a shallow current player/prop overlap. VPhysics
+// does not supply fractionleftsolid, so prove exit using its real collision
+// shape from the clear end back toward the overlapping start. This exception
+// never crosses ordinary solid props and never certifies a raised step path.
+static IHandleEntity *NavigationExitContact( const BotEngineContext &ctx, edict_t *contact,
+                                             const Vector &from, const Vector &to,
+                                             const Vector &mins, const Vector &maxs )
+{
+	IHandleEntity *handle = EntityHandle( contact );
+	ICollideable *collide = handle != NULL ? ctx.pTrace->GetCollideable( handle ) : NULL;
+	if ( !NavigationSolid( collide ) || collide->GetCollisionGroup() != COLLISION_GROUP_PUSHAWAY ||
+		!IsPhysicsClass( contact->GetClassName() ) ) return NULL;
+	const Vector delta = to - from;
+	const float distance = delta.Length2D();
+	if ( distance < 0.1f || fabsf( delta.z ) > 0.1f ) return NULL;
+	Vector center;
+	VectorTransform( ( collide->OBBMins() + collide->OBBMaxs() ) * 0.5f,
+		collide->CollisionToWorldTransform(), center );
+	const Vector away( from.x - center.x, from.y - center.y, 0 );
+	if ( DotProduct( delta, away ) < 0 ||
+		( away + delta ).Length2DSqr() <= away.Length2DSqr() + 0.01f ) return NULL;
+	const Vector begin = from + Vector( 0, 0, 0.1f ), end = to + Vector( 0, 0, 0.1f );
+	Ray_t ray; trace_t hit;
+	ray.Init( begin, begin, mins, maxs );
+	ctx.pTrace->ClipRayToCollideable( ray, MASK_ALL, collide, &hit );
+	if ( !hit.startsolid && !hit.allsolid ) return NULL;
+	ray.Init( end, end, mins, maxs );
+	ctx.pTrace->ClipRayToCollideable( ray, MASK_ALL, collide, &hit );
+	if ( hit.DidHit() ) return NULL;
+	ray.Init( end, begin, mins, maxs );
+	ctx.pTrace->ClipRayToCollideable( ray, MASK_ALL, collide, &hit );
+	if ( !hit.DidHit() || hit.startsolid || hit.allsolid || !IsFinite( hit.fraction ) ||
+		hit.fraction <= 0 || hit.fraction >= 1 ) return NULL;
+	const float exitFraction = 1.0f - hit.fraction;
+	if ( exitFraction * distance > AgPB_HULL_RADIUS ) return NULL;
+	const float afterExit = MIN( 1.0f, exitFraction + 0.1f / distance );
+	ray.Init( begin + delta * afterExit, end, mins, maxs );
+	ctx.pTrace->ClipRayToCollideable( ray, MASK_ALL, collide, &hit );
+	return hit.DidHit() ? NULL : handle;
+}
+
+// A floor witness from this inset box remains within the full player hull
+// throughout an adjacent <=8-unit slice (8 inset +8 travel <=16 full radius).
+// Full-width endpoint floor probes alone can bridge disjoint tiny supports.
+static bool NavigationSupport( const BotEngineContext &ctx, IHandleEntity *self,
+                                IHandleEntity *exitContact, const Vector &position, float stepSize )
+{
+	const float inset = AgPB_HULL_RADIUS * 0.5f;
+	const Vector mins( -inset, -inset, 0 ), maxs( inset, inset, 1 );
+	trace_t hit;
+	NavigationHullTrace( ctx, self, position, position - Vector( 0, 0, stepSize + 0.2f ),
+		mins, maxs, hit, exitContact );
+	return NavigationFloor( ctx, hit ) && position.z - hit.endpos.z <= stepSize + 0.1f;
+}
+
+bool AgPB_CanTraverseGround( const BotEngineContext &ctx, edict_t *self,
+                             const Vector &from, const Vector &to, bool crouched, float stepSize, edict_t *exitContact )
+{
+	IHandleEntity *handle = EntityHandle( self );
+	if ( ctx.pTrace == NULL || ctx.pEngine == NULL || ctx.pGameEnts == NULL || handle == NULL ||
+		!from.IsValid() || !to.IsValid() || !IsFinite( stepSize ) || stepSize <= 0.0f ||
+		( to - from ).Length2D() > 128.0f ) return false;
+	const float epsilon = 0.1f;
+	const Vector mins( -AgPB_HULL_RADIUS, -AgPB_HULL_RADIUS, 0 );
+	const Vector maxs( AgPB_HULL_RADIUS, AgPB_HULL_RADIUS,
+		crouched ? AgPB_HullDuckHeight() : AgPB_HullStandHeight() );
+	IHandleEntity *exitHandle = NavigationExitContact( ctx, exitContact, from, to, mins, maxs );
+	Vector current = from + Vector( 0, 0, epsilon );
+	trace_t hit;
+	NavigationHullTrace( ctx, handle, current, from - Vector( 0, 0, stepSize ), mins, maxs, hit, exitHandle );
+	if ( !NavigationFloor( ctx, hit ) ) return false;
+	current = hit.endpos + Vector( 0, 0, epsilon );
+	if ( exitHandle != NULL && fabsf( current.z - epsilon - from.z ) > 0.5f ) return false;
+	if ( !NavigationSupport( ctx, handle, exitHandle, current, stepSize ) ) return false;
+	const Vector delta = to - from;
+	const int steps = MAX( 1, (int)ceilf( delta.Length2D() / ( AgPB_HULL_RADIUS * 0.5f ) ) );
+	for ( int i = 1; i <= steps; ++i )
+	{
+		Vector next = from + delta * ( (float)i / steps ); next.z = current.z;
+		NavigationHullTrace( ctx, handle, current, next, mins, maxs, hit, exitHandle );
+		if ( hit.startsolid || hit.allsolid ) return false;
+		if ( hit.fraction < 1.0f )
+		{
+			if ( exitHandle != NULL ) return false; // The exit proof covers flat separation only.
+			NavigationHullTrace( ctx, handle, current, current + Vector( 0, 0, stepSize ), mins, maxs, hit, exitHandle );
+			if ( hit.startsolid || hit.allsolid ) return false;
+			const Vector raised = hit.endpos; next.z = raised.z;
+			NavigationHullTrace( ctx, handle, raised, next, mins, maxs, hit, exitHandle );
+			if ( hit.startsolid || hit.allsolid || hit.fraction < 1.0f ) return false;
+		}
+		NavigationHullTrace( ctx, handle, next, next - Vector( 0, 0, stepSize + 2 * epsilon ), mins, maxs, hit, exitHandle );
+		if ( !NavigationFloor( ctx, hit ) || fabsf( hit.endpos.z + epsilon - current.z ) > stepSize + epsilon ) return false;
+		current = hit.endpos + Vector( 0, 0, epsilon );
+		if ( exitHandle != NULL && fabsf( current.z - epsilon - from.z ) > 0.5f ) return false;
+		if ( !NavigationSupport( ctx, handle, exitHandle, current, stepSize ) ) return false;
+	}
+	return true;
 }

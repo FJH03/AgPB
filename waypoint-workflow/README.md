@@ -10,6 +10,7 @@
 | [ConsoleTransport.ps1](ConsoleTransport.ps1)、[convert_tga.py](convert_tga.py) | 控制台回执与完整截图读取；由主入口调用 |
 | [export_manual_plan.py](export_manual_plan.py) | 将明确人工决定的节点和有向边导出为AGPW |
 | [audit_waypoints.py](audit_waypoints.py) | `compare`核对字段与分队有向连通，`coverage`核对实走覆盖，`verify-bundle`核对交付哈希 |
+| [audit_incremental.py](audit_incremental.py) | 既有图追加制作：核对旧记录字节保全与显式新增槽，仅验收本轮新增节点 / 有向边；梯子连续穿越至普通出口 |
 | [verify_routes.py](verify_routes.py)、[stop_policy.py](stop_policy.py) | 同队实走记录与严格终点判定 |
 | [verify_objectives.py](verify_objectives.py) | A/B真实安放、逃爆及拆包场景记录 |
 | [verify_lifecycle.py](verify_lifecycle.py) | 离线重算M3a生命周期采样、身份、真实事件与版本绑定 |
@@ -20,6 +21,7 @@
 | [fixtures/agpb_jump_probe.sp](fixtures/agpb_jump_probe.sp) | 只读起跳 / 落地、逐tick速度与限速观察，另有实际玩家体积扫掠诊断 |
 | [fixtures/agpb_jump_fixture.sp](fixtures/agpb_jump_fixture.sp) | 显式cheat-gated单次起点准备；随后仅观察，不控制飞行 |
 | [fixtures/agpb_player_fixture.sp](fixtures/agpb_player_fixture.sp) | 两名同队 bot 的一次性位置准备与有限只读导航取样，核对玩家让行及原目标续路；不控制真人输入 |
+| [fixtures/agpb_prop_probe.sp](fixtures/agpb_prop_probe.sp) | 指定现有物理 prop 的一次性准备 / 显式恢复及最多20秒的只读导航采样；不控制玩家、不改变物件健康或物理模式 |
 | [maps/de_dust2.plan.json](maps/de_dust2.plan.json) | 冻结de_dust2基线的人工计划；手改现图使用匹配资产的新计划或明确修改清单 |
 | `test_*.py`、`test_console_transport.ps1` | 离线回归：导出、回执、身份、版本、停稳、目标及清单判定 |
 
@@ -53,11 +55,33 @@ if ($LASTEXITCODE -ne 0) { throw 'Plan comparison failed' }
 {"from": "takeoff", "to": "landing", "flags": 1, "jumpVelocity": [120, -40, 0]}
 ```
 
+有向边可显式给`slot: 0..7`保留磁盘连接槽及空槽洞，例如`{"from":"a","to":"b","flags":0,"slot":5}`。同一from的全部出边须全部指定slot或全部省略；重复槽 / 超范围槽拒绝导出。省略时沿用原来的顺序连续分配，旧计划字节不变；显式时只填指定槽，不压紧已有槽位。
+
 计划 JSON 的 `plan_version` 仍为 1，顶层可选 `agpw_version: 1|2`。旧计划及全零向量默认继续输出 AGPW v1，保持旧字节与哈希；任一非零向量或显式 `agpw_version: 2` 输出 v2。两个磁盘版本头均为 76 字节；v1 每节点 54 字节，v2 在原 `gravity` 后追加对应 8 个出边槽的 8×3 个 float，节点为 150 字节；空槽向量为零。v1 读取时补八个零向量，不能拿旧计划覆盖用户新保存的文件。
 
 `compare` 单列实际 / 预期磁盘版本，规范化后核对所有节点字段、八个连接槽、连接标志与速度分量；全零 v1 / v2 可语义一致，float32 位及其他字段仍严格比较，仅显式允许 author 改动。实走器的内存检查接受旧日志缺失的零向量；非零向量必须在对应 `target/0xflags velocity=(x,y,z)` 项中按实际 float32 的六位小数读回一致。改变向量或磁盘版本仍改变资产哈希，旧实走记录不能据此认证新资产。
 
 编辑细节按COMMANDS执行：已有A→B时，`link A B`不保证补反向边，须list核对；缓存B后回A再connect。jump为有向动作；每点最多8个出边。flag是切换操作，T/CT位是队伍通行限制，并非出生标签。不要扩大半径掩盖卡点。`agpb_wp_path`默认忽略队伍限制，须另用实际同队bot验证。
+
+## 既有图增量验收
+
+已有图作为冻结基线时，保留原AGPW备份，只在末尾追加人工节点，并在明确的空连接槽追加有向边。`audit_incremental.py`要求磁盘版本不变；旧节点的坐标、半径、flags、mesh、gravity、已有连接及速度全部按原字节保全。只有清单明确列出的旧空槽可修改目标 / 连接flags / XYZ速度；新增节点的边也须列入同一完整清单，不自动发现后批准连接。
+
+```json
+{"schema_version":1,"additions":[{"from":148,"to":149,"slot":2},{"from":149,"to":148,"slot":0}]}
+```
+
+```powershell
+py -B .\waypoint-workflow\audit_incremental.py compare `
+  --original $original --candidate $candidate --allowed-additions $additions
+py -B .\waypoint-workflow\audit_incremental.py coverage `
+  --original $original --candidate $candidate --allowed-additions $additions `
+  --plan $plan --records $walkRecords --bsp $bsp --dll $dll --jump-probe $jumpProbeSmx
+```
+
+完整计划须与最终候选一致；旧节点只是只读快照，不宣称本轮重新制作。复用`verify_routes.py`记录及其计划 / AGPW / BSP / DLL绑定、同队准备与严格终点政策。普通新增节点须分别作为终点严格停稳；新有向边可在连续路线中验收。旧节点 / 旧边不进入本轮缺失列表，经过旧边只作行进上下文。两项命令只读、JSON输出到stdout，可重定向本轮TEMP目录；只有明确允许原生保存修改author时才加`--allow-author-change`。
+
+LADDER节点不作为接地终点。单次goto连续穿过下 / 上梯节点，再到普通出口按原严格政策停稳。对应record的原始`log`、`observed_log`或`ladder_log`保留同次walking / arrival、已增强jump probe的逐tick样本，以及爬梯附近`agpb_bot_info`的实际goal和非零owner；metadata另记已加载探针SMX的`jump_probe_sha256`，用`--jump-probe`核对。只认请求before / after时段内同代次、同身份的连续采样；按顺序在梯节点XY≤max(radius,24)、Z≤32内实际`movetype=9`，上下端间持续梯子状态且有对应方向 / 高差进展，随后实际脱梯、ground handle有效且接地，最后在普通出口严格停稳。该中间穿越容差不放宽普通终点，也不修改图；单有路径日志不能认证梯子。
 
 ## 控制台与观察
 
@@ -102,7 +126,7 @@ py -B .\waypoint-workflow\audit_waypoints.py coverage $plan (Join-Path $sessionD
 先保全当前内存路点清单及正式 AGPW 的原字节 / 哈希，保留用户手改的坐标、radius、flags、出边槽位和速度；不拿旧计划覆盖新图。A→B 与 B→A 分别设计、记录和验收，不继承反向参数，也不根据几何或 XYZ 自动连边 / 补跳跃标志。
 
 1. **先实际看图。** 从起点、落点及侧面 / 斜上方取得多视角原生 TGA，转换为 PNG 后实际打开检查；沿用上节截图入口，禁用 JPEG。看清障碍顶部、梁 / 门框、模型边缘、起跳和落脚支撑、站 / 蹲净空及落地后的制动空间。图片不清或遮挡未辨明时先补视角，不能只凭两端 XYZ 调参；图片和拍摄位置留在本次 TEMP 证据中。
-2. **再做只读碰撞检查。** 用 `agpb_jump_probe_sweep <bot-slot> sx sy sz tx ty tz` 的实际玩家 hull 与分层射线核对起点、障碍和落点，先确认采样姿态 / hull。按候选速度、实际姿态的原生跳跃冲量及当前重力估算弧线，对相邻分段做扫掠，在障碍、弧顶和落脚处加密；实走后再按真实逐 tick 轨迹复核。两端直线通畅不等于弧线通畅，图片外观也不能代替碰撞结果。非零注入当前要求世界地面支撑；可站模型不等于已满足该条件。
+2. **再做只读碰撞检查。** 用 `agpb_jump_probe_sweep <bot-slot> sx sy sz tx ty tz` 的实际玩家 hull 与分层射线核对起点、障碍和落点，先确认采样姿态 / hull。可选第八参数 `height`（有限正数且不大于实际玩家高度）只改变临时扫掠体积与对应分层射线，日志标为 `explicit_height_hypothesis` 并保留实际高度，不改变玩家姿态或移动，也不代表实际蹲姿。按候选速度、实际姿态的原生跳跃冲量及当前重力估算弧线，对相邻分段做扫掠，在障碍、弧顶和落脚处加密；实走后再按真实逐 tick 轨迹复核。两端直线通畅不等于弧线通畅，图片外观也不能代替碰撞结果。非零注入当前要求世界地面支撑；可站模型不等于已满足该条件。
 3. **手工填写每个方向的 XYZ。** 用既有 `agpb_wp_jumpvel` 或 3D 编辑器，仅修改明确选中的现有有向 `PATH_JUMP`；必要的拓扑 / 标志由操作者明确手工编辑。字段含义和范围见上文：这是原生移动前的世界速度目标，Z 随后叠加原生冲量，不是最终离地速度。普通 CROUCH 可与跳跃同存，实际蹲姿 / 过渡会影响原生冲量；不通过改 gravity、删 CROUCH、放大半径或移除障碍来掩盖失败。反向即使端点相同，也需重新看障碍和净空。
 4. **逐向验证，再验证自然接近与往返。** 先验证单向；可选准备夹具只在输入和路线已释放时一次放到起点，之后只给一次终点。再从相邻正常路线自然接近起跳点，连续走过落点及后续段，并执行往返；单次起点摆放不能认证自然接近。运行中不传送、不接管输入、不重发 goto、不反复写速度；运动由核心 CUserCmd 和原生物理完成。保留真实跳跃事件、非零 XYZ 的单次 core 注入（零向量无注入）、edge / XYZ / owner、实际轨迹及落地读回；每个请求终点按上节 XY≤max(原radius,4)、Z≤4、接地、速度≤5和连续≥0.8秒严格停稳。任一方向失败或证据缺失单列，改参数后重验，不据标签或一张落地图通过。
 5. **原生保存后审计字节。** 最终候选经 `agpb_wp_save`、`agpb_wp_load` 后，核对重读内存与最终文件，并对候选 / 保存文件做字节和全字段比较，记录最终 AGPW / BSP / DLL 及所用探针、夹具哈希。字节差异必须解释到具体字段；仅 author 变化时按已有 compare 规则显式允许，不忽略 radius、flags、槽位或速度差异。确认无非预期改动再交付，保留截图、扫掠和最新实走的版本对应关系。
@@ -268,6 +292,7 @@ PROGRESS只保留当前状态、未完成项、必要验收结论和证据入口
 
 ```powershell
 py -B .\waypoint-workflow\test_audit_waypoints.py
+py -B .\waypoint-workflow\test_audit_incremental.py
 py -B .\waypoint-workflow\test_verify_routes.py
 py -B .\waypoint-workflow\test_stop_policy.py
 py -B .\waypoint-workflow\test_verify_objectives.py

@@ -61,7 +61,9 @@ def export(plan):
     """Return AGPW v1/v2 bytes, validating before any output is written.
 
     Radius is mandatory. Zero flags, mesh=0 and gravity=1 retain the existing
-    explicit-plan defaults. Missing directed-edge jumpVelocity is XYZ zero. A
+    explicit-plan defaults. Optional edge.slot preserves explicitly chosen
+    connection holes; each source uses either all explicit or all implicit
+    slots. Missing directed-edge jumpVelocity is XYZ zero. A
     nonzero jumpVelocity or
     explicit agpw_version=2 selects v2; unchanged old plans still export v1.
     plan_version describes the JSON schema, independently of the AGPW version.
@@ -107,9 +109,18 @@ def export(plan):
             if not flags & 1:
                 raise ValueError('Nonzero jumpVelocity requires an explicit PATH_JUMP edge')
             file_version = 2
-        adjacency[pair[0]].append((pair[1], flags, velocity))
+        slot = integer(edge['slot'], 'edge slot') if 'slot' in edge else None
+        if slot is not None and not 0 <= slot < 8:
+            raise ValueError('edge slot must be between 0 and 7')
+        adjacency[pair[0]].append((pair[1], flags, velocity, slot))
     if any(len(row) > 8 for row in adjacency):
         raise ValueError('More than eight outgoing edges')
+    for row in adjacency:
+        explicit = [slot for _, _, _, slot in row if slot is not None]
+        if explicit and len(explicit) != len(row):
+            raise ValueError('A source must use all explicit edge slots or omit all slots')
+        if len(explicit) != len(set(explicit)):
+            raise ValueError('Duplicate outgoing edge slot')
     name = header_string(plan.get('map'), 'map')
     author = header_string(plan.get('author', 'AgPB manual waypoints'), 'author')
     data = bytearray(HEADER.pack(MAGIC, file_version, len(nodes), name, author))
@@ -121,11 +132,13 @@ def export(plan):
         gravity = number(node.get('gravity', 1.0), 'gravity')
         if not 0 <= radius <= 255 or not 0 <= flags <= 0xffffffff or not 0 <= mesh <= 255:
             raise ValueError('Invalid node fields')
-        targets = [target for target, _, _ in row] + [-1] * (8 - len(row))
-        link_flags = [value for _, value, _ in row] + [0] * (8 - len(row))
+        targets, link_flags, velocities = [-1] * 8, [0] * 8, [[0.0, 0.0, 0.0] for _ in range(8)]
+        for implicit_slot, (target, value, velocity, explicit_slot) in enumerate(row):
+            slot = implicit_slot if explicit_slot is None else explicit_slot
+            targets[slot], link_flags[slot], velocities[slot] = target, value, velocity
         values = (*xyz, flags, radius, mesh, *targets, *link_flags, gravity)
         if file_version == 2:
-            values += tuple(component for _, _, velocity in row for component in velocity) + (0.0,) * (3 * (8 - len(row)))
+            values += tuple(component for velocity in velocities for component in velocity)
         data.extend(NODES[file_version].pack(*values))
     return bytes(data)
 

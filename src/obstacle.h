@@ -32,7 +32,7 @@ struct AgPBObstacle
 	int health;
 	bool damageKnown;
 	int damage;
-	bool broken;                // Surface: m_bIsBroken; ordinary brush/prop: also known health <= 0.
+	bool broken;                // Surface: m_bIsBroken; ordinary brush: also known health <= 0.
 	bool breakableCandidate;     // Not proof that bullets can destroy it.
 	const char *kind;
 };
@@ -63,5 +63,19 @@ bool AgPB_FindPathBreakable( const BotEngineContext &ctx, edict_t *self,
                             const Vector &origin, const Vector &eye,
                             const Vector *points, const int *ids, int count,
                             bool crouched, bool stuck, AgPBObstacle &result );
+
+
+// Complete ground movement hull, including individually clipped pushaway props.
+// Reports the nearest real contact. Player/world contacts remain in result;
+// only a physics-prop return can start local prop recovery.
+bool AgPB_FindGroundProp( const BotEngineContext &ctx, edict_t *self,
+                          const Vector &from, const Vector &to, bool crouched,
+                          AgPBObstacle &result );
+// Read-only local walk: actual hull, native step height and continuous support.
+// Physics props/players are not floor supports. An optional existing shallow
+// contact can be exited only after actual-shape proof of monotone separation.
+bool AgPB_CanTraverseGround( const BotEngineContext &ctx, edict_t *self,
+                             const Vector &from, const Vector &to, bool crouched,
+                             float stepSize, edict_t *exitContact = NULL );
 
 #endif

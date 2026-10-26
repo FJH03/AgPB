@@ -31,9 +31,11 @@
 #include "search_policy.h"
 #include "combat_movement.h"
 #include "jump_control.h"
+#include "ladder_control.h"
 #include "weapon_selection.h"
 #include "firing_policy.h"
 #include "player_avoidance.h"
+#include "prop_avoidance.h"
 
 class IServerTools;
 
@@ -236,7 +238,9 @@ private:
 
 	/** 每 tick 的"走路"部分：把路线翻译成 CUserCmd。 */
 	void UpdateRoute( CGlobalVars *pGlobals, CBotCmd &cmd );
+	bool UpdateLadderRoute( CGlobalVars *globals, CBotCmd &cmd );
 	bool BuildRoute( int goal, char *error, size_t maxlen );
+	bool FindRouteCandidate( int goal, CUtlVector<int> &path, char *error, size_t maxlen ) const;
 	void ClearRoute();
 	void UpdateTasks( CGlobalVars *globals, CBotCmd &cmd );
 	void UpdateAgentIntent( CGlobalVars *globals );
@@ -272,6 +276,9 @@ private:
 	static bool NavigationRequiresCrouch( unsigned int flags );
 	bool TaskRequiresCrouch() const;
 	void ApplyTaskPosture( CBotCmd &cmd ) const;
+	void ResetPropAvoidance();
+	bool UpdatePropAvoidance( CGlobalVars *globals, CBotCmd &cmd, bool jumpLeg, bool takeoff, bool crouch );
+	void ReportPropAvoidance() const;
 	void ResetPlayerAvoidance();
 	void UpdatePlayerAvoidance( CGlobalVars *globals, CBotCmd &cmd );
 	bool PlayerAvoidanceActive( float now ) const;
@@ -330,6 +337,7 @@ private:
 	float  m_flRouteSettleSince;
 	bool   m_bRouteLegAirborne;
 	AgPBJump::State m_JumpLaunch;
+	AgPBLadder::State m_Ladder;
 	bool m_bPendingJumpLaunch = false;
 	Vector m_vJumpLaunchVelocity = Vector( 0, 0, 0 );
 	std::uint64_t m_uJumpLaunchOwner = 0;
@@ -425,6 +433,9 @@ private:
 	bool m_bCombatDuckWanted = false;
 	float m_flCombatEyeZ = -1.0f, m_flCombatEyeStableSince = 0.0f;
 	AgPBWeaponSelect::State m_WeaponSelection;
+	AgPBPropAvoid::State m_PropAvoidance;
+	const char *m_pszPropAvoidance = "idle";
+	unsigned int m_uPropAvoidanceReplans = 0;
 	AgPBPlayerAvoid::State m_PlayerAvoidance;
 	const char *m_pszPlayerAvoidance = "idle";
 	float m_flPlayerAvoidanceAt = -1.0f;

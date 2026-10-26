@@ -22,6 +22,7 @@
 #include "objectives.h"
 #include "route_control.h"
 #include "movement_control.h"
+#include "game_mode.h"
 
 #include <vstdlib/random.h>
 
@@ -307,12 +308,21 @@ void CAgPB::Think( CGlobalVars *pGlobals )
 	else
 	{
 		m_bWasAlive = true;
+		if ( m_Ladder.Active() && ( AgPB_IsRoundFrozen() || ( GetNetVarInt( "m_fFlags" ) & FL_FROZEN ) != 0 ) )
+		{
+			// UpdateTasks returns before UpdateRoute during freeze. Preserve the
+			// authored dismount owner while suspending its movement deadlines.
+			m_Ladder.started = m_Ladder.progressAt = pGlobals->curtime;
+			m_Ladder.bestDistance = -1.0f;
+		}
 		UpdateAgentIntent( pGlobals );
-		if ( !UpdateCombat( pGlobals, cmd ) ) UpdateTasks( pGlobals, cmd );
+		if ( m_Ladder.Active() || !UpdateCombat( pGlobals, cmd ) ) UpdateTasks( pGlobals, cmd );
+		else ResetPropAvoidance();
 		// Task posture survives every command owner, including the released
 		// target-loss frame, weapon selection and a route already cleared at camp.
 		ApplyTaskPosture( cmd );
-		UpdatePlayerAvoidance( pGlobals, cmd );
+		if ( m_Ladder.Active() ) ResetPlayerAvoidance();
+		else UpdatePlayerAvoidance( pGlobals, cmd );
 	}
 
 	// 【弹道跳/调试】把本 tick 的速度覆盖值写进引擎（真成员地址），
@@ -400,6 +410,7 @@ void CAgPB::RouteReport( const char *pszFormat, ... ) const
 
 void CAgPB::ClearRoute()
 {
+	ResetPropAvoidance();
 	ResetPlayerAvoidance();
 	ClearBreakable();
 	m_vecRoute.RemoveAll();
@@ -412,6 +423,7 @@ void CAgPB::ClearRoute()
 	m_flRouteSettleSince = -1.0f;
 	m_bRouteLegAirborne = false;
 	AgPBJump::Reset( m_JumpLaunch );
+	AgPBLadder::Reset( m_Ladder );
 	m_bPendingJumpLaunch = false;
 	m_uJumpLaunchOwner = 0;
 	m_uRouteTaskToken = 0;
@@ -613,6 +625,14 @@ bool CAgPB::UpdateBreakable( CGlobalVars *globals, CBotCmd &cmd )
 		ClearBreakable();
 		ResetRouteProgress( now );
 		return true; // One tick with attack released before resuming locomotion.
+	}
+	if ( !current.breakableCandidate && Q_stricmp( current.kind, "physics-prop" ) == 0 )
+	{
+		// Zero/unknown physics health does not prove disappearance. Release the
+		// shot task; actual collision can now select bounded local navigation.
+		RouteReport( "physics obstacle is not confirmed destructible; releasing attack and retaining goal #%d", m_iGoalWaypoint );
+		ClearBreakable(); ResetRouteProgress( now );
+		return true;
 	}
 	if ( !current.breakableCandidate )
 	{
@@ -1034,6 +1054,11 @@ void CAgPB::ReportLifecycle() const
 		m_LastSubmittedCmd.forwardmove, m_LastSubmittedCmd.sidemove, m_LastSubmittedCmd.upmove,
 		m_LastSubmittedCmd.viewangles.x, m_LastSubmittedCmd.viewangles.y );
 	ReportPlayerAvoidance();
+	ReportPropAvoidance();
+	RouteReport( "ladder state=%s direction=%s attached=%d movetype=%d first=#%d last=#%d exit=#%d face=%.1f",
+		AgPBLadder::Name( m_Ladder.stage ), m_Ladder.ascending ? "up" : "down", m_Ladder.attached ? 1 : 0,
+		GetNetVarInt( "movetype", MOVETYPE_NONE ), RouteNode( m_Ladder.first ), RouteNode( m_Ladder.last ),
+		RouteNode( m_Ladder.exit ), m_Ladder.faceYaw );
 }
 
 void CAgPB::ReportClearance() const
@@ -1169,6 +1194,19 @@ bool CAgPB::CanPlayerAvoidStep( const Vector &wish, bool crouch, float interval,
 
 bool CAgPB::BuildRoute( int iGoalWaypoint, char *error, size_t maxlen )
 {
+	CUtlVector<int> path;
+	if ( !FindRouteCandidate( iGoalWaypoint, path, error, maxlen ) ) return false;
+	ClearRoute();
+	m_vecRoute = path;
+	m_iRouteIndex = 0;
+	m_iGoalWaypoint = iGoalWaypoint;
+	ResetRouteProgress( gpGlobals != NULL ? gpGlobals->curtime : 0.0f );
+	return true;
+}
+
+bool CAgPB::FindRouteCandidate( int iGoalWaypoint, CUtlVector<int> &vecPath, char *error, size_t maxlen ) const
+{
+	vecPath.RemoveAll();
 	CAgPBWaypoints &wp = BotWaypoints();
 	if ( !IsValid() )
 	{
@@ -1229,7 +1267,6 @@ bool CAgPB::BuildRoute( int iGoalWaypoint, char *error, size_t maxlen )
 	}
 	entries.Sort( CompareRouteEntries );
 	bool foundEntry = false;
-	CUtlVector<int> vecPath;
 	// A bot leaving a real low ceiling may still need its observed duck hull.
 	// CAMP controls authored posture, not whether the native hull fits here.
 	const bool enteringDucked = ( GetNetVarInt( "m_fFlags" ) & FL_DUCKING ) != 0;
@@ -1251,15 +1288,8 @@ bool CAgPB::BuildRoute( int iGoalWaypoint, char *error, size_t maxlen )
 		return false;
 	}
 
-	// The graph starts at vecPath[0], not at the bot's arbitrary current position.
-	// Reach that anchor before consuming the first hand-authored edge.
-	// Keep the old owned route until the new manual-graph candidate is valid.
-	ClearRoute();
-	m_vecRoute = vecPath;
-	m_iRouteIndex = 0;
-	m_iGoalWaypoint = iGoalWaypoint;
-	ResetRouteProgress( gpGlobals != NULL ? gpGlobals->curtime : 0.0f );
-
+	// Query only. A local collision replan must inspect the graph candidate
+	// before replacing the owned route, its index or collision episode.
 	return true;
 }
 
@@ -1375,6 +1405,226 @@ bool CAgPB::IsRoamGoalCrowded( const Vector &vGoal, float flRadius ) const
 	return false;
 }
 
+// SyPB keeps ladder navigation aimed at its authored destination and compares
+// full 3D waypoint distances. CS-EBOT confirms the ladder movement-button path.
+// Source's public movement code supplies only the physical command contract:
+// LadderMove uses IN_FORWARD/BACK/LEFT/RIGHT, not forwardmove alone.
+static void LadderCommand( CBotCmd &cmd, float pitch, float yaw, float forward, float side = 0.0f )
+{
+	cmd.viewangles.Init( pitch, yaw, 0.0f );
+	cmd.forwardmove = forward; cmd.sidemove = side; cmd.upmove = 0.0f;
+	cmd.buttons &= ~( IN_FORWARD | IN_BACK | IN_MOVELEFT | IN_MOVERIGHT | IN_JUMP );
+	if ( forward > 0.0f ) cmd.buttons |= IN_FORWARD;
+	else if ( forward < 0.0f ) cmd.buttons |= IN_BACK;
+	if ( side > 0.0f ) cmd.buttons |= IN_MOVERIGHT;
+	else if ( side < 0.0f ) cmd.buttons |= IN_MOVELEFT;
+}
+
+static float AuthoredLadderYaw( IEngineTrace *trace, IHandleEntity *self,
+                               const Vector &low, const Vector &high, Vector inward )
+{
+	inward.z = 0.0f;
+	if ( inward.Length2DSqr() < 0.01f ) inward.Init( 1, 0, 0 );
+	VectorNormalize( inward );
+	// Read only: correct an oblique authored approach against the actual ladder
+	// face. Neither NAV edges nor map coordinates are used. A point trace stays
+	// outside the face even when the player's hull is already touching it.
+	if ( trace != NULL )
+	{
+		Vector sample = ( low + high ) * 0.5f;
+		sample.z += MIN( 32.0f, ( high.z - low.z ) * 0.25f );
+		const Vector directions[] = { inward, Vector( 1, 0, 0 ), Vector( -1, 0, 0 ),
+			Vector( 0, 1, 0 ), Vector( 0, -1, 0 ) };
+		CAgPBRouteEntryFilter filter( trace, self );
+		float nearest = 65.0f;
+		for ( int i = 0; i < ARRAYSIZE( directions ); ++i )
+		{
+			Ray_t ray; ray.Init( sample, sample + directions[i] * 64.0f );
+			trace_t hit;
+			trace->TraceRay( ray, MASK_PLAYERSOLID & ~CONTENTS_PLAYERCLIP, &filter, &hit );
+			if ( hit.startsolid || hit.allsolid || hit.fraction >= 1.0f ||
+				( hit.contents & CONTENTS_LADDER ) == 0 || fabsf( hit.plane.normal.z ) > 0.2f ) continue;
+			const float distance = ( hit.endpos - sample ).Length();
+			if ( distance >= nearest ) continue;
+			nearest = distance;
+			inward = -hit.plane.normal; inward.z = 0.0f; VectorNormalize( inward );
+		}
+	}
+	QAngle facing; VectorAngles( inward, facing );
+	return facing.y;
+}
+
+bool CAgPB::UpdateLadderRoute( CGlobalVars *globals, CBotCmd &cmd )
+{
+	using namespace AgPBLadder;
+	CAgPBWaypoints &wp = BotWaypoints();
+	const AgPBPath *node = wp.Get( RouteNode( m_iRouteIndex ) );
+	if ( node == NULL || m_pInfo == NULL ) return false;
+	const Vector position = m_pInfo->GetAbsOrigin();
+	const float now = globals->curtime;
+	const bool onLadder = GetNetVarInt( "movetype", MOVETYPE_NONE ) == MOVETYPE_LADDER;
+	const bool grounded = ( GetNetVarInt( "m_fFlags" ) & FL_ONGROUND ) != 0;
+	if ( !m_Ladder.Active() )
+	{
+		if ( ( node->flags & AgPB_WP_LADDER ) == 0 ) return false;
+		int first = m_iRouteIndex, last = m_iRouteIndex;
+		while ( first > 0 )
+		{
+			const AgPBPath *previous = wp.Get( RouteNode( first - 1 ) );
+			if ( previous == NULL || ( previous->flags & AgPB_WP_LADDER ) == 0 ) break;
+			--first;
+		}
+		while ( last + 1 < m_vecRoute.Count() )
+		{
+			const AgPBPath *next = wp.Get( RouteNode( last + 1 ) );
+			if ( next == NULL || ( next->flags & AgPB_WP_LADDER ) == 0 ) break;
+			++last;
+		}
+		// Authored jump connections retain their existing launch/flight owner.
+		for ( int i = MAX( 1, first ); i <= last; ++i )
+		{
+			unsigned int flags = 0;
+			wp.IsConnected( RouteNode( i - 1 ), RouteNode( i ), &flags );
+			if ( ( flags & AgPB_PATH_JUMP ) != 0 ) return false;
+		}
+		const AgPBPath *start = wp.Get( RouteNode( first ) );
+		const AgPBPath *end = wp.Get( RouteNode( last ) );
+		if ( start == NULL || end == NULL || first == last || fabsf( end->origin.z - start->origin.z ) < 4.0f )
+		{
+			RouteReport( "ladder route needs two authored LADDER endpoints at different heights - stopped" );
+			ClearRoute(); LadderCommand( cmd, 0, cmd.viewangles.y, 0 );
+			return true;
+		}
+		const bool ascending = end->origin.z > start->origin.z;
+		const Vector low = ascending ? start->origin : end->origin;
+		const Vector high = ascending ? end->origin : start->origin;
+		const AgPBPath *lowerApproach = wp.Get( RouteNode( ascending ? first - 1 : last + 1 ) );
+		const AgPBPath *upperExit = wp.Get( RouteNode( ascending ? last + 1 : first - 1 ) );
+		Vector inward = lowerApproach != NULL ? low - lowerApproach->origin :
+			( upperExit != NULL ? upperExit->origin - high : Vector( 0, 0, 0 ) );
+		if ( inward.Length2DSqr() < 0.01f ) AngleVectors( QAngle( 0, cmd.viewangles.y, 0 ), &inward );
+		IHandleEntity *self = m_pEdict->GetNetworkable()->GetEntityHandle();
+		const float faceYaw = AuthoredLadderYaw( m_Ctx.pTrace, self, low, high, inward );
+		Begin( m_Ladder, first, last, last + 1 < m_vecRoute.Count() ? last + 1 : -1,
+			m_uRouteTaskToken, start->origin.z, end->origin.z, faceYaw, now );
+		m_flRouteSettleSince = -1.0f;
+		ResetPlayerAvoidance();
+		RouteReport( "ladder begin direction=%s first=#%d last=#%d exit=#%d face=%.1f",
+			ascending ? "up" : "down", RouteNode( first ), RouteNode( last ), RouteNode( m_Ladder.exit ), faceYaw );
+	}
+	if ( m_Ladder.owner != m_uRouteTaskToken || m_iRouteIndex < m_Ladder.first ||
+		m_iRouteIndex > m_Ladder.last + 1 )
+	{
+		Reset( m_Ladder );
+		return false;
+	}
+	const AgPBPath *entry = wp.Get( RouteNode( m_Ladder.first ) );
+	const AgPBPath *end = wp.Get( RouteNode( m_Ladder.last ) );
+	const AgPBPath *exit = wp.Get( RouteNode( m_Ladder.exit ) );
+	if ( entry == NULL || end == NULL || !position.IsValid() )
+	{
+		RouteReport( "ladder route lost authored endpoints - stopped" );
+		ClearRoute(); LadderCommand( cmd, 0, cmd.viewangles.y, 0 ); return true;
+	}
+	if ( onLadder )
+	{
+		m_Ladder.attached = true;
+		if ( m_Ladder.stage == Stage::Approach )
+		{
+			SetStage( m_Ladder, Stage::Traverse, now );
+			RouteReport( "ladder attached direction=%s", m_Ladder.ascending ? "up" : "down" );
+		}
+	}
+	// Consume only authored ladder nodes and only at their actual vertical
+	// level. The ordinary ground rule's 32-unit Z tolerance is unsuitable here.
+	if ( m_iRouteIndex <= m_Ladder.last )
+	{
+		const Vector delta = node->origin - position;
+		const bool reached = onLadder ? delta.Length2D() <= 32.0f &&
+			HeightReached( m_Ladder.ascending, position.z, node->origin.z ) :
+			m_iRouteIndex == m_Ladder.first &&
+			CanAdvanceUnattachedEntry( m_Ladder.ascending, delta.x, delta.y, delta.z );
+		if ( reached && m_iRouteIndex == m_Ladder.last && exit == NULL )
+		{
+			// A requested endpoint on the ladder can stop and hold without being
+			// grounded. An ordinary ground goal still uses terminal feedback.
+			LadderCommand( cmd, 0, m_Ladder.faceYaw, 0 );
+			Vector velocity;
+			if ( !ReadRouteVelocity( *this, velocity ) || velocity.Length() > 5.0f )
+				m_flRouteSettleSince = -1.0f;
+			else if ( m_flRouteSettleSince < 0.0f ) m_flRouteSettleSince = now;
+			if ( m_flRouteSettleSince >= 0.0f && now - m_flRouteSettleSince >= AgPBTerminal::StableSeconds )
+			{
+				const int goal = m_iGoalWaypoint;
+				RouteReport( "arrived at ladder waypoint #%d", goal );
+				ClearRoute(); m_bRouteArrived = true; m_uRouteTaskToken = m_Tasks.Current().token;
+			}
+			return true;
+		}
+		if ( reached )
+		{
+			++m_iRouteIndex;
+			m_flRouteSettleSince = -1.0f; m_bRouteLegAirborne = false;
+			AgPBJump::Reset( m_JumpLaunch ); ResetRouteProgress( now );
+			m_Ladder.bestDistance = -1.0f; m_Ladder.progressAt = now;
+			if ( m_iRouteIndex > m_Ladder.last )
+			{
+				SetStage( m_Ladder, Stage::Dismount, now );
+				RouteReport( "ladder dismount direction=%s exit=#%d", m_Ladder.ascending ? "up" : "down", RouteNode( m_Ladder.exit ) );
+			}
+		}
+	}
+	// A physical detach at the endpoint may precede its exact authored height
+	// by a small step. Finish through the authored exit instead of remounting.
+	if ( !onLadder && m_Ladder.attached && m_Ladder.stage == Stage::Traverse && exit != NULL &&
+		HeightReached( m_Ladder.ascending, position.z, end->origin.z, 8.0f ) )
+	{
+		m_iRouteIndex = m_Ladder.exit;
+		SetStage( m_Ladder, Stage::Dismount, now );
+		ResetRouteProgress( now );
+	}
+	const Vector progressTarget = m_Ladder.stage == Stage::Dismount && exit != NULL ? exit->origin :
+		( m_Ladder.stage == Stage::Approach && m_iRouteIndex == m_Ladder.first ? entry->origin : end->origin );
+	Progress( m_Ladder, ( progressTarget - position ).Length(), now );
+	if ( TimedOut( m_Ladder, now ) )
+	{
+		RouteReport( "ladder timeout stage=%s direction=%s node=#%d pos=(%.1f,%.1f,%.1f) - stopped",
+			AgPBLadder::Name( m_Ladder.stage ), m_Ladder.ascending ? "up" : "down", RouteNode( m_iRouteIndex ),
+			position.x, position.y, position.z );
+		ClearRoute(); LadderCommand( cmd, 0, cmd.viewangles.y, 0 ); return true;
+	}
+	if ( m_Ladder.stage == Stage::Dismount && exit != NULL )
+	{
+		if ( !onLadder && grounded )
+		{
+			RouteReport( "ladder detached on ground; continuing to waypoint #%d", RouteNode( m_Ladder.exit ) );
+			Reset( m_Ladder ); ResetRouteProgress( now );
+			LadderCommand( cmd, 0, cmd.viewangles.y, 0 ); return true;
+		}
+		Vector flat = exit->origin - position; flat.z = 0;
+		QAngle toward( 0, m_Ladder.faceYaw, 0 );
+		if ( flat.Length2DSqr() > 1.0f ) VectorAngles( flat, toward );
+		LadderCommand( cmd, DismountPitch( m_Ladder.ascending, onLadder ), toward.y, 200.0f );
+		return true;
+	}
+	if ( !onLadder )
+	{
+		Vector flat = entry->origin - position; flat.z = 0;
+		QAngle toward( 0, m_Ladder.faceYaw, 0 );
+		if ( m_iRouteIndex == m_Ladder.first && flat.Length2DSqr() > 4.0f ) VectorAngles( flat, toward );
+		// The upward wish lifts Source's short attachment hull sweep away
+		// from an ascending floor. Descending stays horizontal until attached.
+		LadderCommand( cmd, MountPitch( m_Ladder.ascending ), toward.y, 200.0f );
+		return true;
+	}
+	const AgPBPath *target = wp.Get( RouteNode( m_iRouteIndex ) );
+	Vector right; AngleVectors( QAngle( 0, m_Ladder.faceYaw, 0 ), NULL, &right, NULL );
+	const float lateral = target != NULL ? DotProduct( target->origin - position, right ) : 0.0f;
+	const Wish wish = TraverseWish( m_Ladder.ascending, lateral );
+	LadderCommand( cmd, wish.pitch, m_Ladder.faceYaw, wish.forward, wish.side );
+	return true;
+}
+
 void CAgPB::UpdateRoute( CGlobalVars *pGlobals, CBotCmd &cmd )
 {
 	if ( !HasRoute() || m_pInfo == NULL )
@@ -1384,6 +1634,7 @@ void CAgPB::UpdateRoute( CGlobalVars *pGlobals, CBotCmd &cmd )
 	if ( AgPB_IsRoundFrozen() || ( GetNetVarInt( "m_fFlags" ) & FL_FROZEN ) != 0 )
 	{
 		SuspendTaskActions( pGlobals->curtime );
+		ResetPropAvoidance();
 		return;
 	}
 	if ( UpdateBreakable( pGlobals, cmd ) ) return;
@@ -1399,6 +1650,7 @@ void CAgPB::UpdateRoute( CGlobalVars *pGlobals, CBotCmd &cmd )
 		ClearRoute();
 		return;
 	}
+	if ( UpdateLadderRoute( pGlobals, cmd ) ) { ResetPropAvoidance(); return; }
 
 	// 这一段要不要跳 —— 看"上一点 -> 这一点"那条边的标志
 	unsigned int uLegFlags = 0;
@@ -1472,6 +1724,9 @@ void CAgPB::UpdateRoute( CGlobalVars *pGlobals, CBotCmd &cmd )
 	if ( bArrived )
 	{
 		++m_iRouteIndex;
+		// Reaching an adopted replan's entry anchor is not proof that its
+		// obstacle was passed. Keep the bounded episode until actual clearance.
+		if ( !m_PropAvoidance.active || !m_PropAvoidance.replanned ) ResetPropAvoidance();
 		m_flRouteSettleSince = -1.0f;
 		m_bRouteLegAirborne = false;
 		AgPBJump::Reset( m_JumpLaunch );
@@ -1587,6 +1842,10 @@ void CAgPB::UpdateRoute( CGlobalVars *pGlobals, CBotCmd &cmd )
 		bCrouch, nextNode != NULL && NavigationRequiresCrouch( nextNode->flags ),
 		bTakeoff, flDist2D, bJumpLeg, bLandedJumpLeg, bGrounded,
 		m_flStuckRecoveryUntil > 0.0f );
+
+	// Local prop recovery owns only this ordinary grounded navigation wish.
+	// Higher-priority actions, authored jumps/ladders and players are gated inside.
+	if ( UpdatePropAvoidance( pGlobals, cmd, bJumpLeg, bTakeoff, posture.crouch ) ) return;
 
 	// Source ZBot checks breakables before ordinary navigation is updated.
 	// SyPB/CS-EBOT pause their current path while breaking. Keep our manual
@@ -2243,4 +2502,179 @@ uintp AgPB_RefEHandle( edict_t *pEdict )
 		return (uintp)INVALID_EHANDLE_INDEX;
 
 	return (uintp)pHandleEntity->GetRefEHandle().ToInt();
+}
+
+void CAgPB::ResetPropAvoidance()
+{
+	AgPBPropAvoid::Reset( m_PropAvoidance );
+	m_pszPropAvoidance = "idle";
+}
+
+static Vector PropPrediction( const Vector &wish, const Vector &velocity, float interval )
+{
+	Vector delta = wish * 0.2f;
+	const float distance = delta.Length2D();
+	if ( distance > 0.0001f && distance < AgPB_HULL_RADIUS ) delta *= AgPB_HULL_RADIUS / distance;
+	delta += Vector( velocity.x, velocity.y, 0 ) * MIN( interval, 0.05f );
+	return delta;
+}
+
+bool CAgPB::UpdatePropAvoidance( CGlobalVars *globals, CBotCmd &cmd,
+                                bool jumpLeg, bool takeoff, bool crouch )
+{
+	using namespace AgPBPropAvoid;
+	const AgPBTask &task = m_Tasks.Current();
+	const int flags = GetNetVarInt( "m_fFlags" );
+	const AgPBPath *node = BotWaypoints().Get( RouteNode( m_iRouteIndex ) );
+	if ( globals == NULL || !IsAlive() || !HasRoute() || m_pInfo == NULL ||
+		AgPB_GameMode() != AgPB_MODE_NORMAL || AgPB_IsRoundFrozen() ||
+		( flags & ( FL_ONGROUND | FL_FROZEN ) ) != FL_ONGROUND ||
+		GetNetVarInt( "movetype" ) != MOVETYPE_WALK || GetNetVarInt( "m_nWaterLevel" ) >= 2 ||
+		m_uRouteTaskToken == 0 || m_uRouteTaskToken != task.token || node == NULL ||
+		jumpLeg || takeoff || m_Ladder.Active() || ( node->flags & AgPB_WP_LADDER ) != 0 ||
+		m_bPendingJumpLaunch || ( ( cmd.buttons | m_LastSubmittedCmd.buttons ) & IN_JUMP ) != 0 ||
+		( cmd.buttons & ( IN_ATTACK | IN_ATTACK2 | IN_USE | IN_RELOAD ) ) != 0 ||
+		NetVar_HandleIsValid( m_uCombatEnemy ) || m_bCombatRelease ||
+		IsHoldingTaskPosition() || task.id == AgPBTaskId::DestroyBreakable ||
+		( task.id == AgPBTaskId::DefuseBomb && GetNetVarInt( "m_bIsDefusing" ) != 0 ) ||
+		( task.deadline > 0 && globals->curtime >= task.deadline ) ||
+		PlayerAvoidanceActive( globals->curtime ) || cmd.weaponselect != 0 || cmd.upmove != 0 ||
+		!IsFinite( globals->interval_per_tick ) || globals->interval_per_tick <= 0 ||
+		!IsFinite( globals->frametime ) || globals->frametime <= 0 ||
+		!IsFinite( cmd.viewangles.y ) || !IsFinite( cmd.forwardmove ) || !IsFinite( cmd.sidemove ) )
+	{
+		ResetPropAvoidance(); return false;
+	}
+	Vector forward, right, velocity;
+	AngleVectors( QAngle( 0, cmd.viewangles.y, 0 ), &forward, &right, NULL );
+	const Vector original = forward * cmd.forwardmove + right * cmd.sidemove;
+	const Vector here = m_pInfo->GetAbsOrigin();
+	if ( !original.IsValid() || original.Length2D() < 10 || !ReadRouteVelocity( *this, velocity ) ||
+		DotProduct( original, node->origin - here ) <= 0 )
+	{
+		// In particular, terminal braking and stop commands cannot become a
+		// side/back movement merely because a prop is close behind the player.
+		ResetPropAvoidance(); return false;
+	}
+	Input input;
+	input.now = globals->curtime; input.maxSpeed = MIN( GetNetVarFloat( "m_flMaxspeed", 250.0f ), 170.0f );
+	input.goalDistance = ( node->origin - here ).Length2D();
+	input.owner = m_uRouteTaskToken; input.goal = m_iGoalWaypoint;
+	input.wish = Vec2( original.x, original.y ); input.permitted = true;
+	if ( !Valid( input ) ) { ResetPropAvoidance(); return false; }
+	const bool ducking = crouch || ( flags & FL_DUCKING ) != 0;
+	const Vec2 initialWish = OriginalWish( input );
+	const Vector prediction = PropPrediction( Vector( initialWish.x, initialWish.y, 0 ), velocity, globals->interval_per_tick );
+	AgPBObstacle blocker;
+	const bool propHit = AgPB_FindGroundProp( m_Ctx, m_pEdict, here, here + prediction, ducking, blocker );
+	if ( ( blocker.found && Q_stricmp( blocker.kind, "player" ) == 0 ) ||
+		( propHit && blocker.breakableCandidate ) )
+	{
+		// A live player belongs to the final player layer. A confirmed
+		// destructible object belongs to the existing breakable task.
+		ResetPropAvoidance(); return false;
+	}
+	if ( !propHit && !m_PropAvoidance.active ) { ResetPropAvoidance(); return false; }
+	if ( !propHit && m_PropAvoidance.active )
+	{
+		AgPBObstacle retained;
+		AgPB_ClassifyObstacle( m_Ctx, HandleToEdict( (uintp)m_PropAvoidance.blocker ), retained );
+		if ( !retained.found || Q_stricmp( retained.kind, "physics-prop" ) != 0 || retained.breakableCandidate )
+		{ ResetPropAvoidance(); return false; }
+	}
+	input.blockedByProp = propHit;
+	input.blocker = propHit ? (std::uint64_t)blocker.handle : 0;
+	input.forwardClear = AgPB_CanTraverseGround( m_Ctx, m_pEdict, here, here + prediction,
+		ducking, GetNetVarFloat( "m_flStepSize", 18.0f ) );
+	// A cleared/displaced prop must not transfer its episode to a new wall/ledge.
+	if ( !propHit && !input.forwardClear ) { ResetPropAvoidance(); return false; }
+	const Vector away = here - blocker.center;
+	input.preferredSide = DotProduct( away, right ) < 0 ? -1 : 1;
+	Probes probes;
+	const auto safe = [&]( int side, bool retreat ) {
+		const Vec2 wish = CandidateWish( input, side, retreat );
+		const Vector delta = PropPrediction( Vector( wish.x, wish.y, 0 ), velocity, globals->interval_per_tick );
+		return AgPB_CanTraverseGround( m_Ctx, m_pEdict, here, here + delta,
+			ducking, GetNetVarFloat( "m_flStepSize", 18.0f ), propHit ? blocker.entity : NULL );
+	};
+	if ( NeedsProbes( m_PropAvoidance, input ) )
+	{
+		if ( ( node->flags & AgPB_WP_FALLRISK ) == 0 )
+		{
+			probes.right = safe( 1, false ); probes.left = safe( -1, false );
+			probes.rightBack = safe( 1, true ); probes.leftBack = safe( -1, true );
+		}
+		probes.back = safe( 0, true );
+	}
+	const char *previous = m_pszPropAvoidance;
+	const Output output = Step( m_PropAvoidance, input, probes );
+	m_pszPropAvoidance = output.reason;
+	if ( Q_strcmp( previous, output.reason ) != 0 && m_PropAvoidance.active )
+		RouteReport( "prop recovery state=%s blocker=0x%llX owner=%llu goal=%d side=%d elapsed=%.3f",
+			output.reason, (unsigned long long)m_PropAvoidance.blocker,
+			(unsigned long long)m_uRouteTaskToken, m_iGoalWaypoint, m_PropAvoidance.side,
+			input.now - m_PropAvoidance.started );
+	if ( !output.active ) return false;
+	// The exact duck hull was certified above; UpdateRoute returns before its
+	// ordinary posture emission, so keep that same posture in this command.
+	if ( ducking ) cmd.buttons |= IN_DUCK;
+	// Side motion may temporarily increase goal distance. Its finite policy
+	// budget replaces generic stuck time while keeping the same route/owner.
+	m_flStuckCheckTime = input.now + AgPB_STUCK_WINDOW;
+	m_flStuckRecoveryUntil = 0;
+	cmd.forwardmove = cmd.sidemove = cmd.upmove = 0;
+	if ( output.failed )
+	{
+		RouteReport( "prop recovery failed: no supported local passage within 6 seconds; blocker=0x%llX owner=%llu goal=%d - stopped",
+			(unsigned long long)m_PropAvoidance.blocker, (unsigned long long)m_uRouteTaskToken, m_iGoalWaypoint );
+		const bool agentOwned = m_AgentIntent.token != 0 && m_AgentIntent.token == m_uRouteTaskToken;
+		ClearRoute(); m_bRoam = false;
+		if ( agentOwned ) ClearAgentIntent( "route-failed" );
+		else CompleteCurrentTask( "nonbreakable prop blocked navigation", true );
+		return true;
+	}
+	if ( output.requestReplan )
+	{
+		const State continued = m_PropAvoidance;
+		const int goal = m_iGoalWaypoint;
+		const std::uint64_t owner = m_uRouteTaskToken;
+		CUtlVector<int> candidate;
+		char error[192]; ++m_uPropAvoidanceReplans;
+		const bool rebuilt = FindRouteCandidate( goal, candidate, error, sizeof( error ) );
+		const bool changed = rebuilt && HasAlternativeRoute( m_vecRoute.Base(), m_vecRoute.Count(),
+			m_iRouteIndex, candidate.Base(), candidate.Count() );
+		if ( changed )
+		{
+			ClearRoute();
+			m_vecRoute = candidate; m_iRouteIndex = 0; m_iGoalWaypoint = goal;
+			m_uRouteTaskToken = owner; m_PropAvoidance = continued;
+			ResetRouteProgress( input.now );
+		}
+		m_pszPropAvoidance = changed ? "prop-recomputed" : "prop-recompute-wait";
+		RouteReport( "prop recovery recompute owner=%llu goal=%d count=%u result=%s path-changed=%d solved=0",
+			(unsigned long long)owner, goal, m_uPropAvoidanceReplans,
+			changed ? "alternative" : ( rebuilt ? "same-blocked-leg" : error ), changed ? 1 : 0 );
+		return true; // Release this command without renewing the episode budget.
+	}
+	if ( Length( output.wish ) > 0.01f )
+	{
+		const Vector wish( output.wish.x, output.wish.y, 0 );
+		// Recheck the selected exact vector before handing it to CUserCmd.
+		if ( AgPB_CanTraverseGround( m_Ctx, m_pEdict, here,
+			here + PropPrediction( wish, velocity, globals->interval_per_tick ), ducking,
+			GetNetVarFloat( "m_flStepSize", 18.0f ), propHit ? blocker.entity : NULL ) )
+		{
+			const AgPBMovement::LocalWish local = AgPBMovement::WorldToLocal( wish.x, wish.y, cmd.viewangles.y );
+			cmd.forwardmove = local.forward; cmd.sidemove = local.side;
+		}
+	}
+	return true;
+}
+
+void CAgPB::ReportPropAvoidance() const
+{
+	RouteReport( "prop avoidance: policy=sypb_ebot_ground_props_v1 state=%s active=%d blocker=0x%llX owner=%llu goal=%d side=%d since=%.3f replanned=%d recomputes=%u",
+		m_pszPropAvoidance, m_PropAvoidance.active ? 1 : 0, (unsigned long long)m_PropAvoidance.blocker,
+		(unsigned long long)m_PropAvoidance.owner, m_PropAvoidance.goal, m_PropAvoidance.side,
+		m_PropAvoidance.started, m_PropAvoidance.replanned ? 1 : 0, m_uPropAvoidanceReplans );
 }

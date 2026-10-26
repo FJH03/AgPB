@@ -47,6 +47,47 @@ class ExportAndCompareTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'radius'):
             export(self.plan)
 
+    def test_explicit_edge_slots_preserve_holes_flags_and_velocity(self):
+        plan = copy.deepcopy(self.plan)
+        plan['agpw_version'] = 2
+        for edge, slot in zip(plan['directed_edges'], (4, 5, 3, 7)):
+            edge['slot'] = slot
+        plan['directed_edges'][1].update(flags=1, jumpVelocity=[100.25, -50.5, 20.0])
+        decoded = audit.decode_agpw(export(plan))
+        self.assertEqual(decoded['nodes'][0]['index[4]'], 1)
+        self.assertEqual(decoded['nodes'][0]['index[3]'], -1)
+        self.assertEqual(decoded['nodes'][1]['index[5]'], 2)
+        self.assertEqual(decoded['nodes'][1]['index[7]'], 0)
+        self.assertEqual(decoded['nodes'][1]['connectionFlags[5]'], 1)
+        self.assertEqual(decoded['nodes'][1]['jumpVelocity'][5], [100.25, -50.5, 20.0])
+        self.assertEqual(decoded['nodes'][1]['jumpVelocity'][0], [0.0, 0.0, 0.0])
+        self.assertTrue(audit.compare(plan, export(plan))['fields_match'])
+
+    def test_explicit_contiguous_slots_are_byte_identical_to_legacy(self):
+        plan = copy.deepcopy(self.plan)
+        next_slot = {}
+        for edge in plan['directed_edges']:
+            source = edge['from']
+            edge['slot'] = next_slot.get(source, 0)
+            next_slot[source] = edge['slot'] + 1
+        for version in (1, 2):
+            self.plan['agpw_version'] = plan['agpw_version'] = version
+            self.assertEqual(export(self.plan), export(plan))
+
+    def test_duplicate_invalid_and_mixed_source_slots_rejected(self):
+        for value in (-1, 8, 1.0, True, '1'):
+            plan = copy.deepcopy(self.plan)
+            plan['directed_edges'][0]['slot'] = value
+            with self.subTest(slot=value), self.assertRaises(ValueError):
+                export(plan)
+        plan = copy.deepcopy(self.plan)
+        plan['directed_edges'][1]['slot'] = 5
+        with self.assertRaisesRegex(ValueError, 'all explicit'):
+            export(plan)
+        plan['directed_edges'][3]['slot'] = 5
+        with self.assertRaisesRegex(ValueError, 'Duplicate outgoing'):
+            export(plan)
+
     def test_legacy_bytes_unchanged_and_zero_v2_is_semantically_equivalent(self):
         legacy = export(self.plan)
         self.assertEqual((HEADER.unpack_from(legacy)[1], NODE.size, NODE_V2.size), (1, 54, 150))
