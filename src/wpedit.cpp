@@ -914,7 +914,7 @@ static void BuildContextMessage( char *pszOut, int iMaxLen )
 
 	Q_snprintf( pszOut, iMaxLen,
 	            "%d 个路点 | 模式 %s | 最近 %s (半径 %d %s) | 指向 %s | 缓存 %s",
-	            wp.Count(), AgPB_GameModeName( AgPB_GameMode() ),
+	            wp.Count(), AgPB_GameMode() == AgPB_MODE_ZOMBIE ? "僵尸" : "普通",
 	            szNear, iRadius, szFlags, szFacing, szCache );
 }
 
@@ -935,17 +935,21 @@ void AgPB_OpenMenu( edict_t *pClient, int iMenuId )
 		case AgPB_MENU_MAIN:
 		{
 			menu.Reset( "AgPB 主菜单" );
-			menu.AddItem( "路点菜单", 1 );
-			menu.AddItem( "显示/隐藏 路点", 2 );
+			menu.AddItem( "机器人管理", 4 );
+			menu.AddItem( "功能...", 8 );
+			menu.AddItem( "填满服务器", 9 );
+			menu.SetItem( 5, "显示/隐藏 路点", 2 );
 			menu.AddItem( "显示/隐藏 序号", 3 );
-			menu.AddItem( "加一个 T bot", 4 );
-			menu.AddItem( "加一个 CT bot", 5 );
-			menu.AddItem( "踢掉所有 bot", 6 );
-			menu.AddItem( "保存路点", 7 );
-			menu.AddItem( "路点统计", 8 );
-			menu.AddItem( "配色说明(控制台)", 9 );
+			menu.AddItem( "保存路点", 5 );
+			menu.AddItem( "路点统计", 6 );
+			menu.AddItem( "配色说明(控制台)", 7 );
 			break;
 		}
+
+		case AgPB_MENU_FEATURES:
+			menu.Reset( "AgPB 功能" );
+			menu.SetItem( 2, "路点菜单", 1 );
+			break;
 
 		case AgPB_MENU_WP_MAIN:
 		{
@@ -956,8 +960,7 @@ void AgPB_OpenMenu( edict_t *pClient, int iMenuId )
 			menu.AddItem( "删除连线(到目标)", 4 );
 			menu.AddItem( "添加路点...", 5 );
 			menu.AddItem( "删除路点(最近那个)", 6 );
-			menu.AddItem( "设置半径...", 7 );
-			menu.AddItem( "设置标志...", 8 );
+			menu.SetItem( 8, "设置半径...", 7 );
 			menu.AddItem( "下一页...", 9 );
 			break;
 		}
@@ -966,14 +969,23 @@ void AgPB_OpenMenu( edict_t *pClient, int iMenuId )
 		{
 			menu.Reset( "路点操作 (2/2)", szContext );
 			menu.AddItem( "路点统计", 1 );
-			menu.AddItem( "检查路点", 2 );
-			menu.AddItem( "传送到目标点", 3 );
-			menu.AddItem( "穿墙(noclip)开关", 4 );
-			menu.AddItem( "保存路点", 5 );
+			menu.AddItem( "编辑辅助...", 2 );
+			menu.AddItem( "设置标志...", 3 );
+			menu.SetItem( 5, "直接保存路点", 5 );
 			menu.AddItem( "重新载入路点", 6 );
-			menu.AddItem( "配色说明(控制台)", 7 );
+			menu.AddItem( "检查路点", 7 );
+			menu.AddItem( "穿墙开关", 4 );
 			menu.AddItem( "上一页...", 8 );
-			menu.AddItem( "连线显示:全部/仅最近", 9 );
+			break;
+		}
+
+		case AgPB_MENU_WP_TOOLS:
+		{
+			menu.Reset( "路点编辑辅助", szContext );
+			menu.AddItem( "传送到目标点", 1 );
+			menu.AddItem( "连线显示:全部/仅最近", 2 );
+			menu.AddItem( "配色说明(控制台)", 3 );
+			menu.SetItem( 9, "返回...", 9 );
 			break;
 		}
 
@@ -981,27 +993,27 @@ void AgPB_OpenMenu( edict_t *pClient, int iMenuId )
 		{
 			menu.Reset( "路点类型 (1/2)", szContext );
 			menu.AddItem( "普通点", 1 );
-			menu.AddItem( "T 重要点", 2 );
-			menu.AddItem( "CT 重要点", 3 );
-			menu.AddItem( "回避点", 4 );
+			menu.AddItem( "匪方重要点", 2 );
+			menu.AddItem( "反恐方重要点", 3 );
+			menu.AddItem( "梯子点", 4 );
 			menu.AddItem( "人质救援点", 5 );
 			menu.AddItem( "蹲守点", 6 );
+			menu.AddItem( "更多类型...", 9 );
 			menu.AddItem( "地图目标点", 7 );
 			menu.AddItem( "跳跃点", 8 );
-			menu.AddItem( "更多类型...", 9 );
 			break;
 		}
 
 		case AgPB_MENU_WP_ADD2:
 		{
 			menu.Reset( "路点类型 (2/2)", szContext );
-			menu.AddItem( "蹲行点", 1 );
-			menu.AddItem( "梯子点", 2 );
-			menu.AddItem( "需要按按钮", 3 );
-			menu.AddItem( "狙击点", 4 );
 			menu.AddItem( "等电梯", 5 );
+			menu.AddItem( "狙击点", 4 );
+			menu.SetItem( 4, "蹲行点", 1 );
+			menu.AddItem( "需要按按钮", 3 );
 			menu.AddItem( "需要看脚下", 6 );
 			menu.AddItem( "别侧移(防掉落)", 7 );
+			menu.AddItem( "回避点", 2 );
 			menu.AddItem( "返回...", 8 );
 			break;
 		}
@@ -1009,29 +1021,29 @@ void AgPB_OpenMenu( edict_t *pClient, int iMenuId )
 		case AgPB_MENU_WP_FLAGS1:
 		{
 			menu.Reset( "切换路点标志 (1/2)", szContext );
-			menu.AddItem( "需要看脚下", 1 );
-			menu.AddItem( "T 专用", 2 );
-			menu.AddItem( "CT 专用", 3 );
+			menu.SetItem( 2, "匪方专用", 2 );
+			menu.AddItem( "反恐方专用", 3 );
 			menu.AddItem( "等电梯", 4 );
-			menu.AddItem( "需要按按钮", 5 );
 			menu.AddItem( "狙击点", 6 );
-			menu.AddItem( "别侧移(防掉落)", 7 );
-			menu.AddItem( "清空所有标志", 8 );
 			menu.AddItem( "下一页...", 9 );
+			menu.AddItem( "蹲行点", 10 );
+			menu.AddItem( "驻守点", 11 );
+			menu.AddItem( "清空所有标志", 8 );
 			break;
 		}
 
 		case AgPB_MENU_WP_FLAGS2:
 		{
 			menu.Reset( "切换路点标志 (2/2)", szContext );
-			menu.AddItem( "Crouch", 1 );
-			menu.AddItem( "Jump", 2 );
-			menu.AddItem( "Camping", 3 );
-			menu.AddItem( "Map goal", 4 );
-			menu.AddItem( "Rescue zone", 5 );
-			menu.AddItem( "Avoid", 6 );
-			menu.AddItem( "Ladder", 7 );
-			menu.AddItem( "Previous page...", 8 );
+			menu.AddItem( "需要看脚下", 1 );
+			menu.AddItem( "跳跃点", 2 );
+			menu.AddItem( "需要按按钮", 3 );
+			menu.AddItem( "地图目标点", 4 );
+			menu.AddItem( "人质救援点", 5 );
+			menu.AddItem( "回避点", 6 );
+			menu.AddItem( "梯子点", 7 );
+			menu.AddItem( "别侧移(防掉落)", 9 );
+			menu.AddItem( "上一页...", 8 );
 			break;
 		}
 
@@ -1056,10 +1068,10 @@ void AgPB_OpenMenu( edict_t *pClient, int iMenuId )
 			menu.AddItem( "单向:最近->目标", 1 );
 			menu.AddItem( "单向:目标->最近", 2 );
 			menu.AddItem( "双向", 3 );
+			menu.AddItem( "删除这条连线", 7 );
 			menu.AddItem( "跳跃连线", 4 );
 			menu.AddItem( "叠罗汉连线", 5 );
 			menu.AddItem( "仅通视", 6 );
-			menu.AddItem( "删除这条连线", 7 );
 			menu.AddItem( "返回...", 8 );
 			menu.AddItem( "添加路点...", 9 );
 			break;
@@ -1088,34 +1100,21 @@ void AgPB_MenuDispatch( edict_t *pClient, int iMenuId, int iChoice )
 		{
 			switch ( iChoice )
 			{
-				case 1: AgPB_OpenMenu( pClient, AgPB_MENU_WP_MAIN ); break;
 				case 2: AgPB_EditToggleShow( pClient ); break;
 				case 3: AgPB_EditToggleLabels( pClient ); break;
-				case 4:
-				{
-					char szError[256];
-					if ( AgPB_Bots().Add( AgPB_TEAM_T, szError, sizeof( szError ) ) != NULL )
-						META_CONPRINTF( "[AgPB] bot added (T) from menu\n" );
-					else
-						META_CONPRINTF( "[AgPB] add bot failed: %s\n", szError );
-					break;
-				}
-				case 5:
-				{
-					char szError[256];
-					if ( AgPB_Bots().Add( AgPB_TEAM_CT, szError, sizeof( szError ) ) != NULL )
-						META_CONPRINTF( "[AgPB] bot added (CT) from menu\n" );
-					else
-						META_CONPRINTF( "[AgPB] add bot failed: %s\n", szError );
-					break;
-				}
-				case 6: AgPB_Bots().RemoveAll(); META_CONPRINTF( "[AgPB] all bots kicked\n" ); break;
-				case 7: BotWaypoints().Save(); PrintTo( pClient, "waypoints saved: %s\n", BotWaypoints().Status() ); break;
-				case 8: AgPB_EditStats( pClient ); break;
-				case 9: AgPB_DrawPrintLegend( pClient ); break;
+				case 4: AgPB_OpenBotControlMenu( pClient ); break;
+				case 5: BotWaypoints().Save(); PrintTo( pClient, "waypoints saved: %s\n", BotWaypoints().Status() ); break;
+				case 6: AgPB_EditStats( pClient ); break;
+				case 7: AgPB_DrawPrintLegend( pClient ); break;
+				case 8: AgPB_OpenMenu( pClient, AgPB_MENU_FEATURES ); break;
+				case 9: AgPB_OpenBotFillMenu( pClient ); break;
 			}
 			break;
 		}
+
+		case AgPB_MENU_FEATURES:
+			AgPB_OpenMenu( pClient, AgPB_MENU_WP_MAIN );
+			break;
 
 		case AgPB_MENU_WP_MAIN:
 		{
@@ -1128,7 +1127,6 @@ void AgPB_MenuDispatch( edict_t *pClient, int iMenuId, int iChoice )
 				case 5: AgPB_OpenMenu( pClient, AgPB_MENU_WP_ADD ); break;
 				case 6: AgPB_EditDeleteNearest( pClient ); AgPB_OpenMenu( pClient, AgPB_MENU_WP_MAIN ); break;
 				case 7: AgPB_OpenMenu( pClient, AgPB_MENU_WP_RADIUS ); break;
-				case 8: AgPB_OpenMenu( pClient, AgPB_MENU_WP_FLAGS1 ); break;
 				case 9: AgPB_OpenMenu( pClient, AgPB_MENU_WP_PAGE2 ); break;
 			}
 			break;
@@ -1139,8 +1137,22 @@ void AgPB_MenuDispatch( edict_t *pClient, int iMenuId, int iChoice )
 			switch ( iChoice )
 			{
 				case 1: AgPB_EditStats( pClient ); AgPB_OpenMenu( pClient, AgPB_MENU_WP_PAGE2 ); break;
-				case 2: AgPB_EditCheck( pClient ); AgPB_OpenMenu( pClient, AgPB_MENU_WP_PAGE2 ); break;
-				case 3:
+				case 2: AgPB_OpenMenu( pClient, AgPB_MENU_WP_TOOLS ); break;
+				case 3: AgPB_OpenMenu( pClient, AgPB_MENU_WP_FLAGS1 ); break;
+				case 4: AgPB_EditToggleNoclip( pClient ); AgPB_OpenMenu( pClient, AgPB_MENU_WP_PAGE2 ); break;
+				case 5: BotWaypoints().Save(); PrintTo( pClient, "waypoints saved: %s\n", BotWaypoints().Status() ); AgPB_OpenMenu( pClient, AgPB_MENU_WP_PAGE2 ); break;
+				case 6: BotWaypoints().Load(); PrintTo( pClient, "waypoints loaded: %s\n", BotWaypoints().Status() ); AgPB_OpenMenu( pClient, AgPB_MENU_WP_PAGE2 ); break;
+				case 7: AgPB_EditCheck( pClient ); AgPB_OpenMenu( pClient, AgPB_MENU_WP_PAGE2 ); break;
+				case 8: AgPB_OpenMenu( pClient, AgPB_MENU_WP_MAIN ); break;
+			}
+			break;
+		}
+
+		case AgPB_MENU_WP_TOOLS:
+		{
+			switch ( iChoice )
+			{
+				case 1:
 				{
 					int iTarget = AgPB_EditTargetWaypoint();
 
@@ -1148,15 +1160,12 @@ void AgPB_MenuDispatch( edict_t *pClient, int iMenuId, int iChoice )
 						iTarget = BotWaypointEditor().iNearest;
 
 					AgPB_EditTeleport( pClient, iTarget );
-					AgPB_OpenMenu( pClient, AgPB_MENU_WP_PAGE2 );
+					AgPB_OpenMenu( pClient, AgPB_MENU_WP_TOOLS );
 					break;
 				}
-				case 4: AgPB_EditToggleNoclip( pClient ); AgPB_OpenMenu( pClient, AgPB_MENU_WP_PAGE2 ); break;
-				case 5: BotWaypoints().Save(); PrintTo( pClient, "waypoints saved: %s\n", BotWaypoints().Status() ); AgPB_OpenMenu( pClient, AgPB_MENU_WP_PAGE2 ); break;
-				case 6: BotWaypoints().Load(); PrintTo( pClient, "waypoints loaded: %s\n", BotWaypoints().Status() ); AgPB_OpenMenu( pClient, AgPB_MENU_WP_PAGE2 ); break;
-				case 7: AgPB_DrawPrintLegend( pClient ); AgPB_OpenMenu( pClient, AgPB_MENU_WP_PAGE2 ); break;
-				case 8: AgPB_OpenMenu( pClient, AgPB_MENU_WP_MAIN ); break;
-				case 9: AgPB_EditToggleAllLinks( pClient ); AgPB_OpenMenu( pClient, AgPB_MENU_WP_PAGE2 ); break;
+				case 2: AgPB_EditToggleAllLinks( pClient ); AgPB_OpenMenu( pClient, AgPB_MENU_WP_TOOLS ); break;
+				case 3: AgPB_DrawPrintLegend( pClient ); AgPB_OpenMenu( pClient, AgPB_MENU_WP_TOOLS ); break;
+				case 9: AgPB_OpenMenu( pClient, AgPB_MENU_WP_PAGE2 ); break;
 			}
 			break;
 		}
@@ -1168,7 +1177,7 @@ void AgPB_MenuDispatch( edict_t *pClient, int iMenuId, int iChoice )
 				case 1: AddWaypointByFlags( pClient, 0, "normal" ); break;
 				case 2: AddWaypointByFlags( pClient, AgPB_WP_TERRORIST, "terrorist" ); break;
 				case 3: AddWaypointByFlags( pClient, AgPB_WP_COUNTER, "ct" ); break;
-				case 4: AddWaypointByFlags( pClient, AgPB_WP_AVOID, "avoid" ); break;
+				case 4: AddWaypointByFlags( pClient, AgPB_WP_LADDER, "ladder" ); break;
 				case 5: AddWaypointByFlags( pClient, AgPB_WP_RESCUE, "rescue" ); break;
 				case 6: AddWaypointByFlags( pClient, AgPB_WP_CAMP, "camp" ); break;
 				case 7: AddWaypointByFlags( pClient, AgPB_WP_GOAL, "goal" ); break;
@@ -1183,7 +1192,7 @@ void AgPB_MenuDispatch( edict_t *pClient, int iMenuId, int iChoice )
 			switch ( iChoice )
 			{
 				case 1: AddWaypointByFlags( pClient, AgPB_WP_CROUCH, "crouch" ); break;
-				case 2: AddWaypointByFlags( pClient, AgPB_WP_LADDER, "ladder" ); break;
+				case 2: AddWaypointByFlags( pClient, AgPB_WP_AVOID, "avoid" ); break;
 				case 3: AddWaypointByFlags( pClient, AgPB_WP_USEBUTTON, "usebutton" ); break;
 				case 4: AddWaypointByFlags( pClient, AgPB_WP_SNIPER, "sniper" ); break;
 				case 5: AddWaypointByFlags( pClient, AgPB_WP_LIFT, "lift" ); break;
@@ -1198,15 +1207,14 @@ void AgPB_MenuDispatch( edict_t *pClient, int iMenuId, int iChoice )
 		{
 			switch ( iChoice )
 			{
-				case 1: AgPB_EditToggleFlag( pClient, AgPB_WP_FALLCHECK, "FALLCHECK" ); AgPB_OpenMenu( pClient, AgPB_MENU_WP_FLAGS1 ); break;
 				case 2: AgPB_EditToggleFlag( pClient, AgPB_WP_TERRORIST, "T" ); AgPB_OpenMenu( pClient, AgPB_MENU_WP_FLAGS1 ); break;
 				case 3: AgPB_EditToggleFlag( pClient, AgPB_WP_COUNTER, "CT" ); AgPB_OpenMenu( pClient, AgPB_MENU_WP_FLAGS1 ); break;
 				case 4: AgPB_EditToggleFlag( pClient, AgPB_WP_LIFT, "LIFT" ); AgPB_OpenMenu( pClient, AgPB_MENU_WP_FLAGS1 ); break;
-				case 5: AgPB_EditToggleFlag( pClient, AgPB_WP_USEBUTTON, "USEBUTTON" ); AgPB_OpenMenu( pClient, AgPB_MENU_WP_FLAGS1 ); break;
 				case 6: AgPB_EditToggleFlag( pClient, AgPB_WP_SNIPER, "SNIPER" ); AgPB_OpenMenu( pClient, AgPB_MENU_WP_FLAGS1 ); break;
-				case 7: AgPB_EditToggleFlag( pClient, AgPB_WP_FALLRISK, "FALLRISK" ); AgPB_OpenMenu( pClient, AgPB_MENU_WP_FLAGS1 ); break;
 				case 8: AgPB_EditClearFlags( pClient ); AgPB_OpenMenu( pClient, AgPB_MENU_WP_FLAGS1 ); break;
 				case 9: AgPB_OpenMenu( pClient, AgPB_MENU_WP_FLAGS2 ); break;
+				case 10: AgPB_EditToggleFlag( pClient, AgPB_WP_CROUCH, "CROUCH" ); AgPB_OpenMenu( pClient, AgPB_MENU_WP_FLAGS1 ); break;
+				case 11: AgPB_EditToggleFlag( pClient, AgPB_WP_CAMP, "CAMP" ); AgPB_OpenMenu( pClient, AgPB_MENU_WP_FLAGS1 ); break;
 			}
 			break;
 		}
@@ -1215,14 +1223,15 @@ void AgPB_MenuDispatch( edict_t *pClient, int iMenuId, int iChoice )
 		{
 			switch ( iChoice )
 			{
-				case 1: AgPB_EditToggleFlag( pClient, AgPB_WP_CROUCH, "CROUCH" ); AgPB_OpenMenu( pClient, AgPB_MENU_WP_FLAGS2 ); break;
+				case 1: AgPB_EditToggleFlag( pClient, AgPB_WP_FALLCHECK, "FALLCHECK" ); AgPB_OpenMenu( pClient, AgPB_MENU_WP_FLAGS2 ); break;
 				case 2: AgPB_EditToggleFlag( pClient, AgPB_WP_JUMP, "JUMP" ); AgPB_OpenMenu( pClient, AgPB_MENU_WP_FLAGS2 ); break;
-				case 3: AgPB_EditToggleFlag( pClient, AgPB_WP_CAMP, "CAMP" ); AgPB_OpenMenu( pClient, AgPB_MENU_WP_FLAGS2 ); break;
+				case 3: AgPB_EditToggleFlag( pClient, AgPB_WP_USEBUTTON, "USEBUTTON" ); AgPB_OpenMenu( pClient, AgPB_MENU_WP_FLAGS2 ); break;
 				case 4: AgPB_EditToggleFlag( pClient, AgPB_WP_GOAL, "GOAL" ); AgPB_OpenMenu( pClient, AgPB_MENU_WP_FLAGS2 ); break;
 				case 5: AgPB_EditToggleFlag( pClient, AgPB_WP_RESCUE, "RESCUE" ); AgPB_OpenMenu( pClient, AgPB_MENU_WP_FLAGS2 ); break;
 				case 6: AgPB_EditToggleFlag( pClient, AgPB_WP_AVOID, "AVOID" ); AgPB_OpenMenu( pClient, AgPB_MENU_WP_FLAGS2 ); break;
 				case 7: AgPB_EditToggleFlag( pClient, AgPB_WP_LADDER, "LADDER" ); AgPB_OpenMenu( pClient, AgPB_MENU_WP_FLAGS2 ); break;
 				case 8: AgPB_OpenMenu( pClient, AgPB_MENU_WP_FLAGS1 ); break;
+				case 9: AgPB_EditToggleFlag( pClient, AgPB_WP_FALLRISK, "FALLRISK" ); AgPB_OpenMenu( pClient, AgPB_MENU_WP_FLAGS2 ); break;
 			}
 			break;
 		}
@@ -1255,6 +1264,10 @@ void AgPB_MenuDispatch( edict_t *pClient, int iMenuId, int iChoice )
 			}
 			break;
 		}
+
+		default:
+			AgPB_BotMenuDispatch( pClient, iMenuId, iChoice );
+			break;
 	}
 }
 

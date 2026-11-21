@@ -62,9 +62,72 @@ static void CrouchJumpLaunchLifecycle() {
     Require(ShouldInject(state, authored, conditions),
         "airborne rejection does not spend a never-issued grounded launch");
 }
+static void LaunchCommandSteering() {
+    using namespace AgPBJump;
+    struct Command {
+        struct Angles { float x, y, z; } viewangles;
+        float forwardmove, sidemove, upmove;
+        int buttons;
+    };
+    const int jump = 1 << 1, duck = 1 << 2;
+    const Command west = {{7, 180, 2}, 250, 37, 9, jump | duck};
+    const Vector3 authored(210, 0, -70); // cs_office 350->358 launches east.
+    State state; SetLeg(state, 350, 358);
+    Conditions conditions; conditions.grounded = conditions.routeOwned = true;
+    Command fresh = west;
+    Require(PrepareLaunchCommand(state, authored, conditions, true, 0, jump, fresh) &&
+        fresh.viewangles.x == 0 && fresh.viewangles.y == 0 && fresh.viewangles.z == 0 &&
+        fresh.sidemove == 0 && fresh.forwardmove == west.forwardmove && fresh.upmove == west.upmove &&
+        fresh.buttons == west.buttons,
+        "a fresh accepted authored launch snaps once while retaining its native jump and other input");
+    MarkIssued(state);
+    // The real failure landed at the wrong height after passing the target.
+    // Posture requests jump again, but the spent impulse must preserve the
+    // route's westward steering instead of forcing the old eastward launch.
+    const bool landed = AgPBTerminal::LandedJump(true, true, true, 16);
+    const AgPBTerminal::RoutePosture posture = AgPBTerminal::ComputeRoutePosture(
+        false, false, false, 160, true, landed, true, false);
+    Require(!landed && posture.jump, "wrong-height grounded landing reproduces the native route jump request");
+    for (int tick = 0; tick < 20; ++tick) {
+        Command issued = west;
+        Require(!PrepareLaunchCommand(state, authored, conditions, true, 0, jump, issued) &&
+            issued.buttons == duck && issued.viewangles.x == west.viewangles.x &&
+            issued.viewangles.y == west.viewangles.y && issued.viewangles.z == west.viewangles.z &&
+            issued.forwardmove == west.forwardmove && issued.sidemove == west.sidemove &&
+            issued.upmove == west.upmove,
+            "spent off-height jump releases only jump and preserves all route view and movement fields");
+    }
+    conditions.grounded = false;
+    Command airborne = west;
+    Require(!PrepareLaunchCommand(state, authored, conditions, true, 0, jump, airborne) &&
+        airborne.viewangles.y == 180 && airborne.sidemove == west.sidemove,
+        "an issued airborne leg neither reinjects nor overwrites route steering");
+    conditions.grounded = true; conditions.previousJump = true;
+    Reset(state); SetLeg(state, 350, 358);
+    Command waiting = west;
+    Require(!PrepareLaunchCommand(state, authored, conditions, true, 0, jump, waiting) &&
+        !state.issued && waiting.buttons == duck && waiting.forwardmove == 0 && waiting.sidemove == 0 &&
+        waiting.upmove == 0 && waiting.viewangles.x == 7 && waiting.viewangles.y == 180 && waiting.viewangles.z == 2,
+        "an unissued launch waiting for release pauses movement without snapping to an unaccepted launch");
+    Command ordinary = west;
+    Require(!PrepareLaunchCommand(state, Vector3(), conditions, true, 90, jump, ordinary) &&
+        ordinary.buttons == west.buttons && ordinary.viewangles.x == 0 && ordinary.viewangles.y == 90 &&
+        ordinary.viewangles.z == 0 && ordinary.sidemove == 0 && ordinary.forwardmove == west.forwardmove,
+        "zero-vector ordinary jumping keeps native input and the target-direction view snap without injection");
+    conditions.previousJump = false;
+    Command vertical = west;
+    Require(PrepareLaunchCommand(state, Vector3(0, 0, -70), conditions, true, 180, jump, vertical) &&
+        vertical.viewangles.y == 180 && vertical.sidemove == 0,
+        "a fresh purely vertical authored impulse may still face the caller's target direction");
+    Command noRequest = west; noRequest.buttons = duck;
+    Require(!PrepareLaunchCommand(state, authored, conditions, true, 0, jump, noRequest) &&
+        noRequest.viewangles.y == 180 && noRequest.sidemove == west.sidemove,
+        "without an actual jump request command preparation changes no steering");
+}
 int main() {
     using namespace AgPBJump;
     CrouchJumpLaunchLifecycle();
+    LaunchCommandSteering();
     const float dt = 1.0f / 64.0f;
     const float nan = std::numeric_limits<float>::quiet_NaN();
     const float infinity = std::numeric_limits<float>::infinity();

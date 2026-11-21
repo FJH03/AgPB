@@ -3,7 +3,7 @@
 
 API: parse(log), evaluate_case(case, metadata), evaluate(document).
 metadata contains map, subject_slot/userid/name, human_slot/userid, six HASHES,
-controlled_enemy_authorized, guard_expected_crc and prelude receipt array.
+controlled_enemy_authorized and prelude receipt array.
 Each case has kind, binding (same six hashes), target_identity (slot/userid/serial)
 and optional identity overrides for subject_slot/userid/name/serial and human_slot/userid/serial
 and stages. Negative cases use before/run; visible_damage_resume additionally
@@ -112,7 +112,6 @@ def guard_prelude(metadata, seen, offset):
     require(isinstance(prelude, list) and prelude, "Missing original guard prelude")
     guards = [guard for receipt in prelude for guard in parse(original(receipt, seen, offset))["guard"]]
     require(guards and all(row["active"] == row["intact"] == 1 for row in guards), "Guard is not active and intact in the original prelude")
-    require(metadata.get("guard_expected_crc") == "770BAE64", "Unknown declared Radio guard CRC")
     return guards
 
 

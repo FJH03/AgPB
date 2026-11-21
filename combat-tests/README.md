@@ -44,7 +44,7 @@ agpb_match_clear
 
 ## 离线复核
 
-证据保留完整原始回执及 ACK 外事件，绑定计划、AGPW、BSP、DLL、实际探针 SMX 与 server 二进制哈希；记录授权、guard 状态与预期 CRC。每个 case 保留身份及原始 stages，字段约定见验证器模块说明和测试样本。
+证据保留完整原始回执及 ACK 外事件，绑定计划、AGPW、BSP、DLL、实际探针 SMX 与 server 二进制哈希；记录授权及 guard 的原始 `active=1 intact=1` 回执，不要求固定的预期 CRC 元数据。每个 case 保留身份及原始 stages，字段约定见验证器模块说明和测试样本。
 
 ```powershell
 py -B .\combat-tests\verify_combat.py (Join-Path $sessionDir 'combat-evidence.json')

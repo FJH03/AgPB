@@ -2,12 +2,10 @@
  * AgPB normal-mode player avoidance policy. GPL-3.0-only.
  * Baseline: SyPB 4c364fb source/navigate.cpp CheckCloseAvoidance/CheckTerrain.
  * Compared with CS-EBOT 2333562 source/navigate.cpp GetPlayerPriority and
- * CheckTerrain: human-first ordering, bounded motion prediction and side probes.
- * Zombie/semiclip/NPC behavior and automatic waypoint creation are excluded.
- * AgPB adaptation applies to authorized travel without SyPB's recent-enemy
- * gate. Caller owns full player identities, world hull/floor probes,
- * task authority, and replanning along the existing manually authored graph.
- * This policy changes only a world movement wish, never buttons or posture.
+ * CheckTerrain for human/slot priority and side probes during physical jams.
+ * The caller gathers living teammates and checks the world hull and floor
+ * before submitting a changed movement wish. Recovery requests retain task
+ * authority and use the existing manually authored graph.
  *
  * Copyright (c) 2003-2023, by HsK-Dev Blog.
  * Copyright (c) 2003-2009, by Yet Another POD-Bot Development Team.
@@ -32,6 +30,7 @@
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
+#include <tuple>
 
 namespace AgPBPlayerAvoid {
 struct Vec2 {
@@ -55,39 +54,45 @@ inline Vec2 Limit(Vec2 v, float maximum) {
 }
 struct Neighbor {
     std::uint64_t handle = 0;
-    int userid = 0, slot = 0, team = 0, priority = 0;
-    Vec2 position, velocity;
+    int userid = 0, slot = 0, team = 0;
+    Vec2 position, velocity, wish;  // Most recent authorized travel wish before avoidance.
+    Vec2 hullMins, hullMaxs;        // Horizontal hull offsets from position.
+    float z = 0.0f;
     float bottom = 0.0f, top = 0.0f; // World-space hull heights, not offsets.
-    Vec2 intent;                   // World desired direction/wish; zero falls back to velocity.
+    bool canYield = false;          // A managed bot currently eligible for ground avoidance.
 };
 struct Input {
     float now = 0.0f, interval = 0.0f, maxSpeed = 0.0f;
     Vec2 position, velocity, wish; // Original command wish, before avoidance.
+    Vec2 hullMins, hullMaxs;
+    float z = 0.0f;
     float bottom = 0.0f, top = 0.0f;
-    int team = 0, priority = 0;     // EBot ordering: smaller wins; humans 1, AgPB slot+3.
+    int team = 0, slot = 0;
     std::uint64_t owner = 0;       // Current task/route authority; zero cannot retain state.
-    bool ducking = false;
+    bool ducking = false, recentEnemy = false;
 };
 struct Contact {
     bool valid = false;
     std::uint64_t handle = 0;
-    int userid = 0, slot = 0, priority = 0;
-    bool yielding = false;
-    float distance = 0.0f;
+    int userid = 0, slot = 0;
     int preferredSide = 0;         // +1 right, -1 left in the original wish basis.
-    bool headOn = false;
+    Vec2 approach;                 // Initial world direction of a physical jam.
+    bool retreat = false, physical = false, yielding = true;
 };
 struct State {
     std::uint64_t owner = 0, handle = 0;
     int userid = 0, slot = 0;
     float lastTime = -1.0f, blockedSince = -1.0f;
     int side = 0;
-    float sideUntil = 0.0f, nextReplanAt = 0.0f;
+    float nextReplanAt = 0.0f;
+    Vec2 approach;
+    bool physical = false, yielding = false;
 };
 struct Probes {
-    // Each flag certifies the entire corresponding CandidateWish, including
+    // Each flag certifies the entire corresponding wish, including
     // players, walls, legal step height and ground support. Unset means unsafe.
     bool right = false, left = false, back = false, rightBack = false, leftBack = false;
+    bool rightOnly = false, leftOnly = false;
 };
 struct Output {
     Vec2 wish;
@@ -99,120 +104,184 @@ inline bool Valid(const Input &in) {
     return std::isfinite(in.now) && in.now >= 0.0f && std::isfinite(in.interval) && in.interval > 0.0f &&
         std::isfinite(in.maxSpeed) && in.maxSpeed > 0.0f && Finite(in.position) && Finite(in.velocity) &&
         Finite(in.wish) && std::isfinite(Length(in.wish)) && std::isfinite(Length(in.velocity)) &&
-        std::isfinite(in.bottom) && std::isfinite(in.top) && in.top > in.bottom &&
-        (in.team == 2 || in.team == 3) && in.priority > 0;
-}
-inline float PredictionSeconds(const Input &in) {
-    // EBot scales the movement frame by 10 when running, 5 when slow/ducked.
-    // Source adaptation caps the public prediction horizon at .2 seconds.
-    const float multiplier = !in.ducking && Length(in.velocity) > 14.0f ? 10.0f : 5.0f;
-    const float predicted = in.interval * multiplier;
-    return predicted < 0.2f ? predicted : 0.2f;
+        std::isfinite(in.z) && std::isfinite(in.bottom) && std::isfinite(in.top) && in.top > in.bottom &&
+        (in.team == 2 || in.team == 3);
 }
 inline Vec2 CandidateWish(const Input &in, int side, bool retreat = false) {
     // Shared with the caller so the tested hull vector is the submitted vector.
-    // side=0,retreat=true is straight back; side=0,false is the original wish.
     if (!Valid(in)) return Vec2();
     const Vec2 original = Limit(in.wish, in.maxSpeed);
     const float speed = Length(original);
     if (speed <= 0.0001f || side == 0) return retreat ? Scale(original, -1.0f) : original;
     const Vec2 forward = Unit(original), right(forward.y, -forward.x);
     const float sign = side > 0 ? 1.0f : -1.0f;
-    const Vec2 direction = Add(Scale(forward, retreat ? -0.7f : 0.35f),
-        Scale(right, sign * (retreat ? 0.7f : 1.0f)));
+    // Keep SyPB's relative forward and strafe magnitudes while respecting the
+    // Source command's existing speed budget (including walking and ducking).
+    const Vec2 direction = Add(Scale(forward, retreat ? -1.0f : speed / in.maxSpeed), Scale(right, sign));
     return Limit(Scale(Unit(direction), speed), speed);
 }
-inline Contact FindContact(const Input &in, const Neighbor *neighbors, std::size_t count) {
-    Contact best;
-    if (!Valid(in) || neighbors == NULL || Length(in.wish) <= 0.0001f) return best;
+inline Vec2 SideWish(const Input &in, int side) {
+    if (!Valid(in) || side == 0) return Vec2();
+    const Vec2 wish = Limit(in.wish, in.maxSpeed);
+    return side > 0 ? Vec2(wish.y, -wish.x) : Vec2(-wish.y, wish.x);
+}
+inline Input SteeringInput(const Input &in, const Contact &contact) {
+    Input steering = in;
+    // A route wish can turn sharply around an occupied waypoint. Keep the
+    // escape direction fixed while taking the speed budget from the current wish.
+    if (contact.physical && Length(contact.approach) > 0.0001f)
+        steering.wish = Scale(contact.approach, Length(Limit(in.wish, in.maxSpeed)));
+    return steering;
+}
+inline bool ValidHull(Vec2 mins, Vec2 maxs) {
+    return Finite(mins) && Finite(maxs) && mins.x < maxs.x && mins.y < maxs.y;
+}
+inline bool ClipSweepAxis(float heading, float mins, float maxs, float &enter, float &leave) {
+    if (std::fabs(heading) < 0.0001f) return mins < 0.0f && maxs > 0.0f;
+    const float a = mins / heading, b = maxs / heading;
+    enter = std::fmax(enter, std::fmin(a, b));
+    leave = std::fmin(leave, std::fmax(a, b));
+    return enter < leave;
+}
+inline float PlayerSweep(Vec2 offset, Vec2 heading, Vec2 mins, Vec2 maxs, float distance) {
+    // Sweep the moving origin against the neighbor box expanded by our hull.
+    // Exact tangency and any movement already separating an overlap can pass.
+    const bool overlapping = mins.x < 0.0f && maxs.x > 0.0f && mins.y < 0.0f && maxs.y > 0.0f;
+    if (Length(heading) < 0.0001f || (overlapping && Length(offset) > 0.0001f && Dot(offset, heading) <= 0.0f))
+        return -1.0f;
+    float enter = 0.0f, leave = distance;
+    return ClipSweepAxis(heading.x, mins.x, maxs.x, enter, leave) &&
+        ClipSweepAxis(heading.y, mins.y, maxs.y, enter, leave) ? enter : -1.0f;
+}
+inline bool SamePlayer(const State &state, const Neighbor &n) {
+    return state.handle == n.handle && state.userid == n.userid && state.slot == n.slot;
+}
+inline Contact FindContact(const Input &in, const Neighbor *neighbors, std::size_t count, const State *state = nullptr) {
+    Contact contact;
+    if (!Valid(in) || neighbors == NULL || Length(in.wish) <= 0.0001f) return contact;
+    constexpr float contactSweep = 12.0f;
+    constexpr float recoverySweep = 40.0f;
     const Vec2 wish = Limit(in.wish, in.maxSpeed), forward = Unit(wish), right(forward.y, -forward.x);
-    const float dt = in.interval < 0.2f ? in.interval : 0.2f;
-    const float horizon = PredictionSeconds(in);
-    const Vec2 selfMotion = Add(wish, in.velocity);
-    const Vec2 shortSelf = Add(in.position, Scale(selfMotion, dt));
-    const Vec2 futureSelf = Add(in.position, Scale(selfMotion, horizon));
+    const bool scanPhysical = ValidHull(in.hullMins, in.hullMaxs);
+    const Neighbor *nearest = nullptr;
+    const Neighbor *blocker = nullptr;
+    float nearestDistance = in.maxSpeed;
+    float blockerDistance = 0.0f, blockerSweep = 0.0f;
+    Vec2 approach;
+    bool yields = true;
     for (std::size_t i = 0; i < count; ++i) {
         const Neighbor &n = neighbors[i];
-        if (n.handle == 0 || n.userid <= 0 || n.slot <= 0 || n.priority <= 0 || n.team != in.team ||
-            !Finite(n.position) || !Finite(n.velocity) || !Finite(n.intent) ||
+        if (n.handle == 0 || n.userid <= 0 || n.slot <= 0 || n.team != in.team ||
+            !Finite(n.position) || !Finite(n.velocity) || !std::isfinite(n.z) ||
             !std::isfinite(n.bottom) || !std::isfinite(n.top) || n.top <= n.bottom ||
             n.bottom >= in.top || n.top <= in.bottom) continue;
         const Vec2 offset = Sub(n.position, in.position);
-        const float distance = Length(offset);
-        if (!std::isfinite(distance)) continue;
-        // A teammate already behind and separating from our actual travel
-        // must not make us swerve back into them. A faster rear catch-up remains.
-        const Vec2 relativeMotion = Sub(n.velocity, selfMotion);
-        if (Dot(offset, forward) < 0.0f && Dot(offset, relativeMotion) >= 0.0f) continue;
-        const Vec2 shortOther = Add(n.position, Scale(n.velocity, dt));
-        const Vec2 futureOther = Add(n.position, Scale(n.velocity, horizon));
-        const bool close = Length(Sub(n.position, shortSelf)) <= 48.0f ||
-            (distance <= 56.0f && Length(Sub(shortOther, in.position)) <= distance);
-        const bool predicted = Length(Sub(n.position, futureSelf)) < 64.0f ||
-            Length(Sub(futureOther, futureSelf)) < 56.0f ||
-            (distance < 72.0f && Length(Sub(futureOther, in.position)) < distance);
-        if (!close && !predicted) continue;
-        // Choose the nearest threat regardless of priority. Stable tie breaks
-        // avoid dependence on entity enumeration order in a crowded doorway.
-        if (best.valid && (distance > best.distance || (distance == best.distance &&
-            (n.priority > best.priority || (n.priority == best.priority &&
-            (n.slot > best.slot || (n.slot == best.slot &&
-            (n.userid > best.userid || (n.userid == best.userid && n.handle >= best.handle))))))))) continue;
-        best.valid = true; best.handle = n.handle; best.userid = n.userid; best.slot = n.slot;
-        best.priority = n.priority; best.yielding = in.priority > n.priority; best.distance = distance;
-        best.preferredSide = Dot(Scale(offset, -1.0f), right) > 0.0f ? 1 : -1;
-        const Vec2 otherDirection = Unit(Length(n.intent) > 0.0001f ? n.intent : n.velocity);
-        best.headOn = Dot(forward, otherDirection) < -0.5f;
+        const float distance = std::hypot(Length(offset), n.z - in.z);
+        const auto identity = std::tie(n.slot, n.userid, n.handle);
+        if (in.recentEnemy && distance < in.maxSpeed && (distance < nearestDistance ||
+            (nearest && distance == nearestDistance && identity < std::tie(nearest->slot, nearest->userid, nearest->handle)))) {
+            nearest = &n;
+            nearestDistance = distance;
+        }
+        if (!scanPhysical || !ValidHull(n.hullMins, n.hullMaxs)) continue;
+        const Vec2 mins = Sub(Add(offset, n.hullMins), in.hullMaxs);
+        const Vec2 maxs = Sub(Add(offset, n.hullMaxs), in.hullMins);
+        const bool retained = state && state->physical && state->owner == in.owner && in.now >= state->lastTime &&
+            SamePlayer(*state, n);
+        // Retain the same obstruction beyond the initial sweep while a detour
+        // still crosses its hull. A small retreat otherwise reissues the jammed wish.
+        const float sweep = PlayerSweep(offset, forward, mins, maxs, retained ? recoverySweep : contactSweep);
+        if (sweep < 0.0f || (blocker && std::tie(sweep, distance, n.slot, n.userid, n.handle) >=
+            std::tie(blockerSweep, blockerDistance, blocker->slot, blocker->userid, blocker->handle))) continue;
+        blocker = &n;
+        blockerDistance = distance;
+        blockerSweep = sweep;
+        approach = retained ? state->approach : forward;
+        // Both authorized wishes must lead into the other hull before the
+        // lower slot waits for the other to move. Humans and holding bots keep priority.
+        const bool opposing = n.canYield && (PlayerSweep(Scale(offset, -1.0f), Unit(n.wish),
+            Scale(maxs, -1.0f), Scale(mins, -1.0f), contactSweep) >= 0.0f || (retained && !state->yielding));
+        yields = !opposing || in.slot <= 0 || in.slot >= n.slot;
     }
-    return best;
+    if (blocker) {
+        contact.valid = contact.physical = true;
+        contact.yielding = yields;
+        contact.handle = blocker->handle;
+        contact.userid = blocker->userid;
+        contact.slot = blocker->slot;
+        contact.approach = approach;
+        const Vec2 escapeRight(approach.y, -approach.x);
+        contact.preferredSide = Dot(Sub(blocker->position, in.position), escapeRight) < 0.0f ? 1 : -1;
+        return contact;
+    }
+    if (nearest == nullptr) return contact;
+
+    // SyPB checks the nearest teammate using one movement frame in XY.
+    const Vec2 offset = Sub(nearest->position, in.position);
+    const float distance = Length(offset);
+    const float movedDistance = Length(Sub(offset, Scale(Add(wish, in.velocity), in.interval)));
+    const float nextDistance = Length(Add(offset, Scale(nearest->velocity, in.interval)));
+    if (!(movedDistance <= 48.0f || (distance <= 56.0f && nextDistance <= distance))) return contact;
+
+    contact.valid = true;
+    contact.handle = nearest->handle;
+    contact.userid = nearest->userid;
+    contact.slot = nearest->slot;
+    contact.preferredSide = Dot(offset, right) < 0.0f ? 1 : -1;
+    contact.retreat = distance < 56.0f && Dot(offset, forward) > 0.0f;
+    return contact;
+}
+inline int AvailableSide(int preferred, bool right, bool left) {
+    if (preferred > 0 ? right : left) return preferred;
+    return (preferred > 0 ? left : right) ? -preferred : 0;
 }
 inline Output Step(State &state, const Input &in, const Contact &contact, const Probes &probes) {
     Output out;
     if (!Valid(in)) { Reset(state); out.reason = "invalid"; return out; }
     out.wish = Limit(in.wish, in.maxSpeed);
     if (in.owner == 0 || Length(out.wish) <= 0.0001f || !contact.valid || contact.handle == 0 ||
-        contact.userid <= 0 || contact.slot <= 0 || contact.priority <= 0 ||
-        !std::isfinite(contact.distance) || contact.distance < 0.0f ||
+        contact.userid <= 0 || contact.slot <= 0 ||
         (contact.preferredSide != 1 && contact.preferredSide != -1)) {
         Reset(state);
         out.reason = in.owner == 0 ? "unowned" : Length(out.wish) <= 0.0001f ? "idle" : "clear";
         return out;
     }
     if (state.owner != in.owner || !std::isfinite(state.lastTime) || in.now < state.lastTime ||
-        !std::isfinite(state.blockedSince) || !std::isfinite(state.sideUntil) ||
-        !std::isfinite(state.nextReplanAt) || (state.side != 0 && state.side != 1 && state.side != -1)) {
+        !std::isfinite(state.blockedSince) || !std::isfinite(state.nextReplanAt)) {
         Reset(state);
         state.owner = in.owner;
         state.blockedSince = in.now; state.nextReplanAt = in.now + 5.0f;
     }
-    if (state.handle != contact.handle || state.userid != contact.userid || state.slot != contact.slot) {
-        // Side choice belongs to this complete player identity. Preserve the
-        // owner's continuous blocked budget when a crowd changes its nearest
-        // threat; otherwise rotating blockers could postpone recovery forever.
-        state.handle = contact.handle; state.userid = contact.userid; state.slot = contact.slot;
-        state.side = 0; state.sideUntil = 0.0f;
-    }
+    // A change of nearest teammate keeps the owner's continuous recovery budget.
+    if (!state.physical || !contact.physical || state.handle != contact.handle ||
+        state.userid != contact.userid || state.slot != contact.slot) state.side = 0;
+    state.handle = contact.handle; state.userid = contact.userid; state.slot = contact.slot;
     state.lastTime = in.now;
-    out.active = true; out.yielding = in.priority > contact.priority;
+    state.physical = contact.physical;
+    state.approach = contact.approach;
+    state.yielding = out.yielding = contact.yielding;
+    out.active = true;
     // Waiting with all probes blocked is still blocked time. Requests are
     // periodic, with no catch-up burst; the caller retains goal/owner authority.
     if (in.now >= state.nextReplanAt) { out.requestReplan = true; state.nextReplanAt = in.now + 5.0f; }
-    if (!out.yielding) { state.side = 0; state.sideUntil = 0.0f; out.reason = "priority"; return out; }
-    int side = state.side != 0 && in.now < state.sideUntil ? state.side : contact.preferredSide;
-    bool retreat = false, available = side > 0 ? probes.right : probes.left;
-    if (!available && (side > 0 ? probes.left : probes.right)) { side = -side; available = true; }
-    if (!available) {
-        retreat = true;
-        available = side > 0 ? probes.rightBack : probes.leftBack;
-        if (!available && (side > 0 ? probes.leftBack : probes.rightBack)) { side = -side; available = true; }
+    if (!out.yielding) {
+        out.wish = Vec2();
+        out.reason = "player-priority-wait";
+        return out;
     }
-    if (state.side != side || in.now >= state.sideUntil) state.sideUntil = in.now + 0.5f;
-    state.side = side;
-    if (available) {
-        out.wish = CandidateWish(in, side, retreat);
+    const int preferred = state.side != 0 ? state.side : contact.preferredSide;
+    const Input steering = SteeringInput(in, contact);
+    int side = 0;
+    if (contact.physical) side = AvailableSide(preferred, probes.rightOnly, probes.leftOnly);
+    else if (!contact.retreat) side = AvailableSide(preferred, probes.right, probes.left);
+    const bool retreat = side == 0;
+    if (retreat) side = AvailableSide(preferred, probes.rightBack, probes.leftBack);
+    if (side != 0) {
+        state.side = side;
+        out.wish = contact.physical && !retreat ? SideWish(steering, side) : CandidateWish(steering, side, retreat);
         out.reason = retreat ? (side > 0 ? "yield-right-back" : "yield-left-back")
-                             : (side > 0 ? "yield-right" : "yield-left");
-    } else if (probes.back) { out.wish = CandidateWish(in, 0, true); out.reason = "yield-back"; }
+            : (side > 0 ? "yield-right" : "yield-left");
+    } else if (probes.back) { out.wish = CandidateWish(steering, 0, true); out.reason = "yield-back"; }
     else { out.wish = Vec2(); out.reason = "yield-wait"; }
     return out;
 }

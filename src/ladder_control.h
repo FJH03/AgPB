@@ -32,9 +32,11 @@ struct State {
     int first = -1, last = -1, exit = -1;
     std::uint64_t owner = 0;
     bool ascending = true, attached = false;
+    bool entryClaimed = false;
     float faceYaw = 0.0f;
     float started = 0.0f, progressAt = 0.0f, bestDistance = -1.0f;
     float duration = 0.0f;
+    float entryWaitSince = -1.0f, entryRetryAt = -1.0f;
     bool Active() const { return stage != Stage::Idle; }
 };
 inline void Reset(State &state) { state = State(); }
@@ -57,6 +59,20 @@ inline void Begin(State &state, int first, int last, int exit,
     // occur within four seconds, so a tall ladder cannot hide a failed mount.
     state.duration = 10.0f + std::fabs(toZ - fromZ) / 80.0f;
     if (state.duration > 45.0f) state.duration = 45.0f;
+}
+inline void PauseEntry(State &state, float now) {
+    state.entryClaimed = false;
+    if (state.entryWaitSince < 0.0f || now < state.entryWaitSince) state.entryWaitSince = now;
+    state.entryRetryAt = now + 1.2f; // SyPB DoWaypointNav ladder pause.
+}
+inline void ResumeEntry(State &state, float now) {
+    if (state.entryWaitSince < 0.0f) return;
+    const float elapsed = now - state.entryWaitSince;
+    if (elapsed > 0.0f) {
+        state.started += elapsed;
+        state.progressAt += elapsed;
+    }
+    state.entryWaitSince = state.entryRetryAt = -1.0f;
 }
 inline void SetStage(State &state, Stage stage, float now) {
     if (state.stage == stage) return;

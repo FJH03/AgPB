@@ -26,6 +26,7 @@
 #include <engine/IEngineTrace.h>
 
 #include "netvars.h"
+#include "game_target.h"
 #include "tasks.h"
 #include "local_planner.h"
 #include "search_policy.h"
@@ -33,6 +34,7 @@
 #include "jump_control.h"
 #include "ladder_control.h"
 #include "weapon_selection.h"
+#include "purchase_policy.h"
 #include "firing_policy.h"
 #include "player_avoidance.h"
 #include "prop_avoidance.h"
@@ -76,6 +78,13 @@ struct BotEngineContext
 
 struct AgPBObstacle;
 
+struct AgPBBotAddOptions
+{
+	int skill = -1;       // -1 uses agpb_difficulty, 1–100 fixes the initial skill.
+	int personality = -1; // -1 is random, then Normal, Rusher, Careful.
+	int appearance = 0;   // 0 is native random, positive values are team-specific choices.
+};
+
 class CAgPB
 {
 public:
@@ -85,7 +94,8 @@ public:
 				 const char *name,
 				 int team,
 				 char *error,
-				 size_t maxlen );
+				 size_t maxlen,
+				 const AgPBBotAddOptions &options = AgPBBotAddOptions() );
 
 	void Destroy();
 
@@ -199,6 +209,7 @@ public:
 	bool IsCombatEnabled() const { return m_bCombatEnabled; }
 	void ReportCombat() const;
 	void ReportWeaponSelection() const;
+	void ReportPurchases() const;
 	void ReportSearch() const;
 	void OnPerceptionEvent( edict_t *source, const Vector &eventOrigin, float now, float radius, float ttl );
 	bool SetSkill( int skill );
@@ -247,6 +258,12 @@ private:
 	void PlanNormalTask( CGlobalVars *globals, bool urgentOnly = false );
 	void RefreshTaskPlan( CGlobalVars *globals );
 	bool PlanPlantedBombTask( CGlobalVars *globals, bool urgentOnly );
+	bool PlanWeaponPickup( CGlobalVars *globals );
+	void UpdateWeaponPickup( CGlobalVars *globals, CBotCmd &cmd );
+	void ResetWeaponPickup();
+	void FinishWeaponPickup( const AgPBTask &task, bool failed );
+	bool ReadWeaponPickupSlots( edict_t *(&slots)[2] ) const;
+	bool CanSeekWeaponPickup( float now ) const;
 	void ResetBombEscape();
 	bool ExecuteObjectiveTask( CGlobalVars *globals, CBotCmd &cmd );
 	bool NavigateTaskTo( const Vector &position, int preferredWaypoint, float interactionRange,
@@ -280,17 +297,27 @@ private:
 	bool UpdatePropAvoidance( CGlobalVars *globals, CBotCmd &cmd, bool jumpLeg, bool takeoff, bool crouch );
 	void ReportPropAvoidance() const;
 	void ResetPlayerAvoidance();
-	void UpdatePlayerAvoidance( CGlobalVars *globals, CBotCmd &cmd );
+	void UpdatePlayerAvoidance( CGlobalVars *globals, CBotCmd &cmd, const Vector &blockedWish );
 	bool PlayerAvoidanceActive( float now ) const;
 	bool CanPlayerAvoidStep( const Vector &wish, bool crouch, float interval, edict_t *contact ) const;
 	void ReportPlayerAvoidance() const;
-	void InitializeCombatSkill();
+	void InitializeCombatSkill( int skill = -1 );
 	void ResetWeaponSelection( const char *reason = "reset" );
-	bool UpdateWeaponSelection( CGlobalVars *globals, CBotCmd &cmd, bool enemyVisible, float distance );
+	bool UpdateWeaponSelection( CGlobalVars *globals, CBotCmd &cmd, edict_t *visibleEnemy, float distance,
+	                            bool jumpApproach = false );
+	void UpdateSilencer( CGlobalVars *globals, CBotCmd &cmd );
+	void UpdateIdleWeaponZoom( CGlobalVars *globals, CBotCmd &cmd );
+	enum class KnifeIntent { None, Spawn, Jump, Combat };
+	KnifeIntent ChooseKnifeIntent( CGlobalVars *globals, const CBotCmd &cmd, bool enemyVisible,
+	                              edict_t *enemy, edict_t *active );
+	bool ShouldUseCombatKnife( edict_t *enemy, bool holdingKnife ) const;
+	void BeginKnifeSpawn( float now );
+	void UpdatePurchases( CGlobalVars *globals );
 	void ClearCombat( const char *reason = "reset" );
-	bool UpdateCombat( CGlobalVars *globals, CBotCmd &cmd );
+	bool UpdateCombat( CGlobalVars *globals, CBotCmd &cmd, Vector &blockedCombatWish );
 	void UpdateCombatMovement( CGlobalVars *globals, CBotCmd &cmd, edict_t *target,
-	                           edict_t *weapon, bool fireIntent, bool reloadIntent, bool decisionTick );
+	                           edict_t *weapon, bool fireIntent, bool reloadIntent, bool decisionTick,
+	                           Vector &blockedCombatWish );
 	void PauseCombatOwner( CGlobalVars *globals );
 	bool IsCombatEnemy( edict_t *target, int expectedUserId = 0 ) const;
 	bool CombatAimPoint( edict_t *target, const Vector &eye, Vector &point, bool requireViewCone, unsigned int *visibility = NULL ) const;
@@ -310,6 +337,7 @@ private:
 
 	int   m_iIndex;            // edict 索引
 	int   m_iTeam;             // 目标队伍（1/2/3）
+	int   m_iAppearance = 0;
 	int   m_iCommandNumber;
 	CBotCmd m_LastSubmittedCmd;
 	unsigned int m_uSubmittedAttackCommands;
@@ -333,6 +361,7 @@ private:
 	float  m_flRouteProgressDistance;
 	float  m_flStuckCheckTime;
 	float  m_flStuckRecoveryUntil;
+	Vector m_vBlockedRouteWish;
 	bool   m_bRouteArrived;
 	float  m_flRouteSettleSince;
 	bool   m_bRouteLegAirborne;
@@ -373,6 +402,13 @@ private:
 	float m_flNextTaskUse;
 	uintp m_uLastTaskUseHandle;
 	uintp m_uDeclinedObjectiveHandle;
+	std::uint64_t m_uPickupActionToken = 0;
+	float m_flPickupActionDeadline = 0.0f, m_flPickupNextSelectAt = 0.0f;
+	bool m_bPickupDropIssued = false;
+	bool m_bPickupEquipping = false;
+	uintp m_uDeclinedPickupHandle = (uintp)INVALID_EHANDLE_INDEX;
+	float m_flPickupRetryAfter = 0.0f;
+	float m_flNextPickupScan = 0.0f;
 	float m_flObjectiveRetryAfter;
 	uintp m_uEscapeBombHandle;
 	unsigned int m_uEscapeRoundEpoch;
@@ -405,6 +441,8 @@ private:
 	float m_flCombatSurpriseUntil;
 	float m_flCombatRearCheckAt;
 	float m_flCombatFirePause;
+	float m_flNextBurstRequest = 0.0f;
+	float m_flCombatZoomCheckAt = -1.0f;
 	Vector m_vCombatAimDeviation;
 	bool m_bCombatPerfectAim;
 	bool m_bCombatEnabled;
@@ -433,10 +471,25 @@ private:
 	bool m_bCombatDuckWanted = false;
 	float m_flCombatEyeZ = -1.0f, m_flCombatEyeStableSince = 0.0f;
 	AgPBWeaponSelect::State m_WeaponSelection;
+	std::uint64_t m_uIdleReloadKey = 0;
+	bool m_bPrefersSilencer = false;
+	int m_iSilencerCheckTick = -1;
+	float m_flIdleReloadDeadline = 0.0f;
+	float m_flIdleReloadRetryAt = 0.0f;
+	bool m_bCombatReloadRequested = false;
+	unsigned int m_uKnifeSpawnRound = 0;
+	float m_flKnifeSpawnAt = -1.0f;
+	bool m_bKnifeSpawnChecked = false;
+	bool m_bKnifeSpawnTravel = false;
+	int m_iKnifeJumpFrom = -1, m_iKnifeJumpTo = -1;
+	std::uint64_t m_uKnifeJumpOwner = 0;
+	AgPBPurchaseState m_Purchases;
 	AgPBPropAvoid::State m_PropAvoidance;
 	const char *m_pszPropAvoidance = "idle";
 	unsigned int m_uPropAvoidanceReplans = 0;
 	AgPBPlayerAvoid::State m_PlayerAvoidance;
+	Vector m_vPlayerAvoidanceWish;
+	int m_iPlayerAvoidanceWishTick = -1;
 	const char *m_pszPlayerAvoidance = "idle";
 	float m_flPlayerAvoidanceAt = -1.0f;
 	bool m_bPlayerAvoidanceActive = false;
@@ -465,7 +518,12 @@ public:
 	bool IsReady() const { return m_Ctx.IsReady(); }
 	IBotManager *BotManager() { return m_Ctx.pBotManager; }
 
-	CAgPB *Add( int team, char *error, size_t maxlen );
+	// Team 0 balances active teams, including pending AgPB joins.
+	CAgPB *Add( int team, char *error, size_t maxlen,
+	            const AgPBBotAddOptions &options = AgPBBotAddOptions() );
+	// Returns the number queued, 0 if full, or -1 on error.
+	int FillServer( int team, int minSkill, int maxSkill, int personality, char *error, size_t maxlen );
+	void UpdateFill( CGlobalVars *globals );
 	bool Remove( int listIndex );
 	void RemoveAll();
 	void RemoveByEdict( edict_t *pEdict );
@@ -478,10 +536,24 @@ public:
 	void ReportNamedObstacle( const char *name ) const;
 
 private:
+	int SelectTeam() const;
+	int FreeClientSlots() const;
+
+	struct FillRequest
+	{
+		int team = 0;
+		int minSkill = 1;
+		int maxSkill = 1;
+		int personality = -1;
+		int remaining = 0;
+		float nextAddAt = 0.0f;
+	};
+
 	BotEngineContext m_Ctx;
 
 	CUtlVector<CAgPB *> m_Bots;
-	int m_iNextSerial;
+	unsigned int m_uNextSerial;
+	FillRequest m_Fill;
 };
 
 /** netvar 字段表注册表（按 ServerClass 缓存，进程内单例）。 */

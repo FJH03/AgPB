@@ -21,7 +21,7 @@ def receipt(text, command="agpb_bot_info 0; agpb_bot_combat_info 0; agpb_wp_prob
 
 def metadata():
     value = dict(map="de_dust2", subject_slot=2, subject_userid=102, subject_name="Test_Bot", human_slot=1, human_userid=101,
-                 controlled_enemy_authorized=True, guard_expected_crc="770BAE64")
+                 controlled_enemy_authorized=True)
     value.update({key: "a"*64 for key in HASHES})
     value["prelude"] = [receipt("[AgPB Guard] active=1 intact=1 null-bot=0 null-profile=0 native-path=0 freeze-ends=2", "agpb_guard_status")]
     return value
@@ -250,14 +250,35 @@ class CombatEvidenceTests(unittest.TestCase):
     def test_guard_authorization_hash_and_immutable_observed_receipts(self):
         meta,item=make_case("occluded_rejection");meta["controlled_enemy_authorized"]=False
         self.verdict(meta,item,"pending","authorization")
-        meta,item=make_case("occluded_rejection")
-        edit_log(meta["prelude"][0],"[AgPB Guard]",{"intact":0})
-        self.verdict(meta,item,"pending","active and intact")
+        for field in ("active", "intact"):
+            with self.subTest(guard_field=field):
+                meta,item=make_case("occluded_rejection")
+                edit_log(meta["prelude"][0],"[AgPB Guard]",{field:0})
+                self.verdict(meta,item,"pending","active and intact")
         meta,item=make_case("friendly_rejection");item["binding"]["dll_sha256"]="b"*64
         self.verdict(meta,item,"pending","artifact version")
         meta,item=make_case("friendly_rejection")
         item["stages"]["run"][1]["observed_log"]="edited"
         self.verdict(meta,item,"pending","unaltered ACK")
+
+    def test_guard_uses_raw_status_and_bound_server_without_fixed_crc_metadata(self):
+        meta,item=make_case("occluded_rejection")
+        self.assertNotIn("guard_expected_crc", meta)
+        self.verdict(meta,item)
+        for crc in ("770BAE64", "1234ABCD"):
+            with self.subTest(legacy_crc=crc):
+                meta,item=make_case("occluded_rejection")
+                meta["guard_expected_crc"]=crc
+                self.verdict(meta,item)
+        meta,item=make_case("occluded_rejection")
+        meta["prelude"][0]["log"]=meta["prelude"][0]["log"].replace("[AgPB Guard]", "[Claimed Guard]")
+        self.verdict(meta,item,"pending","active and intact")
+        meta,item=make_case("occluded_rejection")
+        item["binding"]["server_sha256"]="b"*64
+        self.verdict(meta,item,"pending","artifact version")
+        meta,item=make_case("occluded_rejection")
+        del meta["server_sha256"]
+        self.verdict(meta,item,"pending","artifact version")
 
     def test_idle_or_dead_subject_cannot_certify_rejection(self):
         meta,item=make_case("friendly_rejection")

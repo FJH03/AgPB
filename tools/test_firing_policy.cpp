@@ -2,6 +2,7 @@
 #include "../src/firing_policy.h"
 #include <cstdio>
 #include <cstdlib>
+#include <initializer_list>
 #include <limits>
 
 static void Require(bool okay, const char *why) {
@@ -37,6 +38,35 @@ int main() {
     Require(PrimaryFireHold(Weapon::MP5) && PrimaryFireHold(Weapon::P90) && PrimaryFireHold(Weapon::Famas) &&
         PrimaryFireHold(Weapon::M249) && !PrimaryFireHold(Weapon::XM1014) && !PrimaryFireHold(Weapon::SG550),
         "hold classification reproduces the baseline table rather than inferred native capabilities");
+
+    for (Weapon sniper : {Weapon::AWP, Weapon::Scout, Weapon::G3SG1, Weapon::SG550}) {
+        Require(ZoomForFov(sniper, 0, 90) == Zoom::Unzoomed && ZoomForFov(sniper, 90, 90) == Zoom::Unzoomed &&
+            ZoomForFov(sniper, 40, 90) == Zoom::First &&
+            ZoomForFov(sniper, sniper == Weapon::AWP ? 10 : 15, 90) == Zoom::Second,
+            "Source reports all three sniper zoom states");
+        Require(!ToggleCombatZoom(sniper, 150.0f, 100, Zoom::Unzoomed) &&
+            ToggleCombatZoom(sniper, 150.0f, 100, Zoom::First) && ToggleCombatZoom(sniper, 150.0f, 100, Zoom::Second),
+            "close sniper fire requires the default FOV");
+        Require(ToggleCombatZoom(sniper, 150.01f, 100, Zoom::Unzoomed) &&
+            !ToggleCombatZoom(sniper, 1500.0f, 100, Zoom::First) && !ToggleCombatZoom(sniper, 1000.0f, 100, Zoom::Second),
+            "medium sniper range opens a first zoom and retains an already deeper scope");
+        Require(ToggleCombatZoom(sniper, 1500.01f, 100, Zoom::Unzoomed) &&
+            ToggleCombatZoom(sniper, 1500.01f, 100, Zoom::First) && !ToggleCombatZoom(sniper, 1500.01f, 100, Zoom::Second),
+            "long sniper range progresses through both native zoom stages");
+    }
+    for (Weapon rifle : {Weapon::AUG, Weapon::SG552}) {
+        Require(ZoomForFov(rifle, 0, 90) == Zoom::Unzoomed && ZoomForFov(rifle, 55, 90) == Zoom::First &&
+            ZoomForFov(rifle, 40, 90) == Zoom::Unknown, "rifle zoom follows the Source FOV even when the weapon mode stays secondary");
+        Require(ToggleCombatZoom(rifle, 800.0f, 89, Zoom::First) && !ToggleCombatZoom(rifle, 800.0f, 89, Zoom::Unzoomed) &&
+            ToggleCombatZoom(rifle, 800.01f, 89, Zoom::Unzoomed) && !ToggleCombatZoom(rifle, 800.01f, 89, Zoom::First),
+            "AUG and SG552 use the SyPB 800-unit switch distance");
+        Require(!ToggleCombatZoom(rifle, 800.01f, 90, Zoom::Unzoomed) && !ToggleCombatZoom(rifle, 800.0f, 90, Zoom::First),
+            "skill 90 and higher does not request a rifle zoom change in combat");
+    }
+    Require(!ToggleCombatZoom(Weapon::Famas, 900.0f, 89, Zoom::Unzoomed) &&
+        !ToggleCombatZoom(Weapon::AWP, 900.0f, 89, Zoom::Unknown) &&
+        !IdleZoomDue(2.0f, -1.0f) && !IdleZoomDue(2.0f, 1.0f) && IdleZoomDue(2.01f, 1.0f),
+        "zoom changes require a supported observed state and one second of inactivity for idle cleanup");
 
     Reset(state); input = Input(); input.weapon = Weapon::M4A1; input.now = 20;
     input.distance = 1500; input.visibility = 0;

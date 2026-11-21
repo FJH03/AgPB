@@ -6,6 +6,7 @@
 #
 # After "ambuild" this produces build/package/:
 #   addons/AgPB/bin/win64/agpb_mm.dll
+#   addons/AgPB/configs/defaults/   (shipped configuration)
 #   addons/AgPB/waypoints/            (runtime data folder)
 #   addons/metamod/AgPB.vdf
 # The zip root is addons/, so extracting into cstrike/ deploys the plugin.
@@ -40,3 +41,8 @@ for task in MMSPlugin.binaries:
 
 # Runtime data folder; the plugin also creates it on demand.
 builder.AddFolder(os.path.join('addons', plugin_name, 'waypoints'))
+
+# Keep shipped defaults below the server's editable configuration directory.
+defaults_folder = builder.AddFolder(os.path.join('addons', plugin_name, 'configs', 'defaults'))
+for name in ('names.cfg', 'weapons.cfg'):
+  builder.AddCopy(os.path.join(builder.sourcePath, 'configs', name), defaults_folder)

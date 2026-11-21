@@ -94,9 +94,72 @@ static void OrdinaryJumpAndCampBoundaries() {
         "CAMP+CROUCH remains arrived holding posture while ordinary CROUCH still governs navigation");
     Require(!AgPBHolding::NavigationCrouch(false, true), "standing CAMP does not introduce passage crouch");
 }
+static void SimulateLandedAnchor(float x, float y, float dz, bool entry, bool takeoff, const char* name) {
+    float vx = 0, vy = 0;
+    const float dt = 0.015f, radius = 12.0f;
+    for (int tick = 0; tick < 400; ++tick) {
+        // An intermediate route advances as soon as the exact anchor is
+        // reached, before producing the next connection's launch command.
+        if (AnchorPositionInside(-x, -y, dz, true)) {
+            std::printf("PASS %s distance3d=%.3f seconds=%.3f\n", name,
+                std::sqrt(x*x + y*y + dz*dz), tick*dt);
+            return;
+        }
+        const bool inside = ControlApproachInside(-x, -y, dz, radius, true, false, entry, takeoff);
+        const Wish input = ComputeWish(-x, -y, vx, vy, dt, 5, 4, 100, 250, inside);
+        const RoutePosture posture = ComputeRoutePosture(false, false, takeoff,
+            std::sqrt(x*x + y*y), true, true, true, false);
+        Require(!inside && !posture.jump, "landed anchor keeps aligning without restarting the completed jump");
+        float wishSpeed = std::sqrt(input.x*input.x + input.y*input.y);
+        Require(std::isfinite(wishSpeed) && wishSpeed > 0 && wishSpeed <= 250.01f,
+            "outside the 3D anchor the grounded controller emits a finite movement command");
+        const float speed = std::sqrt(vx*vx + vy*vy);
+        const float keep = speed > 0.01f ? Max(0.0f, speed - Max(speed, 100) * 4 * dt) / speed : 0;
+        vx *= keep; vy *= keep;
+        const float nx = input.x / wishSpeed, ny = input.y / wishSpeed;
+        // Authored CROUCH may cap the ground speed during landing alignment.
+        wishSpeed = Min(85.0f, wishSpeed);
+        const float add = wishSpeed - (vx*nx + vy*ny);
+        if (add > 0) {
+            const float amount = Min(add, 5 * dt * wishSpeed);
+            vx += nx*amount; vy += ny*amount;
+        }
+        x += vx*dt; y += vy*dt;
+    }
+    std::fprintf(stderr, "FAIL: landed anchor did not converge: %s\n", name); std::exit(1);
+}
+static void LandedJumpAnchorAlignment() {
+    // cs_office 284->341->342: #341 has radius 12, but is the next jump's
+    // precise source. The actual landing was accepted by the old radius
+    // controller at rest while route acceptance still required 3D distance <4.
+    const float x = -820.721862f - (-830.0f), y = -436.292938f - (-430.0f);
+    Require(ControlPositionInside(-x, -y, 0, 12, true) && !AnchorPositionInside(-x, -y, 0, true),
+        "recorded radius-12 landing is inside the old stop region but outside the next takeoff anchor");
+    SimulateLandedAnchor(x, y, 0, false, true, "landed_next_takeoff");
+    SimulateLandedAnchor(x, y, 0, true, false, "precise_entry");
+    SimulateLandedAnchor(3, 0, 3, false, true, "takeoff_3d_diagonal");
+    SimulateLandedAnchor(1.3f, 0, 3.9f, false, true, "takeoff_near_height_boundary");
+    Require(!ControlApproachInside(3, 0, 3, 12, true, false, false, true) &&
+        !ControlApproachInside(0, 0, AnchorTolerance, 12, true, false, true, false),
+        "anchor feedback uses a strict 3D sphere rather than independent XY and height tolerances");
+    Require(ControlApproachInside(-x, -y, 0, 12, true, true, true, true) ==
+        ControlPositionInside(-x, -y, 0, 12, true) &&
+        ControlApproachInside(3, 0, 3, 12, true, true, true, true),
+        "terminal radius and height policy takes precedence over anchor metadata");
+    Require(ControlApproachInside(-x, -y, 0, 12, true, false, false, false),
+        "an ordinary intermediate landing retains its authored radius control");
+    Require(!ControlApproachInside(0, 0, 0, 12, false, false, false, true) &&
+        !AnchorPositionInside(std::numeric_limits<float>::quiet_NaN(), 0, 0, true),
+        "airborne and nonfinite positions cannot establish a precise anchor");
+    const bool wrongHeight = ControlApproachInside(0, 0, 5, 12, true, false, false, true);
+    const Wish noHorizontalTarget = ComputeWish(0, 0, 0, 0, 0.015f, 5, 4, 100, 250, wrongHeight);
+    Require(!wrongHeight && noHorizontalTarget.x == 0 && noHorizontalTarget.y == 0,
+        "impossible height at zero XY remains outside without inventing horizontal or vertical movement");
+}
 int main() {
     JumpIntoCrouchSection();
     OrdinaryJumpAndCampBoundaries();
+    LandedJumpAnchorAlignment();
     Require(!LandedJump(true,false,true,0),"takeoff is not a completed jump");
     Require(!LandedJump(true,true,false,0),"airborne jump still runs");
     Require(!LandedJump(true,true,true,32),"wrong landing height cannot complete jump");

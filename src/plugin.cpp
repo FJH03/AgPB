@@ -48,10 +48,20 @@ IPhysicsSurfaceProps *AgPB_SurfaceProps() { return g_SurfaceProps; }
 static CAgPBManager g_Bots;
 static IGameEventManager2 *g_GameEvents = NULL;
 static bool g_RoundFrozen = false;
+static AgPBPurchaseRound g_PurchaseRound;
 static unsigned int g_AgentMapSerial = 1;
 
 bool AgPB_IsRoundFrozen() { return g_RoundFrozen; }
+const AgPBPurchaseRound &AgPB_PurchaseRound() { return g_PurchaseRound; }
 unsigned int AgPB_MapSerial() { return g_AgentMapSerial; }
+
+static void AdvancePurchaseRound()
+{
+	if ( ++g_PurchaseRound.epoch == 0 )
+		++g_PurchaseRound.epoch;
+	g_PurchaseRound.active = gpGlobals != NULL;
+	g_PurchaseRound.liveAt = gpGlobals != NULL ? gpGlobals->curtime : 0.0f;
+}
 
 class CAgPBRoundListener : public IGameEventListener2
 {
@@ -63,13 +73,26 @@ public:
 		if ( Q_strcmp( name, "round_start" ) == 0 )
 		{
 			g_RoundFrozen = true;
+			AdvancePurchaseRound();
+			g_PurchaseRound.freeze = true;
 			BotObjectives().OnRoundStart();
 			g_Bots.ResetAllTasks( "round-start" );
 		}
-		else if ( Q_strcmp( name, "round_freeze_end" ) == 0 ) g_RoundFrozen = false;
+		else if ( Q_strcmp( name, "round_freeze_end" ) == 0 )
+		{
+			g_RoundFrozen = false;
+			if ( !g_PurchaseRound.active )
+				AdvancePurchaseRound();
+			else
+				g_PurchaseRound.liveAt = gpGlobals->curtime;
+			g_PurchaseRound.freeze = false;
+		}
 		else if ( Q_strcmp( name, "round_end" ) == 0 )
 		{
 			g_RoundFrozen = true;
+			g_PurchaseRound.active = false;
+			g_PurchaseRound.freeze = false;
+			g_PurchaseRound.lastWinner = event->GetInt( "winner" );
 			g_Bots.ResetAllTasks( "round-end" );
 		}
 		else if ( Q_strcmp( name, "weapon_fire" ) == 0 || Q_strcmp( name, "player_footstep" ) == 0 )
@@ -1570,6 +1593,21 @@ static void Cmd_BotWeaponInfo( const CCommand &args )
 	if ( g_Bots.Count() == 0 ) META_CONPRINTF( "[AgPB] agpb_bot_weapon_info: no bots\n" );
 }
 
+static void Cmd_BotBuyInfo( const CCommand &args )
+{
+	if ( args.ArgC() > 2 )
+	{ META_CONPRINTF( "[AgPB] usage: agpb_bot_buy_info [idx|all]\n" ); return; }
+	if ( args.ArgC() == 2 && V_stricmp( args.Arg( 1 ), "all" ) != 0 )
+	{
+		CAgPB *bot = g_Bots.Get( V_atoi( args.Arg( 1 ) ) );
+		if ( bot == NULL ) { META_CONPRINTF( "[AgPB] invalid bot index\n" ); return; }
+		bot->ReportPurchases();
+		return;
+	}
+	for ( int i = 0; i < g_Bots.Count(); ++i ) g_Bots.Get( i )->ReportPurchases();
+	if ( g_Bots.Count() == 0 ) META_CONPRINTF( "[AgPB] agpb_bot_buy_info: no bots\n" );
+}
+
 static void Cmd_BotDifficulty( const CCommand &args )
 {
 	if ( args.ArgC() != 3 || args.Arg( 2 )[0] < '0' || args.Arg( 2 )[0] > '4' || args.Arg( 2 )[1] != '\0' )
@@ -1685,6 +1723,7 @@ static ConCommand agpb_bot_clearance_cmd( "agpb_bot_clearance", Cmd_BotClearance
 static ConCommand agpb_bot_combat_cmd( "agpb_bot_combat", Cmd_BotCombat, "Enable local normal-mode combat: <idx|all> [0|1].", FCVAR_GAMEDLL );
 static ConCommand agpb_bot_combat_info_cmd( "agpb_bot_combat_info", Cmd_BotCombatInfo, "Read-only enemy selection, visibility, aim and combat command snapshot: [idx|all].", FCVAR_GAMEDLL );
 static ConCommand agpb_bot_weapon_info_cmd( "agpb_bot_weapon_info", Cmd_BotWeaponInfo, "Read-only owned inventory and CUserCmd weapon-selection state: [idx|all].", FCVAR_GAMEDLL );
+static ConCommand agpb_bot_buy_info_cmd( "agpb_bot_buy_info", Cmd_BotBuyInfo, "Read-only ordinary-mode purchases: [idx|all].", FCVAR_GAMEDLL );
 static ConCommand agpb_bot_difficulty_cmd( "agpb_bot_difficulty", Cmd_BotDifficulty, "Set SyPB normal-mode difficulty: <idx|all> <0..4>.", FCVAR_GAMEDLL );
 static ConCommand agpb_agent_state_cmd( "agpb_agent_state", Cmd_AgentState, "Read current agent map/round scope, bot identities and bounded intent leases.", FCVAR_GAMEDLL );
 static ConCommand agpb_agent_intent_cmd( "agpb_agent_intent", Cmd_AgentIntent, "Submit bounded waypoint intent in current map/round scope; query agpb_agent_state first.", FCVAR_GAMEDLL );
@@ -1849,6 +1888,9 @@ bool AgPBPlugin::Load( PluginId id, ISmmAPI *ismm, char *error, size_t maxlen, b
 	// 路点要读写 addons/AgPB/waypoints/*.agpw；插件链接不到 game DLL 里的
 	// filesystem 全局，自己拿一份交给它。
 	BotWaypoints().SetFileSystem( filesystem );
+	int ignoredPreferenceEntries = 0;
+	if ( AgPBWeaponSelect::LoadPreferences( filesystem, &ignoredPreferenceEntries ) )
+		META_CONPRINTF( "[AgPB] loaded SyPB weapon preferences (%d invalid entries ignored)\n", ignoredPreferenceEntries );
 
 	// 绘制要 IVDebugOverlay；拿不到就自动不画（菜单那条路不依赖它）。
 	AgPB_DrawSetOverlay( debugoverlay );
@@ -1871,6 +1913,7 @@ bool AgPBPlugin::Unload( char *error, size_t maxlen )
 {
 	if ( g_GameEvents != NULL ) g_GameEvents->RemoveListener( &g_RoundListener );
 	g_RoundFrozen = false;
+	g_PurchaseRound = {};
 	SH_REMOVE_HOOK_MEMFUNC( IServerGameDLL, GameFrame, server, this, &AgPBPlugin::Hook_GameFrame, true );
 	SH_REMOVE_HOOK_MEMFUNC( IServerGameClients, ClientDisconnect, gameclients, this, &AgPBPlugin::Hook_ClientDisconnect, true );
 	SH_REMOVE_HOOK_MEMFUNC( IServerGameClients, ClientCommand, gameclients, this, &AgPBPlugin::Hook_ClientCommand, false );
@@ -1904,6 +1947,10 @@ void AgPBPlugin::OnLevelShutdown()
 	if ( ++g_AgentMapSerial == 0 ) g_AgentMapSerial = 1;
 	BotObjectives().Reset();
 	g_RoundFrozen = false;
+	g_PurchaseRound.active = false;
+	g_PurchaseRound.freeze = false;
+	g_PurchaseRound.liveAt = 0.0f;
+	g_PurchaseRound.lastWinner = 0;
 	// 换图会销毁所有 edict，先清掉本地记录，避免悬挂指针。
 	g_Bots.RemoveAll();
 }
@@ -1930,6 +1977,8 @@ void AgPBPlugin::Hook_GameFrame( bool simulating )
 
 	// 菜单续命（客户端 5 秒没输入会自己收，靠重发顶着）
 	AgPB_MenuTick();
+
+	g_Bots.UpdateFill( gpGlobals );
 
 	if ( !agpb_enable.GetBool() )
 		return;

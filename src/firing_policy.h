@@ -1,7 +1,8 @@
 /*
- * AgPB SyPB primary-fire button and AI-delay policy. GPL-3.0-only.
- * Baseline: SyPB 4c364fb source/combat.cpp FireWeapon/DoFirePause and
- * source/globals.cpp g_weaponSelect/g_fireDelay. Compared with CS-EBOT
+ * AgPB SyPB fire buttons, weapon zoom and AI-delay policy. GPL-3.0-only.
+ * Baseline: SyPB 4c364fb source/combat.cpp LookupEnemy/FireWeapon/DoFirePause,
+ * source/basecode.cpp CheckBurstMode and source/globals.cpp
+ * g_weaponSelect/g_fireDelay. Compared with CS-EBOT
  * 2333562 source/combat.cpp FireWeapon and source/globals.cpp.
  * SyPB basecode.cpp Think/ThinkFrame evaluates BotAI at most 15 Hz and
  * retains its buttons between player commands. Reproduce that fire-decision
@@ -10,8 +11,7 @@
  * reaction, LOS and ammunition gates, then commits only the attack button
  * actually submitted after all movement/stance filters. Native weapon
  * timers remain authoritative over real shots, not over requested buttons.
- * Scope, burst-mode, silencer and grenades are not
- * implemented here. Knife is basic primary attack, not full KnifeAttack.
+ * Silencer and grenade behavior are separate. Knife here covers primary attack.
  *
  * Copyright (c) 2003-2023, by HsK-Dev Blog.
  * Copyright (c) 2003-2009, by Yet Another POD-Bot Development Team.
@@ -86,7 +86,44 @@ inline void Reset(State &state) {
     state = State();
     state.decisionId = previousId;
 }
-inline bool Supported(Weapon weapon) { return AgPBWeaponSelect::Preference(weapon) >= 0; }
+inline bool Supported(Weapon weapon) { return AgPBWeaponSelect::Selectable(weapon); }
+inline bool SupportsBurstMode(Weapon weapon) {
+    return weapon == Weapon::Glock || weapon == Weapon::Famas;
+}
+inline bool ToggleBurstMode(Weapon weapon, float distance, bool burstEnabled) {
+    // SyPB's Glock off threshold overlaps the on threshold.
+    if (weapon == Weapon::Glock) return burstEnabled ? distance >= 30.0f : distance < 300.0f;
+    if (weapon == Weapon::Famas) return burstEnabled ? distance <= 400.0f : distance > 400.0f;
+    return false;
+}
+enum class Zoom { Unknown, Unzoomed, First, Second };
+inline bool ScopedRifle(Weapon weapon) { return weapon == Weapon::AUG || weapon == Weapon::SG552; }
+inline bool BoltSniper(Weapon weapon) { return weapon == Weapon::AWP || weapon == Weapon::Scout; }
+inline bool ScopedSniper(Weapon weapon) { return BoltSniper(weapon) || weapon == Weapon::G3SG1 || weapon == Weapon::SG550; }
+inline bool SupportsZoom(Weapon weapon) { return ScopedSniper(weapon) || ScopedRifle(weapon); }
+inline Zoom ZoomForFov(Weapon weapon, int fov, int defaultFov) {
+    if (!SupportsZoom(weapon) || fov < 0 || fov >= 180) return Zoom::Unknown;
+    // Source's player FOV field can be zero (use default) or the explicit
+    // default angle. SG552 can retain Secondary_Mode when it sets FOV to zero.
+    if (fov == 0 || (defaultFov > 0 && fov == defaultFov)) return Zoom::Unzoomed;
+    if (ScopedRifle(weapon)) return fov == 55 ? Zoom::First : Zoom::Unknown;
+    if (fov == 40) return Zoom::First;
+    return fov == (weapon == Weapon::AWP ? 10 : 15) ? Zoom::Second : Zoom::Unknown;
+}
+inline bool IsZoomed(Zoom zoom) { return zoom == Zoom::First || zoom == Zoom::Second; }
+inline bool ToggleCombatZoom(Weapon weapon, float distance, int skill, Zoom zoom) {
+    if (!std::isfinite(distance) || distance < 0.0f) return false;
+    if (ScopedSniper(weapon)) {
+        // A sniper already at the second zoom stays there until close range.
+        if (distance <= 150.0f) return IsZoomed(zoom);
+        return zoom == Zoom::Unzoomed || (distance > 1500.0f && zoom == Zoom::First);
+    }
+    return ScopedRifle(weapon) && skill < 90 &&
+        (distance > 800.0f ? zoom == Zoom::Unzoomed : zoom == Zoom::First);
+}
+inline bool IdleZoomDue(float now, float lastCheck) {
+    return lastCheck >= 0.0f && now > lastCheck + 1.0f;
+}
 inline bool PrimaryFireHold(Weapon weapon) {
     // Exact SyPB table: XM1014 and the auto-snipers are classified as
     // non-hold here even though native weapon capabilities may differ.

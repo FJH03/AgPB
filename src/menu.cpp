@@ -63,7 +63,7 @@ void CAgPBMenu::Reset( const char *pszTitle, const char *pszMessage )
 	Q_strncpy( m_szTitle, ( pszTitle != NULL ) ? pszTitle : "", sizeof( m_szTitle ) );
 	Q_strncpy( m_szMessage, ( pszMessage != NULL ) ? pszMessage : "", sizeof( m_szMessage ) );
 
-	m_iCount = 0;
+	m_iLastSlot = 0;
 
 	for ( int i = 0; i < AgPB_MENU_MAX_SLOTS; ++i )
 	{
@@ -74,20 +74,32 @@ void CAgPBMenu::Reset( const char *pszTitle, const char *pszMessage )
 
 int CAgPBMenu::AddItem( const char *pszText, int iAction )
 {
-	if ( m_iCount >= AgPB_MENU_MAX_ITEMS )
+	return SetItem( m_iLastSlot + 1, pszText, iAction );
+}
+
+int CAgPBMenu::SetItem( int iSlot, const char *pszText, int iAction )
+{
+	if ( iSlot < 1 || iSlot > AgPB_MENU_MAX_ITEMS || iAction == 0 )
 		return 0;
 
-	++m_iCount;
+	if ( iSlot > m_iLastSlot )
+		m_iLastSlot = iSlot;
 
-	Q_strncpy( m_szText[m_iCount], ( pszText != NULL ) ? pszText : "", AgPB_MENU_MAX_TEXT );
-	m_iAction[m_iCount] = iAction;
+	Q_strncpy( m_szText[iSlot], ( pszText != NULL ) ? pszText : "", AgPB_MENU_MAX_TEXT );
+	m_iAction[iSlot] = iAction;
 
-	return m_iCount;
+	return iSlot;
+}
+
+void CAgPBMenu::SetCancel( const char *pszText, int iAction )
+{
+	Q_strncpy( m_szText[0], pszText, AgPB_MENU_MAX_TEXT );
+	m_iAction[0] = iAction;
 }
 
 const char *CAgPBMenu::Text( int i ) const
 {
-	if ( i < 1 || i > m_iCount )
+	if ( i < 0 || i > m_iLastSlot )
 		return "";
 
 	return m_szText[i];
@@ -95,7 +107,7 @@ const char *CAgPBMenu::Text( int i ) const
 
 int CAgPBMenu::Action( int i ) const
 {
-	if ( i < 1 || i > m_iCount )
+	if ( i < 0 || i > m_iLastSlot )
 		return 0;
 
 	return m_iAction[i];
@@ -117,13 +129,17 @@ void AgPB_MenuPrintConsole( edict_t *pClient, const CAgPBMenu &menu )
 		engine->ClientPrintf( pClient, szLine );
 	}
 
-	for ( int i = 1; i <= menu.Count(); ++i )
+	for ( int i = 1; i <= menu.LastSlot(); ++i )
 	{
+		if ( menu.Action( i ) == 0 )
+			continue;
+
 		Q_snprintf( szLine, sizeof( szLine ), "  %d. %s\n", i, menu.Text( i ) );
 		engine->ClientPrintf( pClient, szLine );
 	}
 
-	engine->ClientPrintf( pClient, "  0. Exit\n" );
+	Q_snprintf( szLine, sizeof( szLine ), "  0. %s\n", menu.Action( 0 ) != 0 ? menu.Text( 0 ) : "Exit" );
+	engine->ClientPrintf( pClient, szLine );
 	engine->ClientPrintf( pClient, "type: agpb_menu <n>\n" );
 }
 
@@ -193,15 +209,19 @@ static void BuildMenuText( const CAgPBMenu &menu, char *pszOut, int iMaxLen )
 		Q_strncat( pszOut, "\n", iMaxLen );
 	}
 
-	for ( int i = 1; i <= menu.Count(); ++i )
+	for ( int i = 1; i <= menu.LastSlot(); ++i )
 	{
+		if ( menu.Action( i ) == 0 )
+			continue;
+
 		char szLine[AgPB_MENU_MAX_TEXT + 16];
 
 		Q_snprintf( szLine, sizeof( szLine ), "->%d. %s\n", i, menu.Text( i ) );
 		Q_strncat( pszOut, szLine, iMaxLen );
 	}
 
-	Q_strncat( pszOut, "0. 退出", iMaxLen );
+	Q_strncat( pszOut, "0. ", iMaxLen );
+	Q_strncat( pszOut, menu.Action( 0 ) != 0 ? menu.Text( 0 ) : "退出", iMaxLen );
 }
 
 /** 发一段 ShowMenu（bMore = 后面还有一段，客户端会拼起来）。 */
@@ -305,7 +325,7 @@ bool AgPB_MenuShow( edict_t *pClient, int iMenuId, const CAgPBMenu &menu )
 {
 	const int iIndex = ClientIndexOf( pClient );
 
-	if ( iIndex == 0 || menu.Count() <= 0 )
+	if ( iIndex == 0 || ( menu.LastSlot() == 0 && menu.Action( 0 ) == 0 ) )
 		return false;
 
 	AgPBClientMenuState &state = s_MenuStates[iIndex];
@@ -318,12 +338,15 @@ bool AgPB_MenuShow( edict_t *pClient, int iMenuId, const CAgPBMenu &menu )
 
 	if ( engine != NULL && ShowMenuId() >= 0 )
 	{
-		// 有效键位：1..count，外加第 10 位（数字键 0 = 退出；
+		// 有效键位：已绑定动作的数字键，外加第 10 位（数字键 0 = 退出；
 		// 客户端 weapon_selection.cpp:254 会把 0 键当成 slot10 发 menuselect 10）
 		unsigned short usSlots = (unsigned short)( 1 << 9 );
 
-		for ( int i = 1; i <= menu.Count(); ++i )
-			usSlots |= (unsigned short)( 1 << ( i - 1 ) );
+		for ( int i = 1; i <= menu.LastSlot(); ++i )
+		{
+			if ( menu.Action( i ) != 0 )
+				usSlots |= (unsigned short)( 1 << ( i - 1 ) );
+		}
 
 		char szText[512];
 		BuildMenuText( menu, szText, sizeof( szText ) );
@@ -426,20 +449,22 @@ bool AgPB_MenuSelect( edict_t *pClient, int iChoice )
 
 	AgPBClientMenuState &state = s_MenuStates[iIndex];
 
-	// 0 / 超范围 = 取消 / 退出（HUD 菜单里数字键 0 发的是 menuselect 10）
-	if ( iChoice <= 0 || iChoice > AgPB_MENU_MAX_ITEMS )
-	{
-		state.iMenuId = AgPB_MENU_NONE;
-		engine->ClientPrintf( pClient, "[AgPB] menu closed\n" );
-		return true;
-	}
-
-	const int iAction = state.iAction[iChoice];
+	// HUD 菜单的 0 键发 menuselect 10。只有显式绑定时才执行 0 键动作。
+	if ( iChoice == 10 )
+		iChoice = 0;
+	const int iAction = iChoice >= 0 && iChoice <= AgPB_MENU_MAX_ITEMS ? state.iAction[iChoice] : 0;
 
 	// 槽位没有动作：菜单还挂在屏幕上，照样吞掉，
 	// 不要漏给 CS 的无线电 / 武器菜单（那会变成"突然说了一句话"）
 	if ( iAction == 0 )
+	{
+		if ( iChoice <= 0 || iChoice > AgPB_MENU_MAX_ITEMS )
+		{
+			AgPB_MenuClose( pClient );
+			engine->ClientPrintf( pClient, "[AgPB] menu closed\n" );
+		}
 		return true;
+	}
 
 	const int iMenuId = state.iMenuId;
 	const int iSerialBefore = state.iShowSerial;

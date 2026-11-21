@@ -1,17 +1,36 @@
 # vim: set sts=2 ts=8 sw=2 tw=99 et ft=python:
+import glob
+import hashlib
 import os
+
+# Keep all objects on the same headers even if MSVC's localized include
+# output is not parsed. A header change reconfigures the compile commands.
+headers = glob.glob(os.path.join(builder.sourcePath, 'src', '**', '*.h'), recursive=True)
+header_id = hashlib.sha256()
+for path in sorted(headers):
+  builder.AddConfigureFile(path)
+  header_id.update(os.path.relpath(path, builder.sourcePath).replace(os.sep, '/').encode('utf-8'))
+  header_id.update(b'\0')
+  with open(path, 'rb') as header:
+    header_id.update(header.read())
+  header_id.update(b'\0')
 
 for sdk_target in MMSPlugin.sdk_targets:
   sdk = sdk_target.sdk
   cxx = sdk_target.cxx
 
   binary = MMSPlugin.HL2Library(builder, cxx, 'agpb_mm', sdk)
+  binary.compiler.cxxdefines += ['AGPB_HEADER_BUILD_ID=0x' + header_id.hexdigest()[:16]]
 
   binary.sources += [
     'src/plugin.cpp',
     'src/bot.cpp',
     'src/bot_combat.cpp',
     'src/bot_weapons.cpp',
+    'src/bot_knife.cpp',
+    'src/weapon_preferences.cpp',
+    'src/bot_purchase.cpp',
+    'src/bot_pickup.cpp',
     'src/bot_avoidance.cpp',
     'src/bot_autonomy.cpp',
     'src/bot_search.cpp',
@@ -19,6 +38,7 @@ for sdk_target in MMSPlugin.sdk_targets:
     'src/netvars.cpp',
     'src/waypoint.cpp',
     'src/menu.cpp',
+    'src/bot_menu.cpp',
     'src/wpdraw.cpp',
     'src/wpedit.cpp',
     'src/game_mode.cpp',

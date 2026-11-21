@@ -113,6 +113,18 @@ bool SniperWeapon( edict_t *weapon )
         NamedWeapon( weapon, "weapon_g3sg1" ) || NamedWeapon( weapon, "weapon_sg550" );
 }
 
+edict_t *OwnedActiveWeapon( const CAgPB &bot, uintp &handle )
+{
+    handle = (uintp)INVALID_EHANDLE_INDEX;
+    if ( !bot.GetNetVarHandleValue( "m_hActiveWeapon", &handle ) ) return NULL;
+    edict_t *weapon = bot.HandleToEdict( handle );
+    if ( weapon == NULL ) return NULL;
+    const BotNetVar *owner = AgPB_FindEntityNetVar( weapon, "m_hOwner" );
+    void *base = AgPB_EntityBase( weapon );
+    return owner != NULL && owner->type == DPT_Int && base != NULL &&
+        NetVar_GetHandle( base, *owner ) == AgPB_RefEHandle( bot.Edict() ) ? weapon : NULL;
+}
+
 AgPBCombatMove::Weapon CombatWeaponKind( edict_t *weapon )
 {
     using AgPBCombatMove::Weapon;
@@ -138,6 +150,55 @@ bool ReadFloat( edict_t *entity, const char *name, float &value )
     if ( field == NULL || field->type != DPT_Float ) return false;
     value = AgPB_ReadNetVarFloat( entity, name );
     return std::isfinite( value );
+}
+
+struct WeaponZoom {
+    AgPBFiring::Zoom level = AgPBFiring::Zoom::Unknown;
+    bool resuming = false;
+    bool settling = false;
+};
+
+WeaponZoom ReadWeaponZoom( const CAgPB &bot, AgPBFiring::Weapon weapon, float now )
+{
+    using namespace AgPBFiring;
+    WeaponZoom zoom;
+    if ( !SupportsZoom( weapon ) || bot.GetNetVarInt( "m_bHasShield", 0 ) != 0 ) return zoom;
+    zoom.level = ZoomForFov( weapon, bot.GetNetVarInt( "m_iFOV", -1 ), bot.GetNetVarInt( "m_iDefaultFOV", 90 ) );
+    if ( zoom.level == Zoom::Unknown ) return zoom;
+    // AWP/Scout temporarily show the default FOV while cycling the bolt. The
+    // engine restores the previous scope before processing the next trigger.
+    zoom.resuming = BoltSniper( weapon ) && bot.GetNetVarInt( "m_bResumeZoom", 0 ) != 0;
+    float changedAt, rate;
+    if ( ReadFloat( bot.Edict(), "m_flFOVTime", changedAt ) &&
+         ReadFloat( bot.Edict(), "m_flFOVRate", rate ) && rate > 0.0f )
+    {
+        // CSBaseGun uses a 0.05s rate for automatic rescope. Manual sniper
+        // zoom accuracy takes longer than the visual interpolation.
+        if ( IsZoomed( zoom.level ) && ScopedSniper( weapon ) && rate > 0.05f )
+            rate = MAX( rate, BoltSniper( weapon ) ? 0.15f : 0.30f );
+        zoom.settling = now < changedAt + rate;
+    }
+    return zoom;
+}
+
+bool SecondaryAttackReady( edict_t *weapon, float now )
+{
+    float secondaryAttack;
+    return ReadFloat( weapon, "m_flNextSecondaryAttack", secondaryAttack ) && now >= secondaryAttack;
+}
+
+bool BurstSwitchReady( const CAgPB &bot, edict_t *weapon, const AgPBFiring::Input &fire, float playerAttack )
+{
+    if ( !AgPBFiring::SupportsBurstMode( fire.weapon ) || fire.now < playerAttack ||
+         bot.GetNetVarInt( "m_bHasShield", 0 ) != 0 )
+        return false;
+
+    const int burst = AgPB_ReadNetVarInt( weapon, "m_bBurstMode", -1 );
+    if ( ( burst != 0 && burst != 1 ) || !AgPBFiring::ToggleBurstMode( fire.weapon, fire.distance, burst == 1 ) ||
+         AgPB_ReadNetVarInt( weapon, "m_iBurstShotsRemaining", -1 ) != 0 )
+        return false;
+
+    return SecondaryAttackReady( weapon, fire.now );
 }
 
 int WeaponClip( edict_t *weapon )
@@ -478,9 +539,24 @@ bool FireRayAllowed( const BotEngineContext &ctx, edict_t *self, edict_t *target
 }
 }
 
-void CAgPB::InitializeCombatSkill()
+void CAgPB::InitializeCombatSkill( int skill )
 {
-    SetDifficulty( clamp( agpb_difficulty.GetInt(), 0, 4 ) );
+    if ( skill == -1 )
+    {
+        SetDifficulty( clamp( agpb_difficulty.GetInt(), 0, 4 ) );
+        return;
+    }
+
+    if ( !SetSkill( skill ) )
+        return;
+    for ( int difficulty = 0; difficulty <= 4; ++difficulty )
+    {
+        if ( skill <= AgPBCombatSkill::DifficultyRange( difficulty ).maximum )
+        {
+            m_iCombatDifficulty = difficulty;
+            break;
+        }
+    }
 }
 
 bool CAgPB::SetSkill( int skill )
@@ -521,6 +597,7 @@ void CAgPB::ClearCombat( const char *reason )
     m_flCombatAimError = 0.0f;
     m_bCombatRelease = false;
     m_flCombatSurpriseUntil = m_flCombatRearCheckAt = m_flCombatFirePause = 0.0f;
+    m_flNextBurstRequest = 0.0f;
     m_vCombatAimDeviation.Init();
     m_bCombatPerfectAim = false;
     m_pszCombatState = reason;
@@ -622,14 +699,9 @@ bool CAgPB::CombatAimPoint( edict_t *target, const Vector &eye, Vector &point, b
 
 edict_t *CAgPB::CurrentCombatWeapon( uintp &handle, bool &knife, int &clip, int &reserve ) const
 {
-    handle = (uintp)INVALID_EHANDLE_INDEX; knife = false; clip = reserve = -1;
-    if ( !GetNetVarHandleValue( "m_hActiveWeapon", &handle ) ) return NULL;
-    edict_t *weapon = HandleToEdict( handle );
+    knife = false; clip = reserve = -1;
+    edict_t *weapon = OwnedActiveWeapon( *this, handle );
     if ( weapon == NULL ) return NULL;
-    const BotNetVar *owner = AgPB_FindEntityNetVar( weapon, "m_hOwner" );
-    void *base = AgPB_EntityBase( weapon );
-    if ( owner == NULL || owner->type != DPT_Int || base == NULL ||
-         NetVar_GetHandle( base, *owner ) != AgPB_RefEHandle( m_pEdict ) ) return NULL;
     const char *name = weapon->GetClassName();
     knife = name != NULL && Q_stricmp( name, "weapon_knife" ) == 0;
     if ( knife ) return weapon;
@@ -666,7 +738,8 @@ void CAgPB::PauseCombatOwner( CGlobalVars *globals )
 }
 
 void CAgPB::UpdateCombatMovement( CGlobalVars *globals, CBotCmd &cmd, edict_t *target,
-                                 edict_t *weapon, bool fireIntent, bool reloadIntent, bool decisionTick )
+                                  edict_t *weapon, bool fireIntent, bool reloadIntent, bool decisionTick,
+                                  Vector &blockedCombatWish )
 {
     using namespace AgPBCombatMove;
     IPlayerInfo *enemy = m_Ctx.pPlayerInfoManager->GetPlayerInfo( target );
@@ -783,7 +856,14 @@ void CAgPB::UpdateCombatMovement( CGlobalVars *globals, CBotCmd &cmd, edict_t *t
             wish = toward * movement.forward;
         else if ( movement.side != 0.0f && CanCombatStep( right * movement.side, movement.duck, globals->interval_per_tick ) )
             wish = right * movement.side;
-        else wish.Init();
+        else
+        {
+            // The teammate layer can probe a side or retreat from this
+            // blocked intent. The original unsafe step stays discarded.
+            if ( !movement.stopForAccuracy )
+                blockedCombatWish = wish;
+            wish.Init();
+        }
     }
     // Aim may still be turning. Project the world wish into the final command
     // yaw, so a view change cannot turn retreat or strafe into forward motion.
@@ -813,7 +893,34 @@ void CAgPB::UpdateCombatMovement( CGlobalVars *globals, CBotCmd &cmd, edict_t *t
     }
 }
 
-bool CAgPB::UpdateCombat( CGlobalVars *globals, CBotCmd &cmd )
+void CAgPB::UpdateIdleWeaponZoom( CGlobalVars *globals, CBotCmd &cmd )
+{
+    using namespace AgPBFiring;
+    const float now = globals->curtime;
+    if ( !IdleZoomDue( now, m_flCombatZoomCheckAt ) || !m_bCombatEnabled || !agpb_combat.GetBool() ||
+         AgPB_GameMode() != AgPB_MODE_NORMAL || AgPB_IsRoundFrozen() || NetVar_HandleIsValid( m_uCombatEnemy ) ||
+         ( GetNetVarInt( "m_fFlags" ) & ( FL_ONGROUND | FL_FROZEN ) ) != FL_ONGROUND ||
+         GetNetVarInt( "movetype" ) == MOVETYPE_LADDER || m_Ladder.Active() ||
+         ( cmd.buttons & ( IN_ATTACK | IN_ATTACK2 | IN_USE | IN_RELOAD | IN_JUMP ) ) != 0 || cmd.weaponselect != 0 ||
+         ( m_LastSubmittedCmd.buttons & IN_ATTACK2 ) != 0 || m_WeaponSelection.pendingKey != 0 ||
+         NetVar_HandleIsValid( m_uBreakHandle ) ) return;
+    const AgPBTaskId task = m_Tasks.Current().id;
+    if ( task != AgPBTaskId::Normal && task != AgPBTaskId::MoveToPosition && task != AgPBTaskId::Investigate &&
+         task != AgPBTaskId::Camp && task != AgPBTaskId::Pause && task != AgPBTaskId::AgentIntention ) return;
+
+    uintp handle;
+    edict_t *weapon = OwnedActiveWeapon( *this, handle );
+    const WeaponZoom zoom = ReadWeaponZoom( *this, ClassifyWeapon( weapon ), now );
+    if ( zoom.resuming ) return;
+    if ( !IsZoomed( zoom.level ) ) { m_flCombatZoomCheckAt = -1.0f; return; }
+    if ( zoom.settling ) return;
+    float playerAttack, primaryAttack;
+    if ( ReadFloat( m_pEdict, "m_flNextAttack", playerAttack ) && now >= playerAttack &&
+         ReadFloat( weapon, "m_flNextPrimaryAttack", primaryAttack ) && now >= primaryAttack &&
+         SecondaryAttackReady( weapon, now ) ) cmd.buttons |= IN_ATTACK2;
+}
+
+bool CAgPB::UpdateCombat( CGlobalVars *globals, CBotCmd &cmd, Vector &blockedCombatWish )
 {
     // Confirm ammunition consumption before a killed/removed enemy releases
     // the overlay. Command counts alone are not evidence of an actual shot.
@@ -874,9 +981,9 @@ bool CAgPB::UpdateCombat( CGlobalVars *globals, CBotCmd &cmd )
     unsigned int legFlags = 0, nextLegFlags = 0;
     if ( m_iRouteIndex > 0 ) BotWaypoints().IsConnected( RouteNode( m_iRouteIndex - 1 ), RouteNode( m_iRouteIndex ), &legFlags );
     BotWaypoints().IsConnected( RouteNode( m_iRouteIndex ), RouteNode( m_iRouteIndex + 1 ), &nextLegFlags );
+    const bool jumpRoute = ( ( legFlags | nextLegFlags ) & AgPB_PATH_JUMP ) != 0;
     const bool unsupportedMovement = ( GetNetVarInt( "m_fFlags" ) & FL_ONGROUND ) == 0 ||
-        GetNetVarInt( "movetype", MOVETYPE_NONE ) == MOVETYPE_LADDER ||
-        ( ( legFlags | nextLegFlags ) & AgPB_PATH_JUMP ) != 0 ||
+        GetNetVarInt( "movetype", MOVETYPE_NONE ) == MOVETYPE_LADDER || jumpRoute ||
         ( routeNode != NULL && ( routeNode->flags & AgPB_WP_LADDER ) != 0 );
     const bool plantUse = task.id == AgPBTaskId::PlantBomb && GetNetVarInt( "m_bInBombZone" ) != 0;
     const bool defuseUse = task.id == AgPBTaskId::DefuseBomb &&
@@ -886,7 +993,9 @@ bool CAgPB::UpdateCombat( CGlobalVars *globals, CBotCmd &cmd )
     if ( unsupportedMovement || task.id == AgPBTaskId::EscapeBomb || plantUse || defuseUse || expired )
     {
         ClearCombat( unsupportedMovement ? "movement" : "objective-priority" );
-        ResetWeaponSelection( unsupportedMovement ? "movement" : "objective-priority" );
+        // The navigation pass owns a pending knife switch on a jump approach.
+        if ( !jumpRoute || task.id == AgPBTaskId::EscapeBomb || plantUse || defuseUse || expired )
+            ResetWeaponSelection( unsupportedMovement ? "movement" : "objective-priority" );
         return false;
     }
     Vector offset;
@@ -894,26 +1003,13 @@ bool CAgPB::UpdateCombat( CGlobalVars *globals, CBotCmd &cmd )
     const Vector eye = m_pInfo->GetAbsOrigin() + offset;
     uintp weaponHandle; bool knife; int clip, reserve;
     edict_t *weapon = CurrentCombatWeapon( weaponHandle, knife, clip, reserve );
-    // Recover an unusable active item or put away a knife before imposing
-    // firearm/melee acquisition constraints. The inventory policy can still
-    // choose a real loaded backup when CurrentCombatWeapon returned NULL.
-    if ( weapon == NULL || knife )
-    {
-        edict_t *known = hadEnemy ? HandleToEdict( m_uCombatEnemy ) : NULL;
-        Vector seen;
-        const bool visible = known != NULL && IsCombatEnemy( known, m_iCombatEnemyUserId ) &&
-            CombatAimPoint( known, eye, seen, false );
-        if ( UpdateWeaponSelection( globals, cmd, visible, visible ? ( seen - eye ).Length() : 0.0f ) )
-        { PauseCombatOwner( globals ); return true; }
-    }
-    if ( weapon == NULL ) { ClearCombat( "weapon-unavailable" ); return hadEnemy; }
+    // Acquire by vision even with a travel knife or an empty active item.
+    // Knife reach is checked when proposing a strike, not when finding a target.
     edict_t *target = hadEnemy ? HandleToEdict( m_uCombatEnemy ) : NULL;
     Vector point;
     unsigned int visibility = 0;
     const bool validTarget = !hadEnemy || IsCombatEnemy( target, m_iCombatEnemyUserId );
-    if ( hadEnemy && ( !validTarget ||
-         !CombatAimPoint( target, eye, point, false, &visibility ) ||
-         ( knife && !AgPB_ObstacleMeleeClear( m_Ctx, m_pEdict, target, eye, point ) ) ) )
+    if ( hadEnemy && ( !validTarget || !CombatAimPoint( target, eye, point, false, &visibility ) ) )
     {
         PauseCombatOwner( globals );
         if ( agpb_combat_debug.GetBool() ) RouteReport( "combat released ent=%d; route goal=#%d hop=%d owner=%llu",
@@ -938,8 +1034,7 @@ bool CAgPB::UpdateCombat( CGlobalVars *globals, CBotCmd &cmd )
             edict_t *candidate = m_Ctx.pEngine->PEntityOfEntIndex( i );
             Vector aim;
             unsigned int seen = 0;
-            if ( !IsCombatEnemy( candidate ) || !CombatAimPoint( candidate, eye, aim, false, &seen ) ||
-                 ( knife && !AgPB_ObstacleMeleeClear( m_Ctx, m_pEdict, candidate, eye, aim ) ) ) continue;
+            if ( !IsCombatEnemy( candidate ) || !CombatAimPoint( candidate, eye, aim, false, &seen ) ) continue;
             if ( !InsideViewCone( *this, eye, aim ) && !AgPBCombatSkill::ImmediateRearRecognition( m_iCombatSkill ) )
             {
                 if ( m_flCombatRearCheckAt == 0.0f ) m_flCombatRearCheckAt = now + RandomFloat( 0.3f, 0.7f );
@@ -951,7 +1046,7 @@ bool CAgPB::UpdateCombat( CGlobalVars *globals, CBotCmd &cmd )
         }
         if ( target == NULL )
         {
-            if ( UpdateWeaponSelection( globals, cmd, false, 0.0f ) )
+            if ( UpdateWeaponSelection( globals, cmd, NULL, 0.0f ) )
             { PauseCombatOwner( globals ); return true; }
             m_flCombatLastTime = -1.0f;
             m_pszCombatState = "scanning";
@@ -979,13 +1074,18 @@ bool CAgPB::UpdateCombat( CGlobalVars *globals, CBotCmd &cmd )
         AgPBCombatMove::Reset( m_CombatMovement );
         AgPBFiring::Reset( m_CombatFire );
         m_flCombatFirePause = 0.0f;
+        m_flNextBurstRequest = 0.0f;
         m_bCombatMovePlanValid = m_bCombatSniperStop = false;
     }
     cmd.forwardmove = cmd.sidemove = cmd.upmove = 0.0f;
     cmd.buttons &= ~( IN_ATTACK | IN_ATTACK2 | IN_RELOAD | IN_USE | IN_JUMP );
     cmd.weaponselect = 0;
     if ( ( GetNetVarInt( "m_fFlags" ) & FL_DUCKING ) != 0 ) cmd.buttons |= IN_DUCK;
-    if ( UpdateWeaponSelection( globals, cmd, true, ( point - eye ).Length() ) ) return true;
+    if ( UpdateWeaponSelection( globals, cmd, target, ( point - eye ).Length() ) ) return true;
+    if ( weapon == NULL ) { ClearCombat( "weapon-unavailable" ); return false; }
+    const AgPBFiring::Weapon weaponKind = ClassifyWeapon( weapon );
+    const WeaponZoom zoom = ReadWeaponZoom( *this, weaponKind, now );
+    if ( AgPBFiring::SupportsZoom( weaponKind ) ) m_flCombatZoomCheckAt = now;
     IPlayerInfo *enemyInfo = m_Ctx.pPlayerInfoManager->GetPlayerInfo( target );
     const Vector enemyOrigin = enemyInfo->GetAbsOrigin();
     const Vector enemyMins = enemyInfo->GetPlayerMins(), enemyMaxs = enemyInfo->GetPlayerMaxs();
@@ -1027,7 +1127,6 @@ bool CAgPB::UpdateCombat( CGlobalVars *globals, CBotCmd &cmd )
     const bool wantsFire = AgPBCombatSkill::WantsFire( now >= m_flCombatSurpriseUntil, DotProduct( currentForward, toAim ) );
     const bool sniper = SniperWeapon( weapon );
     const bool inViewCone = InsideViewCone( *this, eye, point );
-    const int fov = GetNetVarInt( "m_iFOV", 0 );
     const float previousDeviation = m_vCombatAimDeviation.Length();
     float predictedPitch = 0.0f, predictedYaw = 0.0f;
     // The cast after integer skill/100 is intentional in SyPB: anticipation
@@ -1047,14 +1146,14 @@ bool CAgPB::UpdateCombat( CGlobalVars *globals, CBotCmd &cmd )
     const AgPBCombatSkill::View view = AgPBCombatSkill::StepAim( current,
         AgPBCombatSkill::View{ wanted.x, wanted.y }, predictedPitch, predictedYaw,
         globals->interval_per_tick, m_iCombatSkill, wantsFire, sniper, inViewCone,
-        previousDeviation, fov > 0 && fov < 90 );
+        previousDeviation, AgPBFiring::IsZoomed( zoom.level ) && !zoom.resuming );
     m_bCombatPerfectAim = AgPBCombatSkill::PerfectAim( m_iCombatSkill, wantsFire, sniper );
     m_vCombatAimDeviation.Init( AngleDiff( wanted.x + predictedPitch, current.pitch ),
         AngleDiff( wanted.y + predictedYaw, current.yaw ), 0 );
     cmd.viewangles.Init( view.pitch, view.yaw, 0 );
     m_flCombatAimError = MAX( fabsf( AngleDiff( wanted.x, view.pitch ) ), fabsf( AngleDiff( wanted.y, view.yaw ) ) );
     m_pszCombatState = now < m_flCombatSurpriseUntil ? "reacting" : "aiming";
-    const bool reloadIntent = !knife && clip == 0 && reserve > 0;
+    const bool reloadIntent = !knife && reserve > 0 && ( clip == 0 || m_bCombatReloadRequested );
     float playerAttack = 0.0f, weaponAttack = 0.0f;
     const bool knownTimers = ReadFloat( m_pEdict, "m_flNextAttack", playerAttack ) &&
         ReadFloat( weapon, "m_flNextPrimaryAttack", weaponAttack );
@@ -1062,7 +1161,7 @@ bool CAgPB::UpdateCombat( CGlobalVars *globals, CBotCmd &cmd )
     const bool aligning = m_bCombatRelease;
     m_bCombatRelease = false; // Only acquisition/equipment ownership releases a command.
     AgPBFiring::Input fire;
-    fire.weapon = ClassifyWeapon( weapon ); fire.now = now; fire.distance = ( point - eye ).Length();
+    fire.weapon = weaponKind; fire.now = now; fire.distance = ( point - eye ).Length();
     fire.skill = m_iCombatSkill; fire.previousAttack = ( m_LastSubmittedCmd.buttons & IN_ATTACK ) != 0;
     fire.canAttack = nativeReady; fire.reacted = wantsFire && !aligning && knownTimers;
     fire.clipReady = knife || clip > 0; fire.reloading = reloadIntent;
@@ -1079,6 +1178,22 @@ bool CAgPB::UpdateCombat( CGlobalVars *globals, CBotCmd &cmd )
         ? FirstHit( m_Ctx, m_pEdict, target, eye, eye + fireDirection * 40.0f ) &&
           AgPB_ObstacleMeleeClear( m_Ctx, m_pEdict, target, eye, point )
         : FireRayAllowed( m_Ctx, m_pEdict, target, weapon, eye, fireDirection, idealPoint );
+    const bool burstSwitch = fire.reacted && fire.lineClear && fire.clipReady && !reloadIntent &&
+        now >= m_flNextBurstRequest && now >= m_CombatFire.nextShotAt &&
+        ( m_LastSubmittedCmd.buttons & IN_ATTACK2 ) == 0 &&
+        AgPBFiring::DecisionDue( m_CombatFire, fire ) && BurstSwitchReady( *this, weapon, fire, playerAttack );
+    const bool zoomPending = AgPBFiring::ToggleCombatZoom( fire.weapon, ( idealPoint - eye ).Length(), fire.skill, zoom.level );
+    const bool zoomWaiting = fire.reacted && fire.lineClear && fire.clipReady && !reloadIntent &&
+        ( zoomPending || zoom.resuming || zoom.settling );
+    // Do not let a held rifle repeatedly restart the native cooldown before
+    // the requested zoom edge can reach ItemPostFrame. This also allows a
+    // two-stage sniper zoom to settle before the first shot.
+    const bool zoomSwitch = zoomWaiting && zoomPending && !zoom.resuming && !zoom.settling && nativeReady &&
+        now >= m_CombatFire.nextShotAt && ( m_LastSubmittedCmd.buttons & IN_ATTACK2 ) == 0 &&
+        SecondaryAttackReady( weapon, now );
+    // The mode command consumes this decision. Drop the primary latch so
+    // the next shot gets a fresh recoil check with the observed mode.
+    fire.paused = fire.paused || burstSwitch || zoomWaiting;
     AgPBFiring::Output proposal = AgPBFiring::Step( m_CombatFire, fire );
     const bool decisionTick = proposal.freshDecision;
     if ( !wantsFire ) m_bCombatSniperStop = false;
@@ -1102,14 +1217,32 @@ bool CAgPB::UpdateCombat( CGlobalVars *globals, CBotCmd &cmd )
         if ( fire.paused ) proposal = AgPBFiring::Step( m_CombatFire, fire );
     }
     m_pszCombatFire = AgPBFiring::ReasonName( proposal.reason ); m_bCombatFireHold = proposal.hold;
-    if ( proposal.attack ) { cmd.buttons |= IN_ATTACK; m_pszCombatState = "firing"; }
+    if ( burstSwitch )
+    {
+        // Source consumes secondary attack before primary in ItemPostFrame.
+        // Future switch decisions read the actual mode. Native weapon code
+        // schedules the remaining bullets when primary attack starts.
+        cmd.buttons |= IN_ATTACK2;
+        m_flNextBurstRequest = now + 0.3f;
+        m_pszCombatFire = "burst-switch";
+        m_bCombatFireHold = false;
+        m_pszCombatState = "burst-switch";
+    }
+    else if ( zoomWaiting )
+    {
+        if ( zoomSwitch ) cmd.buttons |= IN_ATTACK2;
+        m_pszCombatState = m_pszCombatFire = zoomSwitch ? "zoom-switch" : "zoom-wait";
+        m_bCombatFireHold = false;
+    }
+    else if ( proposal.attack ) { cmd.buttons |= IN_ATTACK; m_pszCombatState = "firing"; }
     else if ( reloadIntent ) m_pszCombatState = "reloading";
     else if ( fire.paused ) m_pszCombatState = "recoil-pause";
     else if ( !fire.lineClear ) m_pszCombatState = "fire-blocked";
     // CombatFight uses this command's actual attack proposal. An auto trigger
     // remains held through native cooldown; semi-auto release/AI-pause commands
     // may move. Braking/posture can still withhold the final submitted shot.
-    UpdateCombatMovement( globals, cmd, target, weapon, ( cmd.buttons & IN_ATTACK ) != 0, reloadIntent, decisionTick );
+    UpdateCombatMovement( globals, cmd, target, weapon, ( cmd.buttons & IN_ATTACK ) != 0,
+                          reloadIntent, decisionTick, blockedCombatWish );
     const bool submittedAttack = ( cmd.buttons & IN_ATTACK ) != 0;
     AgPBFiring::Commit( m_CombatFire, fire, proposal, submittedAttack );
     if ( submittedAttack ) m_bCombatSniperStop = false;
@@ -1144,6 +1277,18 @@ void CAgPB::ReportCombat() const
         (unsigned long long)m_CombatFire.decisionId, m_CombatFire.nextDecisionAt, m_bCombatSniperStop ? 1 : 0 );
     uintp heldHandle = (uintp)INVALID_EHANDLE_INDEX;
     edict_t *held = GetNetVarHandleValue( "m_hActiveWeapon", &heldHandle ) ? HandleToEdict( heldHandle ) : NULL;
+    const AgPBFiring::Weapon heldKind = ClassifyWeapon( held );
+    if ( AgPBFiring::SupportsBurstMode( heldKind ) )
+        RouteReport( "combat burst: mode=%d remaining=%d retry-at=%.3f",
+            AgPB_ReadNetVarInt( held, "m_bBurstMode", -1 ),
+            AgPB_ReadNetVarInt( held, "m_iBurstShotsRemaining", -1 ), m_flNextBurstRequest );
+    if ( AgPBFiring::SupportsZoom( heldKind ) )
+    {
+        const WeaponZoom zoom = ReadWeaponZoom( *this, heldKind, now );
+        RouteReport( "combat zoom: fov=%d default-fov=%d scoped=%d resuming=%d settling=%d last-check=%.3f",
+            GetNetVarInt( "m_iFOV", -1 ), GetNetVarInt( "m_iDefaultFOV", -1 ), AgPBFiring::IsZoomed( zoom.level ) ? 1 : 0,
+            zoom.resuming ? 1 : 0, zoom.settling ? 1 : 0, m_flCombatZoomCheckAt );
+    }
     AgPBBullet::Profile profile; const char *ammo = "unknown";
     const bool known = ReadBulletProfile( held, profile, &ammo );
     RouteReport( "weapon ballistics: known=%d class=%s ammo=%s handle=0x%llX mode=%d surfaces=%s power=%.2f penetration-distance=%.1f count=%d base-damage=%.2f range=%.1f range-modifier=%.4f",

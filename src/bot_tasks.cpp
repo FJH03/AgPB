@@ -105,6 +105,7 @@ void CAgPB::ResetTaskSystem( const char *reason )
 	m_pszTaskResetReason = reason;
 	ClearAgentIntent( reason );
 	ClearCombat( reason );
+	m_flCombatZoomCheckAt = -1.0f;
 	ResetWeaponSelection( reason );
 	ResetSearch();
 	ResetAutonomy( gpGlobals != NULL ? gpGlobals->curtime : 0.0f );
@@ -114,6 +115,7 @@ void CAgPB::ResetTaskSystem( const char *reason )
 	m_flNextTaskPlan = m_flTaskActionStarted = 0.0f;
 	m_uDeclinedObjectiveHandle = (uintp)INVALID_EHANDLE_INDEX;
 	m_flObjectiveRetryAfter = 0.0f;
+	ResetWeaponPickup();
 	ResetTaskUse();
 	ResetBombEscape();
 	m_bHasVelOverride = false;
@@ -166,6 +168,7 @@ void CAgPB::CompleteCurrentTask( const char *reason, bool failed )
 {
 	const AgPBTask task = m_Tasks.Current();
 	if ( task.id == AgPBTaskId::Investigate ) m_Search.investigation = AgPBSearch::Investigation();
+	if ( task.id == AgPBTaskId::PickupWeapon ) FinishWeaponPickup( task, failed );
 	RouteReport( "task %s %s: %s", AgPBTaskName( task.id ), failed ? "failed" : "complete", reason );
 	if ( failed && task.id == AgPBTaskId::EscapeBomb )
 	{
@@ -183,7 +186,7 @@ void CAgPB::CompleteCurrentTask( const char *reason, bool failed )
 		ResetTaskUse();
 		return;
 	}
-	if ( failed && task.hasEntity )
+	if ( failed && task.hasEntity && task.id != AgPBTaskId::PickupWeapon )
 	{
 		m_uDeclinedObjectiveHandle = (uintp)task.entityHandle;
 		m_flObjectiveRetryAfter = ( gpGlobals != NULL ? gpGlobals->curtime : 0.0f ) + 5.0f;
@@ -678,6 +681,12 @@ void CAgPB::UpdateTasks( CGlobalVars *globals, CBotCmd &cmd )
 	if ( m_Tasks.Current().id != AgPBTaskId::Normal ) RefreshTaskPlan( globals );
 	if ( m_Search.investigation.token != 0 && m_Tasks.State( m_Search.investigation.token ) == AgPBTaskState::Missing )
 		m_Search.investigation = AgPBSearch::Investigation();
+	// The combat pass has already declined movement ownership this frame.
+	// Give a newly selected task and Normal's objective planning first refusal.
+	const AgPBTask &current = m_Tasks.Current();
+	if ( current.token == m_uObservedTaskToken &&
+	     ( current.id != AgPBTaskId::Normal || globals->curtime < m_flNextTaskPlan ) )
+		PlanWeaponPickup( globals );
 	AgPBTask task = m_Tasks.Current();
 	if ( task.id != AgPBTaskId::DestroyBreakable && m_uBreakTaskToken != 0 ) ClearBreakable();
 	if ( task.id != AgPBTaskId::DestroyBreakable && m_uRouteTaskToken != task.token &&
@@ -718,6 +727,11 @@ void CAgPB::UpdateTasks( CGlobalVars *globals, CBotCmd &cmd )
 		return;
 	}
 	if ( ExecuteObjectiveTask( globals, cmd ) ) return;
+	if ( task.id == AgPBTaskId::PickupWeapon )
+	{
+		UpdateWeaponPickup( globals, cmd );
+		return;
+	}
 	if ( task.id == AgPBTaskId::MoveToPosition || task.id == AgPBTaskId::AgentIntention )
 	{
 		const bool agent = task.id == AgPBTaskId::AgentIntention;

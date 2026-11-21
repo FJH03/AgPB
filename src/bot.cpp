@@ -2,8 +2,12 @@
  * AgPB - bot 生命周期、队伍切换与底层命令注入。
  */
 
+#include <tier1/KeyValues.h>
 #include <tier1/strtools.h>
 
+#include <filesystem.h>
+#include <iclient.h>
+#include <iserver.h>
 #include <iserverunknown.h>
 #include <ihandleentity.h>
 #include <in_buttons.h>
@@ -28,6 +32,8 @@
 
 extern ConVar agpb_weapons_debug;
 
+extern IFileSystem *filesystem;
+extern IServerGameClients *gameclients;
 extern CGlobalVars *gpGlobals;
 extern bool AgPB_IsRoundFrozen();
 
@@ -39,6 +45,8 @@ ConVar agpb_camp_max( "agpb_camp_max", "20", FCVAR_GAMEDLL,
 
 static ConVar agpb_obstacle_debug( "agpb_obstacle_debug", "0", FCVAR_GAMEDLL,
                                   "Log path obstacle changes using Source ZBot-style volume probes." );
+static ConVar agpb_nametag( "agpb_nametag", "1", FCVAR_GAMEDLL,
+	"Set [AgPB] as the clan tag of newly created csczs bots." );
 
 // ---------------------------------------------------------------------------
 // 最小导航的参数
@@ -54,7 +62,7 @@ static ConVar agpb_obstacle_debug( "agpb_obstacle_debug", "0", FCVAR_GAMEDLL,
 
 // 找起点时允许的最大吸附距离
 #define AgPB_ROUTE_PICK      512.0f
-#define AgPB_ROUTE_ENTRY_TOLERANCE 4.0f
+static constexpr float AgPB_ROUTE_ENTRY_TOLERANCE = AgPBTerminal::AnchorTolerance;
 
 // 随机漫游（agpb_bot_roam）：优先挑直线距离 ≥ 300 的点；挑不到可达点就 1 秒后再试
 #define AgPB_ROAM_MIN_DIST   300.0f
@@ -135,12 +143,29 @@ bool CAgPB::Create( const BotEngineContext &ctx,
 						const char *name,
 						int team,
 						char *error,
-						size_t maxlen )
+						size_t maxlen,
+						const AgPBBotAddOptions &options )
 {
 	if ( !ctx.IsReady() )
 	{
 		if ( error && maxlen )
 			Q_snprintf( error, (int)maxlen, "IBotManager / IVEngineServer / IPlayerInfoManager unavailable" );
+		return false;
+	}
+
+	if ( ( options.skill != -1 && ( options.skill < 1 || options.skill > 100 ) ) ||
+	     options.personality < -1 || options.personality > 2 ||
+	     options.appearance < 0 || options.appearance > AgPB_TEAM_APPEARANCE_COUNT )
+	{
+		if ( error && maxlen )
+			Q_snprintf( error, (int)maxlen, "Invalid bot skill, personality, or appearance" );
+		return false;
+	}
+	if ( options.appearance != 0 &&
+	     ( ctx.pHelpers == NULL || ( team != AgPB_TEAM_T && team != AgPB_TEAM_CT ) ) )
+	{
+		if ( error && maxlen )
+			Q_snprintf( error, (int)maxlen, "A specified appearance requires a playing team and client commands" );
 		return false;
 	}
 
@@ -169,14 +194,43 @@ bool CAgPB::Create( const BotEngineContext &ctx,
 	{
 		if ( error && maxlen )
 			Q_snprintf( error, (int)maxlen, "GetBotController() returned NULL (fake client not recognised as a bot?)" );
+		Destroy();
 		return false;
 	}
 
 	m_pInfo = ctx.pPlayerInfoManager->GetPlayerInfo( pEdict );
+	if ( m_pInfo == NULL )
+	{
+		if ( error && maxlen )
+			Q_snprintf( error, (int)maxlen, "GetPlayerInfo() returned NULL for the fake client" );
+		Destroy();
+		return false;
+	}
+
+	if ( options.skill != -1 )
+		InitializeCombatSkill( options.skill );
+	if ( options.personality != -1 )
+	{
+		AgPB_LocalInitializePersonality( m_Autonomy,
+			static_cast<AgPBLocalPersonality>( options.personality ),
+			static_cast<std::uint32_t>( RandomInt( 1, 0x7fffffff ) ) );
+	}
+	// ZBot rolls one silencer preference per profile, shared by USP and M4A1.
+	m_bPrefersSilencer = RandomInt( 1, 10 ) >= 4;
 
 	// 非法队伍值等于"不主动入队"，交给 SetTeam 校验。
 	m_iTeam = 0;
 	SetTeam( team );
+	m_iAppearance = options.appearance;
+
+#if defined( AGPB_GAME_CSCZS )
+	// [game-diff] csczs ClanTagChanged calls CCSPlayer::SetClanTag server-side.
+	if ( agpb_nametag.GetBool() && gameclients != NULL )
+	{
+		KeyValues::AutoDelete command( new KeyValues( "ClanTagChanged", "tag", "[AgPB]" ) );
+		gameclients->ClientCommandKeyValues( pEdict, command );
+	}
+#endif
 
 	return true;
 }
@@ -211,6 +265,8 @@ bool CAgPB::SetTeam( int team )
 			return false;
 	}
 
+	if ( m_iTeam != team )
+		m_iAppearance = 0;
 	m_iTeam = team;
 	ResetTaskSystem( "team-request" );
 	m_bRoam = false;
@@ -241,7 +297,12 @@ void CAgPB::TryJoinTeam( float flCurTime )
 		if ( ( m_iTeam == AgPB_TEAM_T || m_iTeam == AgPB_TEAM_CT ) && !m_bClassRequested )
 		{
 			m_bClassRequested = true;
-			RunClientCommand( m_Ctx.pHelpers, m_pEdict, "joinclass 0" );
+			// [game-diff] The native class list places CT immediately after all T appearances.
+			const int classId = m_iAppearance > 0 && m_iTeam == AgPB_TEAM_CT
+				? m_iAppearance + AgPB_TEAM_APPEARANCE_COUNT : m_iAppearance;
+			char command[32];
+			Q_snprintf( command, (int)sizeof( command ), "joinclass %d", classId );
+			RunClientCommand( m_Ctx.pHelpers, m_pEdict, command );
 		}
 
 		return;
@@ -307,22 +368,35 @@ void CAgPB::Think( CGlobalVars *pGlobals )
 	}
 	else
 	{
+		if ( !m_bWasAlive || m_uKnifeSpawnRound != AgPB_PurchaseRound().epoch )
+			BeginKnifeSpawn( pGlobals->curtime );
 		m_bWasAlive = true;
+		UpdatePurchases( pGlobals );
 		if ( m_Ladder.Active() && ( AgPB_IsRoundFrozen() || ( GetNetVarInt( "m_fFlags" ) & FL_FROZEN ) != 0 ) )
 		{
 			// UpdateTasks returns before UpdateRoute during freeze. Preserve the
 			// authored dismount owner while suspending its movement deadlines.
 			m_Ladder.started = m_Ladder.progressAt = pGlobals->curtime;
 			m_Ladder.bestDistance = -1.0f;
+			if ( m_Ladder.entryWaitSince >= 0.0f ) m_Ladder.entryWaitSince = pGlobals->curtime;
 		}
 		UpdateAgentIntent( pGlobals );
-		if ( m_Ladder.Active() || !UpdateCombat( pGlobals, cmd ) ) UpdateTasks( pGlobals, cmd );
+		Vector blockedWish( 0, 0, 0 );
+		if ( m_Ladder.Active() || !UpdateCombat( pGlobals, cmd, blockedWish ) )
+		{
+			m_vBlockedRouteWish.Init();
+			UpdateTasks( pGlobals, cmd );
+			blockedWish = m_vBlockedRouteWish;
+			if ( HasRoute() && !m_Ladder.Active() )
+				UpdateWeaponSelection( pGlobals, cmd, NULL, 0.0f, true );
+			UpdateIdleWeaponZoom( pGlobals, cmd );
+		}
 		else ResetPropAvoidance();
 		// Task posture survives every command owner, including the released
 		// target-loss frame, weapon selection and a route already cleared at camp.
 		ApplyTaskPosture( cmd );
 		if ( m_Ladder.Active() ) ResetPlayerAvoidance();
-		else UpdatePlayerAvoidance( pGlobals, cmd );
+		else UpdatePlayerAvoidance( pGlobals, cmd, blockedWish );
 	}
 
 	// 【弹道跳/调试】把本 tick 的速度覆盖值写进引擎（真成员地址），
@@ -340,6 +414,7 @@ void CAgPB::Think( CGlobalVars *pGlobals )
 	cmd.random_seed = (int)( (unsigned int)pGlobals->tickcount * 1103515245u + 12345u );
 	float jumpPreviousMax = 0.0f;
 	const bool injectedJump = ApplyJumpLaunch( pGlobals, cmd, jumpPreviousMax );
+	if ( alive ) UpdateSilencer( pGlobals, cmd );
 
 	m_LastSubmittedCmd = cmd;
 	if ( ( cmd.buttons & IN_ATTACK ) != 0 )
@@ -348,7 +423,7 @@ void CAgPB::Think( CGlobalVars *pGlobals )
 		m_iLastSubmittedAttackTick = cmd.tick_count;
 	}
 	m_pController->RunPlayerMove( &cmd );
-	if ( agpb_weapons_debug.GetBool() && ( cmd.weaponselect != 0 || ( cmd.buttons & IN_RELOAD ) != 0 ) )
+	if ( agpb_weapons_debug.GetBool() && ( cmd.weaponselect != 0 || ( cmd.buttons & ( IN_ATTACK2 | IN_RELOAD ) ) != 0 ) )
 	{
 		uintp held = (uintp)INVALID_EHANDLE_INDEX;
 		GetNetVarHandleValue( "m_hActiveWeapon", &held );
@@ -412,6 +487,7 @@ void CAgPB::ClearRoute()
 {
 	ResetPropAvoidance();
 	ResetPlayerAvoidance();
+	m_vBlockedRouteWish.Init();
 	ClearBreakable();
 	m_vecRoute.RemoveAll();
 	m_iRouteIndex = 0;
@@ -1099,11 +1175,15 @@ void CAgPB::ReportClearance() const
 }
 
 static bool RouteNodeReached( const AgPBPath &node, const Vector &position, const Vector &velocity,
-                              bool entry, bool takeoff, bool jumpLeg, bool grounded, float interval )
+                              bool entry, bool takeoff, bool jumpLeg, bool grounded, float interval,
+                              bool tightIntermediate )
 {
 	const Vector delta = node.origin - position;
 	if ( entry || takeoff )
-		return grounded && delta.Length() < AgPB_ROUTE_ENTRY_TOLERANCE;
+		return AgPBTerminal::AnchorPositionInside( delta.x, delta.y, delta.z, grounded );
+	if ( tightIntermediate )
+		return AgPBTerminal::TightIntermediateReached( delta.x, delta.y, delta.z, grounded,
+			velocity.x, velocity.y, velocity.z );
 	if ( jumpLeg && ( !grounded || fabsf( delta.z ) >= AgPB_ROUTE_ENTRY_TOLERANCE ) )
 		return false;
 	const float radius = MAX( (float)node.radius, 4.0f );
@@ -1526,6 +1606,73 @@ bool CAgPB::UpdateLadderRoute( CGlobalVars *globals, CBotCmd &cmd )
 		RouteReport( "ladder route lost authored endpoints - stopped" );
 		ClearRoute(); LadderCommand( cmd, 0, cmd.viewangles.y, 0 ); return true;
 	}
+	// SyPB pauses at an occupied entry. Reserve its authored ladder only when
+	// about to mount, so competing approaches cannot both wait on each other.
+	const bool approaching = !onLadder && m_Ladder.stage == Stage::Approach;
+	if ( approaching && std::isfinite( now ) && now >= m_Ladder.started && AgPB_GameMode() == AgPB_MODE_NORMAL &&
+		( entry->origin - position ).LengthSqr() <= 48.0f * 48.0f )
+	{
+		if ( now >= m_Ladder.entryRetryAt || now < m_Ladder.entryWaitSince )
+		{
+			int blocker = 0;
+			if ( !m_Ladder.entryClaimed )
+			{
+				CAgPBManager &bots = AgPB_Bots();
+				for ( int i = 0; i < bots.Count() && blocker == 0; ++i )
+				{
+					const CAgPB *peer = bots.Get( i );
+					if ( peer == NULL || peer == this || !peer->m_Ladder.Active() ||
+						( !peer->m_Ladder.entryClaimed && !peer->m_Ladder.attached ) || !peer->HasRoute() ||
+						peer->m_Ladder.owner != peer->m_uRouteTaskToken ||
+						peer->m_Ladder.owner != peer->m_Tasks.Current().token || !peer->IsAlive() ) continue;
+					for ( int a = m_Ladder.first; a <= m_Ladder.last && blocker == 0; ++a )
+						for ( int b = peer->m_Ladder.first; b <= peer->m_Ladder.last; ++b )
+							if ( RouteNode( a ) == peer->RouteNode( b ) ) { blocker = peer->Index(); break; }
+				}
+			}
+			// CS-EBOT also checks players physically on the ladder. Compare
+			// their feet with the spans between the authored ladder points.
+			for ( int slot = 1; slot <= globals->maxClients && blocker == 0; ++slot )
+			{
+				if ( slot == m_iIndex ) continue;
+				edict_t *entity = m_Ctx.pEngine->PEntityOfEntIndex( slot );
+				if ( entity == NULL || entity->IsFree() ) continue;
+				IPlayerInfo *info = m_Ctx.pPlayerInfoManager->GetPlayerInfo( entity );
+				if ( info == NULL || !info->IsConnected() || !info->IsPlayer() || info->IsObserver() || info->IsDead() ||
+					AgPB_ReadNetVarInt( entity, "movetype", MOVETYPE_NONE ) != MOVETYPE_LADDER ||
+					AgPB_ReadNetVarInt( entity, "m_lifeState", -1 ) != LIFE_ALIVE ) continue;
+				const Vector other = info->GetAbsOrigin();
+				if ( !other.IsValid() ) continue;
+				for ( int i = m_Ladder.first; i < m_Ladder.last && blocker == 0; ++i )
+				{
+					const AgPBPath *from = wp.Get( RouteNode( i ) ), *to = wp.Get( RouteNode( i + 1 ) );
+					if ( from == NULL || to == NULL ) continue;
+					if ( CalcDistanceSqrToLineSegment( other, from->origin, to->origin ) <= 32.0f * 32.0f ) blocker = slot;
+				}
+			}
+			if ( blocker != 0 )
+			{
+				if ( m_Ladder.entryWaitSince < 0.0f )
+					RouteReport( "ladder entry #%d occupied by client #%d; waiting", RouteNode( m_Ladder.first ), blocker );
+				PauseEntry( m_Ladder, now );
+			}
+			else
+			{
+				ResumeEntry( m_Ladder, now );
+				m_Ladder.entryClaimed = true;
+			}
+		}
+		if ( m_Ladder.entryWaitSince >= 0.0f )
+		{
+			LadderCommand( cmd, cmd.viewangles.x, cmd.viewangles.y, 0 );
+			return true;
+		}
+	}
+	else
+	{
+		ResumeEntry( m_Ladder, now );
+		if ( approaching ) m_Ladder.entryClaimed = false;
+	}
 	if ( onLadder )
 	{
 		m_Ladder.attached = true;
@@ -1677,6 +1824,12 @@ void CAgPB::UpdateRoute( CGlobalVars *pGlobals, CBotCmd &cmd )
 		m_flStuckRecoveryUntil = 0.0f;
 	}
 	const bool bTerminal = m_iRouteIndex + 1 == m_vecRoute.Count();
+	const int routeMoveType = GetNetVarInt( "movetype", MOVETYPE_NONE );
+	const bool bTightIntermediate = AgPBTerminal::TightIntermediate( (float)pNode->radius,
+		bTerminal, bEntry, bTakeoff, bJumpLeg,
+		( pNode->flags & AgPB_WP_LADDER ) != 0 || routeMoveType == MOVETYPE_LADDER );
+	const bool bTightControl = AgPBTerminal::TightIntermediateControl( bTightIntermediate,
+		bGrounded, routeMoveType == MOVETYPE_WALK, vDelta.z );
 	Vector velocity;
 	if ( !ReadRouteVelocity( *this, velocity ) )
 	{
@@ -1696,7 +1849,7 @@ void CAgPB::UpdateRoute( CGlobalVars *pGlobals, CBotCmd &cmd )
 	{
 		if ( m_flRouteProgressDistance < 0.0f )
 			m_flRouteProgressDistance = progressDistance;
-		else if ( m_flRouteProgressDistance - progressDistance >= ( bTerminal ? 0.25f : AgPB_STUCK_MOVE ) )
+		else if ( m_flRouteProgressDistance - progressDistance >= ( ( bTerminal || bTightControl ) ? 0.25f : AgPB_STUCK_MOVE ) )
 		{
 			m_flRouteProgressDistance = progressDistance;
 			m_flStuckCheckTime = pGlobals->curtime + AgPB_STUCK_WINDOW;
@@ -1719,7 +1872,7 @@ void CAgPB::UpdateRoute( CGlobalVars *pGlobals, CBotCmd &cmd )
 		}
 	}
 	else bArrived = RouteNodeReached( *pNode, vPos, velocity,
-		bEntry, bTakeoff, bJumpLeg, bGrounded, pGlobals->interval_per_tick );
+		bEntry, bTakeoff, bJumpLeg, bGrounded, pGlobals->interval_per_tick, bTightIntermediate );
 
 	if ( bArrived )
 	{
@@ -1752,7 +1905,7 @@ void CAgPB::UpdateRoute( CGlobalVars *pGlobals, CBotCmd &cmd )
 	// 拿三维向量算出来的 yaw 会乱跳（机器人转头撞墙）；这时保持当前朝向。
 	Vector vFlat( vDelta.x, vDelta.y, 0.0f );
 	const bool smoothGroundView = bGrounded && !bJumpLeg && !bTakeoff &&
-		( pNode->flags & AgPB_WP_LADDER ) == 0 && GetNetVarInt( "movetype", MOVETYPE_NONE ) != MOVETYPE_LADDER;
+		( pNode->flags & AgPB_WP_LADDER ) == 0 && routeMoveType != MOVETYPE_LADDER;
 
 	if ( vFlat.LengthSqr() > 1.0f )
 	{
@@ -1796,16 +1949,17 @@ void CAgPB::UpdateRoute( CGlobalVars *pGlobals, CBotCmd &cmd )
 		cmd.forwardmove = wish.forward; cmd.sidemove = wish.side;
 	}
 
-	// A completed jump may land slightly short of its small authored radius.
-	// Align on the ground rather than restarting the same jump. Intermediate
-	// nodes still advance immediately when reached; only the final node settles.
-	if ( bTerminalControl || bLandedJumpLeg )
+	// Align a completed jump on the ground without restarting it. A following
+	// takeoff must reach the same precise 3D anchor used by route acceptance.
+	// A tight ordinary ground anchor also brakes before handing off a turn;
+	// it needs no terminal stable window and cannot brake a different-floor drop.
+	if ( bTerminalControl || bLandedJumpLeg || bTightControl )
 	{
 		static ConVarRef acceleration( "sv_accelerate" );
 		static ConVarRef friction( "sv_friction" );
 		static ConVarRef stopSpeed( "sv_stopspeed" );
-		const bool inside = AgPBTerminal::ControlPositionInside( vDelta.x, vDelta.y, vDelta.z,
-			(float)pNode->radius, bGrounded );
+		const bool inside = AgPBTerminal::ControlApproachInside( vDelta.x, vDelta.y, vDelta.z,
+			(float)pNode->radius, bGrounded, bTerminal, bEntry, bTakeoff, bTightIntermediate );
 		const AgPBTerminal::Wish wish = AgPBTerminal::ComputeWish( vDelta.x, vDelta.y,
 			velocity.x, velocity.y, pGlobals->interval_per_tick,
 			acceleration.IsValid() ? acceleration.GetFloat() : 5.0f,
@@ -1902,6 +2056,15 @@ void CAgPB::UpdateRoute( CGlobalVars *pGlobals, CBotCmd &cmd )
 				UpdateBreakable( pGlobals, cmd );
 				return;
 			}
+			// Only a traced teammate detour may replace this stopped command.
+			if ( smoothGroundView && m_flRouteSettleSince < 0.0f &&
+				m_uRouteTaskToken == m_Tasks.Current().token )
+			{
+				Vector forward, right;
+				AngleVectors( QAngle( 0, cmd.viewangles.y, 0 ), &forward, &right, NULL );
+				const Vector wish = forward * cmd.forwardmove + right * cmd.sidemove;
+				if ( DotProduct( wish, vFlat ) > 0.0f ) m_vBlockedRouteWish = wish;
+			}
 			cmd.forwardmove = cmd.sidemove = cmd.upmove = 0.0f;
 		}
 		if ( pGlobals->curtime < m_flStuckRecoveryUntil )
@@ -1919,28 +2082,20 @@ void CAgPB::UpdateRoute( CGlobalVars *pGlobals, CBotCmd &cmd )
 		const Vector authored = wp.JumpVelocity( RouteNode( m_iRouteIndex - 1 ), iNode );
 		const Vector launchDirection = authored.Length2DSqr() > 0.0001f
 			? Vector( authored.x, authored.y, 0 ) : Vector( vDelta.x, vDelta.y, 0 );
-		// Snap the launch view after all movement/avoidance calculations.
-		// Flight and landing remain engine-controlled; no air tick reinjects.
-		if ( launchDirection.Length2DSqr() > 0.0001f )
-		{
-			QAngle launch; VectorAngles( launchDirection, launch );
-			cmd.viewangles.Init( 0, launch.y, 0 );
-			cmd.sidemove = 0.0f;
-		}
+		const bool directionKnown = launchDirection.Length2DSqr() > 0.0001f;
+		QAngle launch( 0, 0, 0 );
+		if ( directionKnown ) VectorAngles( launchDirection, launch );
 		const AgPBJump::Vector3 requested( authored.x, authored.y, authored.z );
-		if ( AgPBJump::NonZero( requested ) )
+		const AgPBJump::Conditions conditions = AgPBJump::NonZero( requested )
+			? JumpLaunchConditions( pGlobals ) : AgPBJump::Conditions();
+		// Only an accepted fresh launch may replace route steering with the
+		// authored direction. A spent leg releases jump and retains its view.
+		if ( AgPBJump::PrepareLaunchCommand( m_JumpLaunch, requested, conditions,
+			directionKnown, launch.y, IN_JUMP, cmd ) )
 		{
-			if ( AgPBJump::ShouldInject( m_JumpLaunch, requested, JumpLaunchConditions( pGlobals ) ) )
-			{
-				m_vJumpLaunchVelocity = authored;
-				m_uJumpLaunchOwner = m_uRouteTaskToken;
-				m_bPendingJumpLaunch = true;
-			}
-			else
-			{
-				cmd.buttons &= ~IN_JUMP;
-				if ( !m_JumpLaunch.issued ) cmd.forwardmove = cmd.sidemove = cmd.upmove = 0.0f;
-			}
+			m_vJumpLaunchVelocity = authored;
+			m_uJumpLaunchOwner = m_uRouteTaskToken;
+			m_bPendingJumpLaunch = true;
 		}
 	}
 }
@@ -1949,9 +2104,88 @@ void CAgPB::UpdateRoute( CGlobalVars *pGlobals, CBotCmd &cmd )
 // CAgPBManager
 // ---------------------------------------------------------------------------
 
+static bool BotNameInUse( IServer *server, const char *name )
+{
+	if ( server == NULL )
+		return false;
+	for ( int i = 0; i < server->GetClientCount(); ++i )
+	{
+		const IClient *client = server->GetClient( i );
+		if ( client != NULL && client->IsConnected() && V_stricmp( client->GetClientName(), name ) == 0 )
+			return true;
+	}
+	return false;
+}
+
+static bool IsBotPoolName( char *name, int maxLength )
+{
+	const int length = V_StrTrim( name );
+	// Keep the engine's stripped characters and diagnostic delimiters out of names.
+	if ( length <= 0 || length > maxLength || name[0] == '#' || name[0] == ';' ||
+	     ( name[0] == '/' && name[1] == '/' ) || V_strcspn( name, "%~\"\\:=" ) != length )
+		return false;
+
+	for ( const unsigned char *ch = reinterpret_cast<const unsigned char *>( name ); *ch; ++ch )
+	{
+		if ( *ch < 32 || *ch == 127 )
+			return false;
+	}
+	return Q_UnicodeValidate( name ) && !Q_RemoveAllEvilCharacters( name );
+}
+
+// The name lexicon and unused-name policy follow SyPB (SyPB Team / HsK-Dev and
+// Yet Another POD-Bot Development Team, GPL-3.0). See SyPB control.cpp / interface.cpp.
+// Compare CS-EBOT's control.cpp, which additionally mutates names and can tag skill.
+static bool SelectBotPoolName( IServer *server, char ( &name )[MAX_PLAYER_NAME_LENGTH] )
+{
+	if ( filesystem == NULL )
+		return false;
+
+	FileHandle_t file = filesystem->Open( "addons/AgPB/configs/names.cfg", "rb", "MOD" );
+	if ( file == FILESYSTEM_INVALID_HANDLE )
+		file = filesystem->Open( "addons/AgPB/configs/defaults/names.cfg", "rb", "MOD" );
+	if ( file == FILESYSTEM_INVALID_HANDLE )
+		return false;
+
+	const unsigned int size = filesystem->Size( file );
+	CUtlVector<char> data;
+	if ( size > 0 && size <= 64 * 1024 )
+		data.SetSize( static_cast<int>( size ) + 1 );
+	const int read = data.Count() > 0 ? filesystem->Read( data.Base(), static_cast<int>( size ), file ) : 0;
+	filesystem->Close( file );
+	if ( read <= 0 || static_cast<unsigned int>( read ) != size )
+		return false;
+
+	const int maxLength = static_cast<int>( sizeof( name ) ) - 1;
+	char *line = data.Base();
+	char *const end = line + read;
+	if ( read >= 3 && V_memcmp( line, "\xEF\xBB\xBF", 3 ) == 0 )
+		line += 3;
+
+	int available = 0;
+	while ( line < end )
+	{
+		char *current = line;
+		while ( line < end && *line != '\n' )
+			++line;
+		const int length = static_cast<int>( line - current );
+		*line++ = '\0';
+		if ( V_strlen( current ) != length || !IsBotPoolName( current, maxLength ) )
+			continue;
+
+		if ( BotNameInUse( server, current ) )
+			continue;
+		// Reservoir sampling keeps the choice random when only a few names remain.
+		++available;
+		if ( RandomInt( 1, available ) == 1 )
+			V_strncpy( name, current, sizeof( name ) );
+	}
+	return available > 0;
+}
+
 CAgPBManager::CAgPBManager()
 {
-	m_iNextSerial = 1;
+	m_uNextSerial = 1;
 }
 
 void CAgPBManager::Init( const BotEngineContext &ctx, CreateInterfaceFn pServerFactory )
@@ -1982,7 +2216,42 @@ void CAgPBManager::Shutdown()
 	m_Ctx = BotEngineContext();
 }
 
-CAgPB *CAgPBManager::Add( int team, char *error, size_t maxlen )
+int CAgPBManager::SelectTeam() const
+{
+	int counts[AgPB_TEAM_CT + 1] = {};
+	if ( gpGlobals != NULL )
+	{
+		for ( int i = 1; i <= gpGlobals->maxClients; ++i )
+		{
+			edict_t *edict = m_Ctx.pEngine->PEntityOfEntIndex( i );
+			if ( edict == NULL || edict->IsFree() )
+				continue;
+			IPlayerInfo *info = m_Ctx.pPlayerInfoManager->GetPlayerInfo( edict );
+			if ( info == NULL || !info->IsConnected() )
+				continue;
+			const int team = info->GetTeamIndex();
+			if ( team == AgPB_TEAM_T || team == AgPB_TEAM_CT )
+				++counts[team];
+		}
+	}
+	for ( int i = 0; i < m_Bots.Count(); ++i )
+	{
+		const CAgPB *bot = m_Bots[i];
+		IPlayerInfo *info = bot->PlayerInfo();
+		if ( info == NULL )
+			continue;
+		const int current = info->GetTeamIndex();
+		const int desired = bot->DesiredTeam();
+		if ( ( current != AgPB_TEAM_T && current != AgPB_TEAM_CT ) &&
+		     ( desired == AgPB_TEAM_T || desired == AgPB_TEAM_CT ) )
+			++counts[desired];
+	}
+	if ( counts[AgPB_TEAM_T] == counts[AgPB_TEAM_CT] )
+		return RandomInt( AgPB_TEAM_T, AgPB_TEAM_CT );
+	return counts[AgPB_TEAM_T] < counts[AgPB_TEAM_CT] ? AgPB_TEAM_T : AgPB_TEAM_CT;
+}
+
+CAgPB *CAgPBManager::Add( int team, char *error, size_t maxlen, const AgPBBotAddOptions &options )
 {
 	if ( !IsReady() )
 	{
@@ -1991,20 +2260,110 @@ CAgPB *CAgPBManager::Add( int team, char *error, size_t maxlen )
 		return NULL;
 	}
 
-	char szName[64];
-Q_snprintf( szName, (int)sizeof( szName ), "AgPB_%02d", m_iNextSerial );
+	if ( team == 0 )
+		team = SelectTeam();
+
+	char szName[MAX_PLAYER_NAME_LENGTH];
+	IServer *server = m_Ctx.pEngine->GetIServer();
+	unsigned int serial = m_uNextSerial;
+	if ( AgPB_GameMode() != AgPB_MODE_NORMAL || !SelectBotPoolName( server, szName ) )
+	{
+		V_snprintf( szName, sizeof( szName ), "AgPB_%02u", serial );
+		while ( BotNameInUse( server, szName ) )
+			V_snprintf( szName, sizeof( szName ), "AgPB_%02u", ++serial );
+	}
 
 	CAgPB *pBot = new CAgPB();
-	if ( !pBot->Create( m_Ctx, szName, team, error, maxlen ) )
+	if ( !pBot->Create( m_Ctx, szName, team, error, maxlen, options ) )
 	{
 		delete pBot;
 		return NULL;
 	}
 
-	++m_iNextSerial;
+	m_uNextSerial = serial + 1;
 	m_Bots.AddToTail( pBot );
 
 	return pBot;
+}
+
+int CAgPBManager::FreeClientSlots() const
+{
+	const IServer *server = m_Ctx.pEngine->GetIServer();
+	if ( server == NULL || !server->IsActive() )
+		return -1;
+
+	// The engine count includes clients that are still connecting and all fake clients.
+	const int slots = server->GetMaxClients() - server->GetNumClients();
+	return MAX( 0, slots );
+}
+
+// Fill rules follow SyPB (CCNHsK-Dev and contributors, GPL-3.0), with CS-EBOT as a comparison.
+int CAgPBManager::FillServer( int team, int minSkill, int maxSkill, int personality, char *error, size_t maxlen )
+{
+	const char *failure = NULL;
+	if ( !IsReady() )
+		failure = "Bot manager unavailable";
+	else if ( m_Fill.remaining > 0 )
+		failure = "A server fill is already in progress";
+	else if ( ( team != 0 && team != AgPB_TEAM_T && team != AgPB_TEAM_CT ) ||
+	          minSkill < 1 || maxSkill > 100 || minSkill > maxSkill || personality < -1 || personality > 2 )
+		failure = "Invalid fill team, skill range, or personality";
+	else if ( m_Ctx.pEngine->IsDedicatedServer() )
+		failure = "Server fill is available on a listen server";
+
+	const int slots = failure == NULL ? FreeClientSlots() : -1;
+	if ( slots < 0 )
+	{
+		if ( error && maxlen )
+			Q_snprintf( error, (int)maxlen, "%s", failure != NULL ? failure : "No active server" );
+		return -1;
+	}
+	if ( slots == 0 )
+		return 0;
+
+	if ( team != 0 )
+	{
+		// Preserve the selected team across the game's round-start balancing.
+		ConVarRef limitTeams( "mp_limitteams", true );
+		ConVarRef autoBalance( "mp_autoteambalance", true );
+		if ( limitTeams.IsValid() )
+			limitTeams.SetValue( 0 );
+		if ( autoBalance.IsValid() )
+			autoBalance.SetValue( 0 );
+	}
+
+	m_Fill = { team, minSkill, maxSkill, personality, slots, 0.0f };
+	return slots;
+}
+
+void CAgPBManager::UpdateFill( CGlobalVars *globals )
+{
+	if ( m_Fill.remaining == 0 || globals == NULL || globals->curtime < m_Fill.nextAddAt )
+		return;
+
+	const int slots = FreeClientSlots();
+	if ( slots <= 0 )
+	{
+		m_Fill = {};
+		if ( slots == 0 )
+			META_CONPRINTF( "[AgPB] Server fill complete: no free client slots.\n" );
+		return;
+	}
+
+	m_Fill.nextAddAt = globals->curtime + 0.18f;
+	AgPBBotAddOptions options;
+	options.skill = RandomInt( m_Fill.minSkill, m_Fill.maxSkill );
+	options.personality = m_Fill.personality;
+	char error[256] = {};
+	if ( Add( m_Fill.team, error, sizeof( error ), options ) == NULL )
+	{
+		m_Fill = {};
+		META_CONPRINTF( "[AgPB] Server fill stopped: %s\n", error );
+		return;
+	}
+
+	if ( m_Fill.remaining > 0 && --m_Fill.remaining == 0 )
+		META_CONPRINTF( "[AgPB] Server fill complete.\n" );
 }
 
 bool CAgPBManager::Remove( int listIndex )
@@ -2022,6 +2381,7 @@ bool CAgPBManager::Remove( int listIndex )
 
 void CAgPBManager::RemoveAll()
 {
+	m_Fill = {};
 	for ( int i = 0; i < m_Bots.Count(); ++i )
 	{
 		m_Bots[i]->Destroy();

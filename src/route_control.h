@@ -1,11 +1,13 @@
 // AgPB terminal movement policy. GPL-3.0-only.
-// Route traversal keeps SyPB/CS-EBOT waypoint semantics; only the final
-// grounded approach uses velocity feedback. No entity state is written.
+// Route traversal keeps SyPB/CS-EBOT waypoint semantics. Final approaches
+// grounded landing alignment and authored tight ground anchors use velocity
+// feedback without entity writes.
 #ifndef AGPB_ROUTE_CONTROL_H
 #define AGPB_ROUTE_CONTROL_H
 #include <cmath>
 namespace AgPBTerminal {
 constexpr float MinRadius = 4.0f;
+constexpr float AnchorTolerance = 4.0f;
 constexpr float HeightTolerance = 4.0f;
 constexpr float MaxStopSpeed = 5.0f;
 constexpr float StableSeconds = 0.8f;
@@ -23,6 +25,37 @@ inline bool PositionInside(float dx, float dy, float dz, float radius, bool grou
 inline bool ControlPositionInside(float dx, float dy, float dz, float radius, bool grounded) {
     const float inner = Max(radius, MinRadius) - 0.5f;
     return PositionInside(dx, dy, dz, radius, grounded) && dx * dx + dy * dy <= inner * inner;
+}
+inline bool AnchorPositionInside(float dx, float dy, float dz, bool grounded) {
+    return grounded && std::isfinite(dx) && std::isfinite(dy) && std::isfinite(dz) &&
+        std::sqrt(dx * dx + dy * dy + dz * dz) < AnchorTolerance;
+}
+inline bool TightIntermediate(float radius, bool terminal, bool entry, bool takeoff,
+                              bool jumpLeg, bool ladder) {
+    // SyPB/EBot normally advance inside the radius or on a predicted pass.
+    // An explicitly tight ordinary anchor instead needs a slow handoff before
+    // the next turn; this does not change authored data or special traversal.
+    return std::isfinite(radius) && radius >= 0.0f && radius <= MinRadius &&
+        !terminal && !entry && !takeoff && !jumpLeg && !ladder;
+}
+inline bool TightIntermediateControl(bool tight, bool grounded, bool walking, float dz) {
+    // Keep the normal approach to a different floor/drop. At zero XY the
+    // horizontal feedback cannot choose a direction to step off its support.
+    return tight && grounded && walking && std::isfinite(dz) && std::fabs(dz) < AnchorTolerance;
+}
+inline bool TightIntermediateReached(float dx, float dy, float dz, bool grounded,
+                                     float vx, float vy, float vz) {
+    return AnchorPositionInside(dx, dy, dz, grounded) &&
+        std::isfinite(vx) && std::isfinite(vy) && std::isfinite(vz) &&
+        vx * vx + vy * vy + vz * vz <= MaxStopSpeed * MaxStopSpeed;
+}
+inline bool ControlApproachInside(float dx, float dy, float dz, float radius, bool grounded,
+                                  bool terminal, bool entry, bool takeoff, bool tight = false) {
+    // Intermediate anchors advance inside the same strict 3D sphere used
+    // by route acceptance. Their authored radius cannot stop alignment early.
+    // Terminal acceptance keeps its own radius, height and inner margin.
+    if (!terminal && (entry || takeoff || tight)) return AnchorPositionInside(dx, dy, dz, grounded);
+    return ControlPositionInside(dx, dy, dz, radius, grounded);
 }
 inline bool CanSettle(float dx, float dy, float dz, float radius, bool grounded,
                       float vx, float vy, float vz) {

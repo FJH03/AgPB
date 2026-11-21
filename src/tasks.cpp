@@ -97,6 +97,7 @@ const char *AgPBTaskName( AgPBTaskId id )
 	case AgPBTaskId::EscortHostages: return "escort_hostages";
 	case AgPBTaskId::EscapeBomb: return "escape_bomb";
 	case AgPBTaskId::AgentIntention: return "agent_intention";
+	case AgPBTaskId::PickupWeapon: return "pickup_weapon";
 	}
 	return "unknown";
 }

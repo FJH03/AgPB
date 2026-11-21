@@ -30,14 +30,22 @@ enum AgPBMenuId
 {
 	AgPB_MENU_NONE = 0,
 	AgPB_MENU_MAIN,
+	AgPB_MENU_FEATURES,
 	AgPB_MENU_WP_MAIN,
 	AgPB_MENU_WP_PAGE2,
+	AgPB_MENU_WP_TOOLS,
 	AgPB_MENU_WP_ADD,
 	AgPB_MENU_WP_ADD2,
 	AgPB_MENU_WP_FLAGS1,
 	AgPB_MENU_WP_FLAGS2,
 	AgPB_MENU_WP_RADIUS,
 	AgPB_MENU_WP_PATH,
+	AgPB_MENU_BOT_CONTROL,
+	AgPB_MENU_BOT_SKILL,
+	AgPB_MENU_BOT_PERSONALITY,
+	AgPB_MENU_BOT_TEAM,
+	AgPB_MENU_BOT_APPEARANCE,
+	AgPB_MENU_BOT_KICK,
 };
 
 /** 一份菜单内容。动作号由各菜单自己定义，分发时解释。 */
@@ -51,7 +59,11 @@ public:
 	/** 追加一项，返回它的编号（1..9）；加不下返回 0。 */
 	int AddItem( const char *pszText, int iAction );
 
-	int Count() const { return m_iCount; }
+	/** 绑定指定数字键，跳过的键位不显示也不触发动作。 */
+	int SetItem( int iSlot, const char *pszText, int iAction );
+	void SetCancel( const char *pszText, int iAction );
+
+	int LastSlot() const { return m_iLastSlot; }
 	const char *Text( int i ) const;
 	int Action( int i ) const;
 
@@ -63,7 +75,7 @@ private:
 	char m_szMessage[256];
 	char m_szText[AgPB_MENU_MAX_SLOTS][AgPB_MENU_MAX_TEXT];
 	int  m_iAction[AgPB_MENU_MAX_SLOTS];
-	int  m_iCount;
+	int  m_iLastSlot;
 };
 
 /** 打开菜单：HUD 可用就走 HUD，否则打控制台。 */
@@ -89,6 +101,10 @@ bool AgPB_MenuSelect( edict_t *pClient, int iChoice );
 
 /** 由 wpedit.cpp 提供：按菜单 id 分发动作。 */
 void AgPB_MenuDispatch( edict_t *pClient, int iMenuId, int iChoice );
+
+void AgPB_OpenBotControlMenu( edict_t *pClient );
+void AgPB_OpenBotFillMenu( edict_t *pClient );
+void AgPB_BotMenuDispatch( edict_t *pClient, int iMenuId, int iChoice );
 
 /** 控制台回落：把一份菜单打成文本。 */
 void AgPB_MenuPrintConsole( edict_t *pClient, const CAgPBMenu &menu );

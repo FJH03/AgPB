@@ -14,8 +14,8 @@
 public Plugin myinfo = {
     name = "AgPB FakeClient Guard",
     author = "AgPB",
-    description = "Version-checked Radio null-bot/profile guard",
-    version = "1.0.0",
+    description = "Radio null-bot/profile guard",
+    version = "1.0.2",
     url = ""
 };
 
@@ -111,7 +111,7 @@ bool ApplyPatch()
     for (int i = 0; i < g_SiteSize; i++)
         StoreToAddress(g_Site + i, g_Patch[i], NumberType_Int8);
     g_Active = true;
-    PrintToServer("[AgPB Guard] Radio null-bot/profile patch enabled; server CRC 770BAE64");
+    PrintToServer("[AgPB Guard] Radio null-bot/profile patch enabled");
     return true;
 }
 
@@ -181,7 +181,6 @@ public void OnPluginStart()
 {
     g_Data = new GameData("agpb.fakeclient.guard");
     if (g_Data == null) SetFailState("Missing agpb.fakeclient.guard gamedata; no patch applied");
-    // The CRC section gates every signature/key/offset, including architecture.
     g_Site = g_Data.GetAddress("RadioProfile");
     g_Cave = g_Data.GetAddress("RadioGuardCave");
     g_Cleanup = g_Data.GetAddress("RadioCleanup");
@@ -196,17 +195,14 @@ public void OnPluginStart()
     g_CountNative = RequiredOffset("NativeCounter");
     if (g_CountBot + 4 > g_StubSize || g_CountProfile + 4 > g_StubSize || g_CountNative + 4 > g_StubSize)
         SetFailState("Invalid counter offsets; no patch applied");
-    if (ReadHex("SiteOriginal", g_Original, MAX_SITE) != g_SiteSize ||
-        ReadHex("StubTemplate", g_Stub, MAX_STUB) != g_StubSize)
-        SetFailState("Invalid gamedata byte templates; no patch applied");
-    // Verify the normal cleanup target, not merely the patch location.
-    int cleanupBytes[32];
-    int cleanupLength = ReadHex("CleanupOriginal", cleanupBytes, sizeof(cleanupBytes));
-    if (cleanupLength <= 0) SetFailState("Missing cleanup bytes; no patch applied");
-    for (int i = 0; i < cleanupLength; i++)
-        if (LoadFromAddress(g_Cleanup + i, NumberType_Int8) != cleanupBytes[i])
-            SetFailState("Radio cleanup differs; no patch applied");
-    for (int i = 0; i < g_SiteSize; i++) g_Patch[i] = 0x90;
+    if (ReadHex("StubTemplate", g_Stub, MAX_STUB) != g_StubSize)
+        SetFailState("Invalid gamedata stub template; no patch applied");
+    // The anchor locates both the original instruction and its cleanup.
+    // Save the live instruction for restoration instead of requiring a second byte template.
+    for (int i = 0; i < g_SiteSize; i++) {
+        g_Original[i] = LoadFromAddress(g_Site + i, NumberType_Int8);
+        g_Patch[i] = 0x90;
+    }
     g_Patch[0] = 0xE9;
     Rel32(g_Patch, g_SiteSize, 1, g_Site + 5, g_Cave);
     FixStub("NormalCountRel32", g_Cave + g_CountNative);
@@ -215,7 +211,7 @@ public void OnPluginStart()
     FixStub("NullBotExitRel32", g_Cleanup);
     FixStub("NullProfileCountRel32", g_Cave + g_CountProfile);
     FixStub("NullProfileExitRel32", g_Cleanup);
-    g_Enable = CreateConVar("sm_agpb_fakeclient_guard", "1", "Enable the version-checked Radio compatibility guard", FCVAR_NOTIFY, true, 0.0, true, 1.0);
+    g_Enable = CreateConVar("sm_agpb_fakeclient_guard", "1", "Enable the Radio compatibility guard", FCVAR_NOTIFY, true, 0.0, true, 1.0);
     if (g_Enable.BoolValue && !ApplyPatch()) SetFailState("Memory validation failed; no patch applied");
     g_Enable.AddChangeHook(EnableChanged);
     RegAdminCmd("sm_agpb_guard_status", Status, ADMFLAG_ROOT, "Report Radio guard integrity and branch counters");

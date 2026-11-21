@@ -25,4 +25,14 @@
 	#error "AgPB: define exactly one of AGPB_GAME_CSCZS / AGPB_GAME_CSS / AGPB_GAME_CSGO"
 #endif
 
+// [game-diff] CS:CZS restores Militia and Spetsnaz, extending each CS:S team
+// from four to five appearance choices. Keep native auto on CS:GO pending SDK validation.
+#if defined( AGPB_GAME_CSCZS )
+constexpr int AgPB_TEAM_APPEARANCE_COUNT = 5;
+#elif defined( AGPB_GAME_CSS )
+constexpr int AgPB_TEAM_APPEARANCE_COUNT = 4;
+#elif defined( AGPB_GAME_CSGO )
+constexpr int AgPB_TEAM_APPEARANCE_COUNT = 0;
+#endif
+
 #endif // _INCLUDE_AGPB_GAME_TARGET_H_

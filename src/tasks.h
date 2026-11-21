@@ -32,7 +32,8 @@ enum class AgPBTaskId
 	RescueHostage,
 	EscortHostages,
 	EscapeBomb,
-	AgentIntention
+	AgentIntention,
+	PickupWeapon
 };
 
 // SyPB's normal-mode desire scale. The objective variants added for AgPB

@@ -33,7 +33,8 @@
 #include <cstdint>
 #include <vector>
 
-enum class AgPBLocalPersonality { Normal, Rusher, Careful };
+#include "local_personality.h"
+
 enum class AgPBLocalTactic { Defense, Camp, Offense, Objective };
 
 struct AgPBLocalVisit

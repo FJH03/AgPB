@@ -128,11 +128,33 @@ inline bool ShouldInject(const State &state, const Vector3 &authored, const Cond
     return state.from >= 0 && state.to >= 0 && state.from != state.to && !state.issued &&
         ValidVelocity(authored) && NonZero(authored) && Ready(conditions);
 }
+// Command-only preparation, shared with the SDK-free regression. A rejected
+// authored launch must not overwrite the route's view or lateral steering.
+// Return true only to queue a fresh authored impulse; the caller still owns
+// the actual write and MarkIssued. Zero-vector jumps keep native jump input.
+template <typename Command>
+inline bool PrepareLaunchCommand(const State &state, const Vector3 &authored, const Conditions &conditions,
+                                 bool directionKnown, float launchYaw, int jumpButton, Command &cmd) {
+    if ((cmd.buttons & jumpButton) == 0) return false;
+    const bool custom = NonZero(authored);
+    const bool inject = custom && ShouldInject(state, authored, conditions);
+    if (custom && !inject) {
+        cmd.buttons &= ~jumpButton;
+        if (!state.issued) cmd.forwardmove = cmd.sidemove = cmd.upmove = 0.0f;
+        return false;
+    }
+    if (directionKnown) {
+        cmd.viewangles.x = cmd.viewangles.z = 0.0f;
+        cmd.viewangles.y = launchYaw;
+        cmd.sidemove = 0.0f;
+    }
+    return inject;
+}
 // MarkIssued only after the launch has actually been queued successfully.
 // An issued leg stays spent after a failed takeoff or landing. Freeze/task
 // suspension drops a pending write but must retain this bit for the same leg;
 // reset on route cancellation/owner replacement or select a different leg.
-// Zero-vector ordinary jumps intentionally bypass this injection-only gate;
-// their view snap and existing CUserCmd posture remain the caller's policy.
+// Zero-vector ordinary jumps intentionally bypass the injection-only gate;
+// command preparation preserves their view snap and native jump posture.
 }
 #endif
