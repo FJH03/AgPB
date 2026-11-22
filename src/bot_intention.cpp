@@ -14,12 +14,31 @@
 extern CGlobalVars *gpGlobals;
 extern unsigned int AgPB_MapSerial();
 
+static void OnAgentCombatOverrideChanged( IConVar *var, const char *, float )
+{
+    if ( static_cast<ConVar *>( var )->GetBool() ) return;
+
+    CAgPBManager &bots = AgPB_Bots();
+    for ( int i = 0; i < bots.Count(); ++i )
+        bots.Get( i )->ClearAgentIntent( "override-disabled" );
+}
+
+static ConVar agpb_agent_combat_override( "agpb_agent_combat_override", "0", FCVAR_GAMEDLL,
+    "Allow a harness to override ordinary-mode bot goals and combat positioning.",
+    OnAgentCombatOverrideChanged );
+
+bool AgPB_AgentCombatOverrideEnabled()
+{
+    return agpb_agent_combat_override.GetBool();
+}
+
 bool CAgPB::SetAgentIntent( bool camp, int waypoint, float ttl, char *error, size_t maxlen )
 {
     auto reject = [&]( const char *why ) {
         if ( error != NULL && maxlen != 0 ) Q_strncpy( error, why, (int)maxlen );
         return false;
     };
+    if ( !AgPB_AgentCombatOverrideEnabled() ) return reject( "combat override disabled" );
     if ( gpGlobals == NULL || !std::isfinite( gpGlobals->curtime ) )
         return reject( "game time is unavailable" );
     UpdateAgentIntent( gpGlobals );
@@ -94,6 +113,8 @@ void CAgPB::ClearAgentIntent( const char *reason )
 void CAgPB::UpdateAgentIntent( CGlobalVars *globals )
 {
     if ( m_AgentIntent.token == 0 ) return;
+    if ( !AgPB_AgentCombatOverrideEnabled() )
+    { ClearAgentIntent( "override-disabled" ); return; }
     if ( globals == NULL || !std::isfinite( globals->curtime ) )
     { ClearAgentIntent( "time-unavailable" ); return; }
     if ( !m_bAutonomous || AgPB_GameMode() != AgPB_MODE_NORMAL )

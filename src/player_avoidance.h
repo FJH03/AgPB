@@ -1,5 +1,5 @@
 /*
- * AgPB normal-mode player avoidance policy. GPL-3.0-only.
+ * AgPB ground player avoidance policy. GPL-3.0-only.
  * Baseline: SyPB 4c364fb source/navigate.cpp CheckCloseAvoidance/CheckTerrain.
  * Compared with CS-EBOT 2333562 source/navigate.cpp GetPlayerPriority and
  * CheckTerrain for human/slot priority and side probes during physical jams.
@@ -63,6 +63,7 @@ struct Neighbor {
 };
 struct Input {
     float now = 0.0f, interval = 0.0f, maxSpeed = 0.0f;
+    float blockedLookahead = 0.0f; // Distance of a wish already blocked by a ground probe.
     Vec2 position, velocity, wish; // Original command wish, before avoidance.
     Vec2 hullMins, hullMaxs;
     float z = 0.0f;
@@ -77,7 +78,7 @@ struct Contact {
     int userid = 0, slot = 0;
     int preferredSide = 0;         // +1 right, -1 left in the original wish basis.
     Vec2 approach;                 // Initial world direction of a physical jam.
-    bool retreat = false, physical = false, yielding = true;
+    bool retreat = false, physical = false, yielding = true, anticipated = false;
 };
 struct State {
     std::uint64_t owner = 0, handle = 0;
@@ -105,7 +106,7 @@ inline bool Valid(const Input &in) {
         std::isfinite(in.maxSpeed) && in.maxSpeed > 0.0f && Finite(in.position) && Finite(in.velocity) &&
         Finite(in.wish) && std::isfinite(Length(in.wish)) && std::isfinite(Length(in.velocity)) &&
         std::isfinite(in.z) && std::isfinite(in.bottom) && std::isfinite(in.top) && in.top > in.bottom &&
-        (in.team == 2 || in.team == 3);
+        std::isfinite(in.blockedLookahead) && in.blockedLookahead >= 0.0f && (in.team == 2 || in.team == 3);
 }
 inline Vec2 CandidateWish(const Input &in, int side, bool retreat = false) {
     // Shared with the caller so the tested hull vector is the submitted vector.
@@ -165,6 +166,8 @@ inline Contact FindContact(const Input &in, const Neighbor *neighbors, std::size
     const bool scanPhysical = ValidHull(in.hullMins, in.hullMaxs);
     const Neighbor *nearest = nullptr;
     const Neighbor *blocker = nullptr;
+    const Neighbor *oncoming = nullptr;
+    float meetingAt = 0.0f;
     float nearestDistance = in.maxSpeed;
     float blockerDistance = 0.0f, blockerSweep = 0.0f;
     Vec2 approach;
@@ -190,7 +193,21 @@ inline Contact FindContact(const Input &in, const Neighbor *neighbors, std::size
             SamePlayer(*state, n);
         // Retain the same obstruction beyond the initial sweep while a detour
         // still crosses its hull. A small retreat otherwise reissues the jammed wish.
-        const float sweep = PlayerSweep(offset, forward, mins, maxs, retained ? recoverySweep : contactSweep);
+        const float probe = std::fmax(retained ? recoverySweep : contactSweep, in.blockedLookahead);
+        const float sweep = PlayerSweep(offset, forward, mins, maxs, probe);
+        if (sweep < 0.0f && Dot(offset, forward) > 0.0f && Dot(offset, n.velocity) < 0.0f) {
+            // Anticipate closing or crossing traffic during a short command preview.
+            const Vec2 relative = Sub(wish, n.velocity);
+            const float speed = Length(relative);
+            const float predicted = PlayerSweep(offset, Unit(relative), mins, maxs, std::fmin(speed * 0.15f, 56.0f));
+            if (predicted >= 0.0f) {
+                const float time = predicted / speed;
+                if (!oncoming || std::tie(time, n.slot) < std::tie(meetingAt, oncoming->slot)) {
+                    oncoming = &n;
+                    meetingAt = time;
+                }
+            }
+        }
         if (sweep < 0.0f || (blocker && std::tie(sweep, distance, n.slot, n.userid, n.handle) >=
             std::tie(blockerSweep, blockerDistance, blocker->slot, blocker->userid, blocker->handle))) continue;
         blocker = &n;
@@ -212,6 +229,14 @@ inline Contact FindContact(const Input &in, const Neighbor *neighbors, std::size
         contact.approach = approach;
         const Vec2 escapeRight(approach.y, -approach.x);
         contact.preferredSide = Dot(Sub(blocker->position, in.position), escapeRight) < 0.0f ? 1 : -1;
+        return contact;
+    }
+    if (oncoming) {
+        contact.valid = contact.anticipated = true;
+        contact.handle = oncoming->handle;
+        contact.userid = oncoming->userid;
+        contact.slot = oncoming->slot;
+        contact.preferredSide = Dot(Sub(oncoming->position, in.position), right) < 0.0f ? 1 : -1;
         return contact;
     }
     if (nearest == nullptr) return contact;
@@ -246,6 +271,10 @@ inline Output Step(State &state, const Input &in, const Contact &contact, const 
         out.reason = in.owner == 0 ? "unowned" : Length(out.wish) <= 0.0001f ? "idle" : "clear";
         return out;
     }
+    if (contact.anticipated && !probes.right && !probes.left) {
+        Reset(state);
+        return out; // Let a narrow passage approach reach the ordinary hull-contact policy.
+    }
     if (state.owner != in.owner || !std::isfinite(state.lastTime) || in.now < state.lastTime ||
         !std::isfinite(state.blockedSince) || !std::isfinite(state.nextReplanAt)) {
         Reset(state);
@@ -273,12 +302,13 @@ inline Output Step(State &state, const Input &in, const Contact &contact, const 
     const Input steering = SteeringInput(in, contact);
     int side = 0;
     if (contact.physical) side = AvailableSide(preferred, probes.rightOnly, probes.leftOnly);
-    else if (!contact.retreat) side = AvailableSide(preferred, probes.right, probes.left);
+    const bool lateral = contact.physical && side != 0;
+    if (side == 0 && !contact.retreat) side = AvailableSide(preferred, probes.right, probes.left);
     const bool retreat = side == 0;
     if (retreat) side = AvailableSide(preferred, probes.rightBack, probes.leftBack);
     if (side != 0) {
         state.side = side;
-        out.wish = contact.physical && !retreat ? SideWish(steering, side) : CandidateWish(steering, side, retreat);
+        out.wish = lateral ? SideWish(steering, side) : CandidateWish(steering, side, retreat);
         out.reason = retreat ? (side > 0 ? "yield-right-back" : "yield-left-back")
             : (side > 0 ? "yield-right" : "yield-left");
     } else if (probes.back) { out.wish = CandidateWish(steering, 0, true); out.reason = "yield-back"; }

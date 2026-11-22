@@ -98,6 +98,8 @@ const char *AgPBTaskName( AgPBTaskId id )
 	case AgPBTaskId::EscapeBomb: return "escape_bomb";
 	case AgPBTaskId::AgentIntention: return "agent_intention";
 	case AgPBTaskId::PickupWeapon: return "pickup_weapon";
+	case AgPBTaskId::RadioOrder: return "radio_order";
+	case AgPBTaskId::SeekCover: return "seek_cover";
 	}
 	return "unknown";
 }

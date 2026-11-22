@@ -233,7 +233,7 @@ namespace
 					engine->ClientPrintf( client, "[AgPB] There are no bots to remove.\n" );
 				break;
 			case KickAll:
-				bots.RemoveAll();
+				bots.KickAll();
 				engine->ClientPrintf( client, "[AgPB] Removed all bots.\n" );
 				break;
 			case KickList:

@@ -40,33 +40,52 @@ int main() {
         "hold classification reproduces the baseline table rather than inferred native capabilities");
 
     for (Weapon sniper : {Weapon::AWP, Weapon::Scout, Weapon::G3SG1, Weapon::SG550}) {
-        Require(ZoomForFov(sniper, 0, 90) == Zoom::Unzoomed && ZoomForFov(sniper, 90, 90) == Zoom::Unzoomed &&
-            ZoomForFov(sniper, 40, 90) == Zoom::First &&
-            ZoomForFov(sniper, sniper == Weapon::AWP ? 10 : 15, 90) == Zoom::Second,
+        const Zoom firstScope = ZoomForFov(sniper, 40, 90);
+        const Zoom secondScope = ZoomForFov(sniper, sniper == Weapon::AWP ? 10 : 15, 90);
+        const Zoom defaultScope = ZoomForFov(sniper, 0, 90);
+        Require(defaultScope == Zoom::Unzoomed && ZoomForFov(sniper, 90, 90) == Zoom::Unzoomed &&
+            firstScope == Zoom::First && secondScope == Zoom::Second,
             "Source reports all three sniper zoom states");
-        Require(!ToggleCombatZoom(sniper, 150.0f, 100, Zoom::Unzoomed) &&
-            ToggleCombatZoom(sniper, 150.0f, 100, Zoom::First) && ToggleCombatZoom(sniper, 150.0f, 100, Zoom::Second),
-            "close sniper fire requires the default FOV");
-        Require(ToggleCombatZoom(sniper, 150.01f, 100, Zoom::Unzoomed) &&
-            !ToggleCombatZoom(sniper, 1500.0f, 100, Zoom::First) && !ToggleCombatZoom(sniper, 1000.0f, 100, Zoom::Second),
+        Require(CombatZoomAction(sniper, 150.0f, 100, firstScope) == ZoomAction::Close &&
+            CombatZoomAction(sniper, 150.0f, 100, secondScope) == ZoomAction::Close &&
+            CombatZoomAction(sniper, 150.0f, 100, defaultScope) == ZoomAction::None,
+            "close sniper cleanup follows the native zoom cycle through default FOV and stops there");
+        Require(CombatZoomAction(sniper, 150.01f, 100, Zoom::Unzoomed) == ZoomAction::Open &&
+            CombatZoomAction(sniper, 1500.0f, 100, Zoom::First) == ZoomAction::None &&
+            CombatZoomAction(sniper, 1000.0f, 100, Zoom::Second) == ZoomAction::None,
             "medium sniper range opens a first zoom and retains an already deeper scope");
-        Require(ToggleCombatZoom(sniper, 1500.01f, 100, Zoom::Unzoomed) &&
-            ToggleCombatZoom(sniper, 1500.01f, 100, Zoom::First) && !ToggleCombatZoom(sniper, 1500.01f, 100, Zoom::Second),
+        Require(CombatZoomAction(sniper, 1500.01f, 100, Zoom::Unzoomed) == ZoomAction::Open &&
+            CombatZoomAction(sniper, 1500.01f, 100, Zoom::First) == ZoomAction::Open &&
+            CombatZoomAction(sniper, 1500.01f, 100, Zoom::Second) == ZoomAction::None,
             "long sniper range progresses through both native zoom stages");
     }
     for (Weapon rifle : {Weapon::AUG, Weapon::SG552}) {
         Require(ZoomForFov(rifle, 0, 90) == Zoom::Unzoomed && ZoomForFov(rifle, 55, 90) == Zoom::First &&
             ZoomForFov(rifle, 40, 90) == Zoom::Unknown, "rifle zoom follows the Source FOV even when the weapon mode stays secondary");
-        Require(ToggleCombatZoom(rifle, 800.0f, 89, Zoom::First) && !ToggleCombatZoom(rifle, 800.0f, 89, Zoom::Unzoomed) &&
-            ToggleCombatZoom(rifle, 800.01f, 89, Zoom::Unzoomed) && !ToggleCombatZoom(rifle, 800.01f, 89, Zoom::First),
+        Require(CombatZoomAction(rifle, 800.0f, 89, Zoom::First) == ZoomAction::Close &&
+            CombatZoomAction(rifle, 800.0f, 89, Zoom::Unzoomed) == ZoomAction::None &&
+            CombatZoomAction(rifle, 800.01f, 89, Zoom::Unzoomed) == ZoomAction::Open &&
+            CombatZoomAction(rifle, 800.01f, 89, Zoom::First) == ZoomAction::None,
             "AUG and SG552 use the SyPB 800-unit switch distance");
-        Require(!ToggleCombatZoom(rifle, 800.01f, 90, Zoom::Unzoomed) && !ToggleCombatZoom(rifle, 800.0f, 90, Zoom::First),
-            "skill 90 and higher does not request a rifle zoom change in combat");
+        for (int skill : {90, 100}) {
+            Require(CombatZoomAction(rifle, 800.01f, skill, Zoom::Unzoomed) == ZoomAction::None &&
+                CombatZoomAction(rifle, 800.01f, skill, Zoom::First) == ZoomAction::None &&
+                CombatZoomAction(rifle, 800.0f, skill, Zoom::First) == ZoomAction::Close &&
+                CombatZoomAction(rifle, 800.0f, skill, Zoom::Unzoomed) == ZoomAction::None,
+                "skill 90 and higher can close an observed rifle scope at close range and never opens it");
+        }
     }
-    Require(!ToggleCombatZoom(Weapon::Famas, 900.0f, 89, Zoom::Unzoomed) &&
-        !ToggleCombatZoom(Weapon::AWP, 900.0f, 89, Zoom::Unknown) &&
-        !IdleZoomDue(2.0f, -1.0f) && !IdleZoomDue(2.0f, 1.0f) && IdleZoomDue(2.01f, 1.0f),
-        "zoom changes require a supported observed state and one second of inactivity for idle cleanup");
+    Require(CombatZoomAction(Weapon::Famas, 900.0f, 89, Zoom::Unzoomed) == ZoomAction::None &&
+        CombatZoomAction(Weapon::AWP, 900.0f, 89, Zoom::Unknown) == ZoomAction::None &&
+        CombatZoomAction(Weapon::AWP, -1.0f, 89, Zoom::First) == ZoomAction::None &&
+        CombatZoomAction(Weapon::AUG, std::numeric_limits<float>::infinity(), 89, Zoom::Unzoomed) == ZoomAction::None,
+        "zoom changes require a supported weapon, observed scope and valid distance");
+    Require(!IdleZoomDue(1.99f, 1.0f) && !IdleZoomDue(2.0f, 1.0f) && IdleZoomDue(2.01f, 1.0f),
+        "idle cleanup waits until more than one second after the latest combat zoom check");
+    Require(IdleZoomDue(0.0f, -1.0f), "idle cleanup is due immediately after the combat timestamp resets");
+    Require(!IdleZoomDue(-1.0f, -1.0f) && !IdleZoomDue(std::numeric_limits<float>::infinity(), 1.0f) &&
+        !IdleZoomDue(2.0f, -std::numeric_limits<float>::infinity()) &&
+        !IdleZoomDue(2.0f, std::numeric_limits<float>::quiet_NaN()), "idle cleanup requires valid timestamps");
 
     Reset(state); input = Input(); input.weapon = Weapon::M4A1; input.now = 20;
     input.distance = 1500; input.visibility = 0;

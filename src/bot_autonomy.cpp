@@ -103,6 +103,25 @@ void CAgPB::RememberAutonomyGoal( int waypoint, float now )
     AgPB_LocalRememberGoal( m_Autonomy, waypoint, now );
 }
 
+void CAgPB::UpdateAutonomyEmotions( float now )
+{
+    if ( !m_Autonomy.initialized ) ResetAutonomy( now );
+    if ( now >= m_Autonomy.nextEmotionUpdate )
+    {
+        const float recovery = 0.05f * clamp( 1.0f + ( now - m_Autonomy.nextEmotionUpdate ) / 0.5f, 1.0f, 10.0f );
+        m_Autonomy.aggression = Toward( m_Autonomy.aggression, m_Autonomy.baseAggression, recovery );
+        m_Autonomy.fear = Toward( m_Autonomy.fear, m_Autonomy.baseFear, recovery );
+        m_Autonomy.nextEmotionUpdate = now + 0.5f;
+    }
+    const int health = m_pInfo->GetHealth();
+    if ( m_Autonomy.lastHealth > 0 && health < m_Autonomy.lastHealth )
+    {
+        m_Autonomy.fear = MIN( 1.0f, m_Autonomy.fear + 0.2f );
+        m_Autonomy.aggression = MAX( 0.0f, m_Autonomy.aggression - 0.1f );
+    }
+    m_Autonomy.lastHealth = health;
+}
+
 bool CAgPB::PlanAutonomousPatrol( CGlobalVars *globals )
 {
     if ( globals == NULL || !m_bAutonomous || !IsAlive() || m_pInfo == NULL ||
@@ -128,21 +147,6 @@ bool CAgPB::PlanAutonomousPatrol( CGlobalVars *globals )
     CUtlVector<float> distances;
     CUtlVector<short> parents;
     wp.ComputeDistances( start, distances, parents, team );
-
-    if ( globals->curtime >= m_Autonomy.nextEmotionUpdate )
-    {
-        const float recovery = 0.05f * clamp( 1.0f + ( globals->curtime - m_Autonomy.nextEmotionUpdate ) / 0.5f, 1.0f, 10.0f );
-        m_Autonomy.aggression = Toward( m_Autonomy.aggression, m_Autonomy.baseAggression, recovery );
-        m_Autonomy.fear = Toward( m_Autonomy.fear, m_Autonomy.baseFear, recovery );
-        m_Autonomy.nextEmotionUpdate = globals->curtime + 0.5f;
-    }
-    const int health = m_pInfo->GetHealth();
-    if ( m_Autonomy.lastHealth > 0 && health < m_Autonomy.lastHealth )
-    {
-        m_Autonomy.fear = MIN( 1.0f, m_Autonomy.fear + 0.2f );
-        m_Autonomy.aggression = MAX( 0.0f, m_Autonomy.aggression - 0.1f );
-    }
-    m_Autonomy.lastHealth = health;
 
     std::vector<FriendlyOccupancy> friendly;
     if ( m_Ctx.pEngine != NULL && m_Ctx.pPlayerInfoManager != NULL )
@@ -298,6 +302,7 @@ void CAgPB::UpdateIdleLook( CGlobalVars *globals, CBotCmd &cmd )
          GetNetVarInt( "movetype", MOVETYPE_NONE ) == MOVETYPE_LADDER ) return;
     const AgPBTask &task = m_Tasks.Current();
     if ( task.id != AgPBTaskId::Camp && task.id != AgPBTaskId::Pause &&
+         !( task.id == AgPBTaskId::RadioOrder && m_RadioOrder.holding ) &&
          !( task.id == AgPBTaskId::AgentIntention && m_AgentIntent.camp && m_AgentIntent.arrived ) ) return;
     const AgPBObservationLook::Angles current = AgPBObservationLook::Sanitize({ cmd.viewangles.x, cmd.viewangles.y });
     cmd.viewangles.x = current.pitch; cmd.viewangles.y = current.yaw; cmd.viewangles.z = 0.0f;

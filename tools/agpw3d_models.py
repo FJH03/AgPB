@@ -276,8 +276,14 @@ class ResourceStore:
             except zipfile.BadZipFile as error:
                 raise ValueError(f'Invalid BSP pak ZIP: {error}') from error
             for info in self._pak.infolist():
-                if not info.is_dir():
-                    self._pak_names[_resource_name(info.filename)] = info
+                if info.is_dir():
+                    continue
+                try:
+                    name = _resource_name(info.filename)
+                except ValueError:
+                    self.warnings.append(f'Skipped BSP pak entry with invalid resource path: {info.filename!r}')
+                    continue
+                self._pak_names[name] = info
         self._mounts = []
         seen = set()
         for path in paths:

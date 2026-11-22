@@ -8,6 +8,8 @@
 
 独立的 SourceMod 插件为无线电代码中的空 bot / profile 分支提供保护。
 
+AgPB 的 csczs 普通、ZM 和 ZE 电台播报通过公开客户端命令入口执行原生无线电，使用现有已启用的 Guard。引擎按当前角色模型选音，ZM 和 ZE 根据 ZR 身份限制该次播报的接收者。
+
 - 源码：[agpb_fakeclient_guard.sp](compat/sourcemod/agpb_fakeclient_guard.sp)。
 - 补丁配置：[agpb.fakeclient.guard.txt](configs/sourcemod/gamedata/agpb.fakeclient.guard.txt)。
 - csczs Win64 补丁按无线电代码定位原指令、共用清理路径及预留空间。链接时变化的相对地址用通配处理。安装或升级无需登记 `server.dll` 的 CRC、MD5 或哈希。

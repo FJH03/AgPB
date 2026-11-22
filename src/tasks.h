@@ -33,7 +33,9 @@ enum class AgPBTaskId
 	EscortHostages,
 	EscapeBomb,
 	AgentIntention,
-	PickupWeapon
+	PickupWeapon,
+	RadioOrder,
+	SeekCover
 };
 
 // SyPB's normal-mode desire scale. The objective variants added for AgPB
@@ -45,7 +47,9 @@ namespace AgPBTaskPriority
 	constexpr float Camp = 37.0f;
 	constexpr float MoveToPosition = 50.0f;
 	constexpr float Investigate = 55.0f;
+	constexpr float RadioOrder = 57.0f;
 	constexpr float AgentIntention = 60.0f;
+	constexpr float SeekCover = 85.0f;
 	constexpr float Objective = 89.0f;
 	constexpr float DestroyBreakable = 100.0f;
 	constexpr float EscapeBomb = 100.0f;

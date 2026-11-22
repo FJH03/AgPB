@@ -160,6 +160,10 @@ bool CAgPB::UpdateWeaponSelection( CGlobalVars *globals, CBotCmd &cmd, edict_t *
 {
     const AgPBTask &task = m_Tasks.Current();
     const bool intent = m_bAutonomous || m_bRoam || HasRoute() || task.id != AgPBTaskId::Normal;
+    const AgPBGameMode mode = AgPB_GameMode();
+    const AgPBZRRole zmRole = mode == AgPB_MODE_ZM && m_bAutonomous && m_pInfo != NULL ?
+        AgPB_ZRRoleForUserId( m_pInfo->GetUserID() ) : AgPBZRRole::Unknown;
+    const bool zmZombie = zmRole == AgPBZRRole::Zombie;
     const bool ordinary = task.id == AgPBTaskId::Normal || task.id == AgPBTaskId::MoveToPosition ||
         task.id == AgPBTaskId::Investigate || task.id == AgPBTaskId::Camp || task.id == AgPBTaskId::Pause ||
         task.id == AgPBTaskId::AgentIntention ||
@@ -175,7 +179,7 @@ bool CAgPB::UpdateWeaponSelection( CGlobalVars *globals, CBotCmd &cmd, edict_t *
     const AgPBPath *node = BotWaypoints().Get( RouteNode( m_iRouteIndex ) );
     const int flags = GetNetVarInt( "m_fFlags" );
     if ( globals == NULL || !IsAlive() || !intent || !ordinary || !m_bCombatEnabled || !agpb_combat.GetBool() ||
-         AgPB_GameMode() != AgPB_MODE_NORMAL || AgPB_IsRoundFrozen() || ( flags & FL_FROZEN ) != 0 ||
+         ( mode != AgPB_MODE_NORMAL && zmRole == AgPBZRRole::Unknown ) || AgPB_IsRoundFrozen() || ( flags & FL_FROZEN ) != 0 ||
          ( flags & FL_ONGROUND ) == 0 || GetNetVarInt( "movetype" ) == MOVETYPE_LADDER ||
          ( node != NULL && ( node->flags & AgPB_WP_LADDER ) != 0 ) ||
          NetVar_HandleIsValid( m_uBreakHandle ) || ( cmd.buttons & ( IN_USE | IN_JUMP ) ) != 0 || cmd.weaponselect != 0 ||
@@ -194,15 +198,16 @@ bool CAgPB::UpdateWeaponSelection( CGlobalVars *globals, CBotCmd &cmd, edict_t *
     // Jump traversal owns the command and doesn't run a fresh combat scan.
     if ( jumpApproach && m_Search.visual.valid && input.now - m_Search.visual.observedAt <= 0.25f )
         return false;
-    const KnifeIntent knifeIntent = ChooseKnifeIntent( globals, cmd, input.enemyVisible,
-                                                        visibleEnemy, HandleToEdict( active ) );
+    const KnifeIntent knifeIntent = mode == AgPB_MODE_ZM ? KnifeIntent::None :
+        ChooseKnifeIntent( globals, cmd, input.enemyVisible, visibleEnemy, HandleToEdict( active ) );
     for ( int i = 0; i < owned.Count(); ++i )
     {
         candidates.AddToTail( owned[i].candidate );
         if ( owned[i].candidate.key == active ) input.current = i;
-        if ( owned[i].candidate.weapon == Weapon::Knife && knifeIntent != KnifeIntent::None )
+        if ( owned[i].candidate.weapon == Weapon::Knife && ( zmZombie || knifeIntent != KnifeIntent::None ) )
             input.forcedKey = owned[i].candidate.key;
     }
+    if ( zmZombie && input.forcedKey == 0 ) return false;
     if ( jumpApproach && ( knifeIntent != KnifeIntent::Jump || input.forcedKey == 0 ) )
         return false;
 
@@ -330,6 +335,8 @@ void CAgPB::ReportWeaponSelection() const
     RouteReport( "silencer: preference=%d desired=%d active-state=%d",
         m_bPrefersSilencer ? 1 : 0, ( m_bPrefersSilencer || m_iCombatSkill > 70 ) ? 1 : 0,
         OwnedBy( *this, weapon ) ? ReadSilencerState( weapon ) : -1 );
+    RouteReport( "grenade: state=%s weapon=0x%llX confirmed=%u retry-at=%.3f",
+        m_pszGrenadeState, (unsigned long long)m_Grenade.weapon, m_uConfirmedGrenades, m_flNextGrenadeCheck );
     for ( int i = 0; i < owned.Count(); ++i )
         RouteReport( "owned weapon: class=%s handle=0x%llX entry=%d active=%d clip=%d reserve=%d preference=%d",
             owned[i].name, (unsigned long long)owned[i].candidate.key, NetVar_HandleEntry( (uintp)owned[i].candidate.key ),

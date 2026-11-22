@@ -912,9 +912,11 @@ static void BuildContextMessage( char *pszOut, int iMaxLen )
 	if ( wp.IsValid( ed.iCache ) )
 		Q_snprintf( szCache, sizeof( szCache ), "%d", ed.iCache );
 
+	const AgPBGameMode mode = AgPB_GameMode();
+	const char *pszMode = mode == AgPB_MODE_NORMAL ? "普通" : AgPB_GameModeName( mode );
 	Q_snprintf( pszOut, iMaxLen,
 	            "%d 个路点 | 模式 %s | 最近 %s (半径 %d %s) | 指向 %s | 缓存 %s",
-	            wp.Count(), AgPB_GameMode() == AgPB_MODE_ZOMBIE ? "僵尸" : "普通",
+	            wp.Count(), pszMode,
 	            szNear, iRadius, szFlags, szFacing, szCache );
 }
 

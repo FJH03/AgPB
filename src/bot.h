@@ -27,6 +27,7 @@
 
 #include "netvars.h"
 #include "game_target.h"
+#include "game_mode.h"
 #include "tasks.h"
 #include "local_planner.h"
 #include "search_policy.h"
@@ -38,6 +39,7 @@
 #include "firing_policy.h"
 #include "player_avoidance.h"
 #include "prop_avoidance.h"
+#include "bot_communication.h"
 
 class IServerTools;
 
@@ -212,6 +214,15 @@ public:
 	void ReportPurchases() const;
 	void ReportSearch() const;
 	void OnPerceptionEvent( edict_t *source, const Vector &eventOrigin, float now, float radius, float ttl );
+	bool QueueChat( AgPBChat cue, edict_t *speaker, bool teamOnly, float now, const char *text );
+	bool QueueIdleChat( float now );
+	void ReportPendingChat( float now ) const;
+	void ReleaseExternalChatDecision();
+	const char *AcceptChatReply( std::uint64_t id, unsigned int map, unsigned int round,
+		int userId, int botUserId, const char *text, float now );
+	bool QueueRadioOrder( AgPBRadio order, edict_t *issuer, float now );
+	bool FollowsRadioIssuer( uintp handle ) const;
+	void SendRadio( AgPBRadio call, float now );
 	bool SetSkill( int skill );
 	bool SetDifficulty( int difficulty );
 	int Skill() const { return m_iCombatSkill; }
@@ -251,7 +262,7 @@ private:
 	void UpdateRoute( CGlobalVars *pGlobals, CBotCmd &cmd );
 	bool UpdateLadderRoute( CGlobalVars *globals, CBotCmd &cmd );
 	bool BuildRoute( int goal, char *error, size_t maxlen );
-	bool FindRouteCandidate( int goal, CUtlVector<int> &path, char *error, size_t maxlen ) const;
+	bool FindRouteCandidate( int goal, CUtlVector<int> &path, char *error, size_t maxlen, int avoid = -1 ) const;
 	void ClearRoute();
 	void UpdateTasks( CGlobalVars *globals, CBotCmd &cmd );
 	void UpdateAgentIntent( CGlobalVars *globals );
@@ -273,6 +284,7 @@ private:
 	edict_t *FindOwnedWeapon( const char *classname ) const;
 	void ResetTaskUse();
 	void ResetAutonomy( float now );
+	void UpdateAutonomyEmotions( float now );
 	bool PlanAutonomousPatrol( CGlobalVars *globals );
 	bool ShouldCampAtGoal( int waypoint, float now ) const;
 	void RememberAutonomyGoal( int waypoint, float now );
@@ -299,6 +311,7 @@ private:
 	void ResetPlayerAvoidance();
 	void UpdatePlayerAvoidance( CGlobalVars *globals, CBotCmd &cmd, const Vector &blockedWish );
 	bool PlayerAvoidanceActive( float now ) const;
+	IPlayerInfo *PlayerAvoidanceAlly( edict_t *other, int expectedUserId = 0 ) const;
 	bool CanPlayerAvoidStep( const Vector &wish, bool crouch, float interval, edict_t *contact ) const;
 	void ReportPlayerAvoidance() const;
 	void InitializeCombatSkill( int skill = -1 );
@@ -306,6 +319,12 @@ private:
 	bool UpdateWeaponSelection( CGlobalVars *globals, CBotCmd &cmd, edict_t *visibleEnemy, float distance,
 	                            bool jumpApproach = false );
 	void UpdateSilencer( CGlobalVars *globals, CBotCmd &cmd );
+	bool UpdateGrenadeThrow( CGlobalVars *globals, CBotCmd &cmd );
+	bool PlanGrenadeThrow( CGlobalVars *globals, bool zm );
+	void ResetGrenadeThrow();
+	void RunPlayerCommand( CBotCmd &cmd );
+	bool GrenadeLandingSafe( CGlobalVars *globals, const Vector &landing, float radius ) const;
+	bool CoverGrenadeThreatHidden( edict_t *enemy ) const;
 	void UpdateIdleWeaponZoom( CGlobalVars *globals, CBotCmd &cmd );
 	enum class KnifeIntent { None, Spawn, Jump, Combat };
 	KnifeIntent ChooseKnifeIntent( CGlobalVars *globals, const CBotCmd &cmd, bool enemyVisible,
@@ -313,12 +332,43 @@ private:
 	bool ShouldUseCombatKnife( edict_t *enemy, bool holdingKnife ) const;
 	void BeginKnifeSpawn( float now );
 	void UpdatePurchases( CGlobalVars *globals );
+	void UpdateCommunication( CGlobalVars *globals );
+	IPlayerInfo *RadioIssuerInfo( edict_t *issuer, const AgPBRadioIssuer &context ) const;
+	AgPBRadio RadioStatus() const;
+	void RespondToRadio( AgPBRadio call, const AgPBRadioIssuer &issuer, IPlayerInfo &source, float now );
+	bool ChatScopeValid() const;
+	bool CanIdleChat() const;
+	void ExecuteRadioOrder( CGlobalVars *globals, CBotCmd &cmd );
 	void ClearCombat( const char *reason = "reset" );
 	bool UpdateCombat( CGlobalVars *globals, CBotCmd &cmd, Vector &blockedCombatWish );
+	bool TryStartCover( CGlobalVars *globals, bool reloading, bool withdrawing = false );
+	bool CanThrowFromCover( float now ) const;
+	edict_t *CoverReloadWeapon() const;
+	void UpdateCoverTask( CGlobalVars *globals, CBotCmd &cmd );
+	void UpdateCoverFire( CGlobalVars *globals, CBotCmd &cmd, edict_t *enemy, int userId );
+	void ResetZombieMode();
+	void UpdateZombieMode( CGlobalVars *globals, CBotCmd &cmd );
+	bool ZombieModeAimPoint( edict_t *target, Vector &point ) const;
+	void UpdateZMCombat( CGlobalVars *globals, CBotCmd &cmd, edict_t *target, AgPBZRRole role );
+	bool IsZMHoldingPosition() const;
+	IPlayerInfo *ZMPlayer( edict_t *entity, AgPBZRRole role, int expectedUserId = 0 ) const;
+	bool StartZMRoute( int goal, float now, bool camp, bool retreat );
+	bool PlanZMHuman( CGlobalVars *globals, const Vector *threat, bool retreat );
+	bool PlanZMZombie( float now, const Vector *target );
+	bool ZMGroundMove( const Vector &step, CBotCmd &cmd ) const;
+	bool ZMThreatCanReach( edict_t *threat, const Vector &position ) const;
+	int FindZMRouteEntry() const;
+	void UpdateZMCombatOverlay( CGlobalVars *globals, CBotCmd &cmd, edict_t *target );
 	void UpdateCombatMovement( CGlobalVars *globals, CBotCmd &cmd, edict_t *target,
 	                           edict_t *weapon, bool fireIntent, bool reloadIntent, bool decisionTick,
 	                           Vector &blockedCombatWish );
+	bool CombatStrafeLogEnabled() const;
+	void ReportCombatStrafe( CGlobalVars *globals, const CBotCmd &cmd, const Vector &start );
 	void PauseCombatOwner( CGlobalVars *globals );
+	void ObserveCombatShots();
+	void TrackCombatWeapon( uintp weaponHandle, int clip );
+	void AimAndFire( CGlobalVars *globals, CBotCmd &cmd, edict_t *target, const Vector &eye, Vector point,
+	                 unsigned int visibility, edict_t *weapon, bool knife, int clip, int reserve, Vector *blockedCombatWish );
 	bool IsCombatEnemy( edict_t *target, int expectedUserId = 0 ) const;
 	bool CombatAimPoint( edict_t *target, const Vector &eye, Vector &point, bool requireViewCone, unsigned int *visibility = NULL ) const;
 	edict_t *CurrentCombatWeapon( uintp &handle, bool &knife, int &clip, int &reserve ) const;
@@ -416,6 +466,54 @@ private:
 	CUtlVector<int> m_vecEscapeFailedGoals;
 	float m_flEscapeRetryAfter;
 	float m_flNextEscapeReport;
+	AgPBChatState m_Chat;
+	AgPBRadioOrder m_PendingRadio;
+	AgPBRadioOrder m_RadioOrder;
+	AgPBRadioReply m_RadioReply;
+	Vector m_vRadioPathTarget = Vector( 0, 0, 0 );
+	float m_flNextRadio = 0.0f;
+
+	enum class GrenadePhase { Idle, Prepare, Prime, Release };
+	struct GrenadeThrow
+	{
+		GrenadePhase phase = GrenadePhase::Idle;
+		uintp weapon = (uintp)INVALID_EHANDLE_INDEX, enemy = (uintp)INVALID_EHANDLE_INDEX;
+		int userId = 0, ammoType = -1, ammoBefore = 0;
+		float deadline = 0.0f, nextAim = 0.0f, safetyRadius = 0.0f, maxFlight = 0.0f;
+		bool coverCrouch = false;
+		bool nativeThrowQueued = false;
+		Vector landing = Vector( 0, 0, 0 );
+		QAngle aim = QAngle( 0, 0, 0 );
+	};
+	GrenadeThrow m_Grenade;
+	float m_flNextGrenadeCheck = 0.0f, m_flGrenadeRetryUntil = 0.0f;
+	unsigned int m_uConfirmedGrenades = 0;
+	const char *m_pszGrenadeState = "idle";
+
+	struct ZMSighting
+	{
+		uintp handle = (uintp)INVALID_EHANDLE_INDEX;
+		int userId = 0;
+		Vector origin = Vector( 0, 0, 0 );
+		float seenAt = -1.0f;
+	};
+	struct ZMState
+	{
+		AgPBZRRole role = AgPBZRRole::Unknown;
+		ZMSighting sight;
+		std::uint64_t task = 0;
+		int goal = -1, previousGoal = -1, blockedGoal = -1;
+		float scanAt = 0.0f, planAt = 0.0f, blockedUntil = 0.0f;
+		float threatCheckAt = 0.0f, checkedThreatDistance = 0.0f;
+		uintp checkedThreat = (uintp)INVALID_EHANDLE_INDEX;
+		Vector pursuitPoint = Vector( 0, 0, 0 );
+		int pursuitUserId = 0;
+		Vector searchedPoint = Vector( 0, 0, 0 );
+		float searchedUntil = 0.0f;
+		float sweepAt = 0.0f, sweepYaw = 0.0f;
+		bool campGoal = false, retreating = false, holding = false, pursuing = false, reachableThreat = false;
+	};
+	ZMState m_ZM;
 
 	struct AgentIntentState
 	{
@@ -432,6 +530,10 @@ private:
 	AgentIntentState m_AgentIntent;
 
 	// Combat is a command overlay; it never replaces the route/task owner.
+	float m_flNextCoverAt = 0.0f, m_flCoverReachedAt = 0.0f;
+	int m_iCoverEnemyUserId = 0;
+	uintp m_uCoverReloadWeapon = (uintp)INVALID_EHANDLE_INDEX;
+	int m_iCoverReloadClip = -1;
 	int m_iCombatSkill = 80;
 	int m_iCombatDifficulty = 3;
 	float m_flCombatIdealReaction = 0.1f;
@@ -468,6 +570,12 @@ private:
 	float m_flCombatMoveForward = 0.0f, m_flCombatMoveSide = 0.0f;
 	float m_flCombatMoveDistance = 0.0f, m_flCombatMoveSpeed = 0.0f;
 	bool m_bCombatMoveBlocked = false;
+	int m_iCombatMoveTick = -1;
+	Vector m_vCombatMoveRight;
+	float m_flCombatMovePolicySide = 0.0f, m_flCombatMoveSafeSide = 0.0f;
+	const char *m_pszCombatMoveFilter = "none";
+	const char *m_pszCombatStrafeLogPhase = "";
+	float m_flCombatStrafeLogAt = -1.0f;
 	bool m_bCombatDuckWanted = false;
 	float m_flCombatEyeZ = -1.0f, m_flCombatEyeStableSince = 0.0f;
 	AgPBWeaponSelect::State m_WeaponSelection;
@@ -521,11 +629,13 @@ public:
 	// Team 0 balances active teams, including pending AgPB joins.
 	CAgPB *Add( int team, char *error, size_t maxlen,
 	            const AgPBBotAddOptions &options = AgPBBotAddOptions() );
-	// Returns the number queued, 0 if full, or -1 on error.
+	// Returns the number queued, 0 if full, or -1 on error. Pass -1/-1 for agpb_difficulty.
 	int FillServer( int team, int minSkill, int maxSkill, int personality, char *error, size_t maxlen );
 	void UpdateFill( CGlobalVars *globals );
+	void UpdateAutoPlayers( CGlobalVars *globals );
 	bool Remove( int listIndex );
 	void RemoveAll();
+	void KickAll();
 	void RemoveByEdict( edict_t *pEdict );
 
 	void ThinkAll( CGlobalVars *pGlobals );
@@ -554,6 +664,7 @@ private:
 	CUtlVector<CAgPB *> m_Bots;
 	unsigned int m_uNextSerial;
 	FillRequest m_Fill;
+	float m_flNextAutoPlayersAt = 0.0f;
 };
 
 /** netvar 字段表注册表（按 ServerClass 缓存，进程内单例）。 */
@@ -561,6 +672,7 @@ CNetVarRegistry &BotNetVarRegistry();
 
 /** 插件里唯一的 bot 管理器（plugin.cpp 里那个单例的访问器，菜单要用）。 */
 CAgPBManager &AgPB_Bots();
+bool AgPB_AgentCombatOverrideEnabled();
 
 /**
  * edict -> ServerClass 名（如 "CCSPlayer" / "CWeaponUSP45"）。

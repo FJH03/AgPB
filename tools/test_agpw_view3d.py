@@ -143,7 +143,7 @@ class WaypointChecks(unittest.TestCase):
 
 
 
-def make_bsp(*, displacement=False, compressed=False):
+def make_bsp(*, displacement=False, compressed=False, pak_bytes=None):
     face = bytearray(56)
     struct.pack_into('<ihhh', face, 4, 0, 4 if displacement else 3, 0, 0 if displacement else -1)
     vertices = (0, 0, 0, 0, 1, 0, 1, 1, 0, 1, 0, 0) if displacement else (0, 0, 0, 1, 0, 0, 0, 1, 0)
@@ -165,6 +165,8 @@ def make_bsp(*, displacement=False, compressed=False):
         lumps[26] = bytes(info)
         lumps[33] = struct.pack('<125f', *([0, 0, 1, 2, 0] * 25))
         lumps[48] = struct.pack('<32H', *([0] * 32))
+    if pak_bytes is not None:
+        lumps[40] = pak_bytes
     header = bytearray(1036)
     struct.pack_into('<4si', header, 0, b'VBSP', 19)
     payload = bytearray()
@@ -246,6 +248,27 @@ class ResourceChecks(unittest.TestCase):
             for name in ('../outside.mdl', '/outside.mdl', 'C:/outside.mdl'):
                 with self.assertRaises(ValueError):
                     store.read(name)
+
+    def test_invalid_bsp_pak_names_cannot_shadow_game_relative_resources(self):
+        with tempfile.TemporaryDirectory(prefix='agpw3d-test-') as folder:
+            game = Path(folder)
+            write_gameinfo(game)
+            (game / 'models').mkdir()
+            (game / 'models/chair.mdl').write_bytes(b'loose chair')
+            pak = BytesIO()
+            invalid_names = ('D:/compile/cstrike/models/chair.mdl', '../models/chair.mdl')
+            with zipfile.ZipFile(pak, 'w') as archive:
+                for name in invalid_names:
+                    archive.writestr(name, b'invalid embedded chair')
+                archive.writestr('models/desk.mdl', b'valid embedded desk')
+            store = ResourceStore(game, pak.getvalue())
+            self.assertEqual(store.read('models/chair.mdl'), b'loose chair')
+            self.assertEqual(store.read('models/desk.mdl'), b'valid embedded desk')
+            for name in invalid_names:
+                with self.subTest(name=name):
+                    self.assertTrue(any(name in warning for warning in store.warnings))
+                    with self.assertRaisesRegex(ValueError, 'Resource path must be relative'):
+                        store.read(name)
 
     def test_vvd_fixups_reorder_vertices_and_checksum_is_checked(self):
         self.assertEqual(_vertices(make_vvd(), 123), [(1, 2, 3), (4, 5, 6)])
@@ -528,6 +551,27 @@ class ImportChecks(unittest.TestCase):
             write_gameinfo(game, [('Game', '|gameinfo_path|declared')])
             with running_viewer(game) as (server, url):
                 scene = post_waypoint(url, waypoint_bytes())
+                self.assertEqual(scene['map']['stats']['world_triangles'], 32)
+                with urlopen(url + scene['world']['url'], timeout=5) as response:
+                    self.assertEqual(len(response.read()), 32 * 36)
+
+    def test_import_downloaded_map_with_legacy_absolute_pak_entries(self):
+        with tempfile.TemporaryDirectory(prefix='agpw3d-test-') as folder:
+            game = Path(folder) / 'cstrike'
+            write_gameinfo(game, [('game+game_write', 'cstrike'),
+                                  ('game+download', 'cstrike/download')])
+            maps = game / 'download/maps'
+            maps.mkdir(parents=True)
+            pak = BytesIO()
+            legacy_path = 'D:/Steam/steamapps/map author/counter-strike source/cstrike/maps/'
+            with zipfile.ZipFile(pak, 'w') as archive:
+                archive.writestr(legacy_path + 'test_map.nav', b'old nav')
+                archive.writestr(legacy_path + 'test_map.txt', b'map notes')
+                archive.writestr('materials/brick/wall.vmt', 'UnlitGeneric {}')
+            (maps / 'test_map.bsp').write_bytes(make_bsp(displacement=True, pak_bytes=pak.getvalue()))
+            with running_viewer(game) as (server, url):
+                scene = post_waypoint(url, waypoint_bytes())
+                self.assertEqual(scene['map']['name'], 'test_map')
                 self.assertEqual(scene['map']['stats']['world_triangles'], 32)
                 with urlopen(url + scene['world']['url'], timeout=5) as response:
                     self.assertEqual(len(response.read()), 32 * 36)

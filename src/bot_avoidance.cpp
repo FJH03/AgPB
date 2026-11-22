@@ -11,6 +11,7 @@
 #include "bot.h"
 #include "waypoint.h"
 #include "movement_control.h"
+#include "obstacle.h"
 #include "game_mode.h"
 
 extern bool AgPB_IsRoundFrozen();
@@ -24,17 +25,35 @@ void CAgPB::ResetPlayerAvoidance()
 	m_pszPlayerAvoidance = "idle";
 }
 
+IPlayerInfo *CAgPB::PlayerAvoidanceAlly( edict_t *other, int expectedUserId ) const
+{
+	if ( other == NULL || other->IsFree() || m_pInfo == NULL || m_Ctx.pPlayerInfoManager == NULL ||
+	     m_Ctx.pTrace == NULL ) return NULL;
+
+	IPlayerInfo *info = NULL;
+	if ( AgPB_GameMode() == AgPB_MODE_ZM )
+		info = ZMPlayer( other, m_ZM.role, expectedUserId );
+	else
+	{
+		info = m_Ctx.pPlayerInfoManager->GetPlayerInfo( other );
+		if ( info == NULL || !info->IsConnected() || !info->IsPlayer() || info->IsObserver() || info->IsDead() ||
+		     info->GetTeamIndex() != m_pInfo->GetTeamIndex() ||
+		     ( expectedUserId > 0 && info->GetUserID() != expectedUserId ) ||
+		     AgPB_ReadNetVarInt( other, "m_lifeState", -1 ) != LIFE_ALIVE ) return NULL;
+	}
+	if ( info == NULL ) return NULL;
+
+	IServerNetworkable *network = other->GetNetworkable();
+	IHandleEntity *handle = network != NULL ? network->GetEntityHandle() : NULL;
+	return handle != NULL && AgPB_BlocksWalkHull( m_Ctx.pTrace->GetCollideable( handle ) ) ? info : NULL;
+}
+
 bool CAgPB::PlayerAvoidanceActive( float now ) const
 {
 	if ( !m_bPlayerAvoidanceActive || !std::isfinite( now ) || now < m_flPlayerAvoidanceAt ||
 		now - m_flPlayerAvoidanceAt > 0.1f || !HasRoute() ||
 		m_PlayerAvoidance.owner != m_uRouteTaskToken || m_uRouteTaskToken != m_Tasks.Current().token ) return false;
-	edict_t *other = HandleToEdict( (uintp)m_PlayerAvoidance.handle );
-	IPlayerInfo *info = other != NULL ? m_Ctx.pPlayerInfoManager->GetPlayerInfo( other ) : NULL;
-	return info != NULL && info->IsPlayer() && !info->IsObserver() && !info->IsDead() &&
-		info->GetUserID() == m_PlayerAvoidance.userid && m_pInfo != NULL &&
-		info->GetTeamIndex() == m_pInfo->GetTeamIndex() &&
-		AgPB_ReadNetVarInt( other, "m_lifeState", -1 ) == LIFE_ALIVE;
+	return PlayerAvoidanceAlly( HandleToEdict( (uintp)m_PlayerAvoidance.handle ), m_PlayerAvoidance.userid ) != NULL;
 }
 
 void CAgPB::UpdatePlayerAvoidance( CGlobalVars *globals, CBotCmd &cmd, const Vector &blockedWish )
@@ -42,7 +61,9 @@ void CAgPB::UpdatePlayerAvoidance( CGlobalVars *globals, CBotCmd &cmd, const Vec
 	using namespace AgPBPlayerAvoid;
 	const AgPBTask &task = m_Tasks.Current();
 	const int flags = GetNetVarInt( "m_fFlags" );
-	const float lastSeen = m_Search.visual.observedAt;
+	const AgPBGameMode mode = AgPB_GameMode();
+	const bool zm = mode == AgPB_MODE_ZM && m_bAutonomous && m_ZM.role != AgPBZRRole::Unknown;
+	const float lastSeen = zm ? m_ZM.sight.seenAt : m_Search.visual.observedAt;
 	const bool interacting = ( cmd.buttons & IN_USE ) != 0 ||
 		( task.id == AgPBTaskId::PlantBomb && ( cmd.buttons & IN_ATTACK ) != 0 ) ||
 		( task.id == AgPBTaskId::DefuseBomb && GetNetVarInt( "m_bIsDefusing" ) != 0 );
@@ -51,13 +72,13 @@ void CAgPB::UpdatePlayerAvoidance( CGlobalVars *globals, CBotCmd &cmd, const Vec
 	if ( m_iRouteIndex > 0 ) BotWaypoints().IsConnected( RouteNode( m_iRouteIndex - 1 ), RouteNode( m_iRouteIndex ), &leg );
 	BotWaypoints().IsConnected( RouteNode( m_iRouteIndex ), RouteNode( m_iRouteIndex + 1 ), &nextLeg );
 	const AgPBPath *node = BotWaypoints().Get( RouteNode( m_iRouteIndex ) );
-	if ( globals == NULL || m_pInfo == NULL || m_Ctx.pTrace == NULL || !IsAlive() || AgPB_GameMode() != AgPB_MODE_NORMAL ||
+	if ( globals == NULL || m_pInfo == NULL || m_Ctx.pTrace == NULL || !IsAlive() || ( mode != AgPB_MODE_NORMAL && !zm ) ||
 		AgPB_IsRoundFrozen() || ( flags & ( FL_FROZEN | FL_ONGROUND ) ) != FL_ONGROUND ||
 		GetNetVarInt( "movetype" ) != MOVETYPE_WALK || GetNetVarInt( "m_nWaterLevel" ) >= 2 ||
 		( ( cmd.buttons | m_LastSubmittedCmd.buttons ) & IN_JUMP ) != 0 || m_bPendingJumpLaunch ||
 		( ( leg | nextLeg ) & AgPB_PATH_JUMP ) != 0 ||
-		( node != NULL && ( node->flags & AgPB_WP_LADDER ) != 0 ) ||
-		IsHoldingTaskPosition() || interacting || task.id == AgPBTaskId::DestroyBreakable ||
+		( node != NULL && ( node->flags & ( AgPB_WP_LADDER | AgPB_WP_LIFT ) ) != 0 ) ||
+		IsHoldingTaskPosition() || ( zm && IsZMHoldingPosition() ) || interacting || task.id == AgPBTaskId::DestroyBreakable ||
 		( task.deadline > 0.0f && globals->curtime >= task.deadline ) ||
 		cmd.weaponselect != 0 || cmd.upmove != 0.0f ||
 		( !hasGroundCommand && ( !blockedWish.IsValid() || blockedWish.Length2DSqr() <= 0.01f ) ) )
@@ -65,6 +86,13 @@ void CAgPB::UpdatePlayerAvoidance( CGlobalVars *globals, CBotCmd &cmd, const Vec
 		// Never create movement after a stop, accuracy brake, holding task,
 		// weapon wait or terminal settle. A blocked movement wish only seeds
 		// a new, fully traced teammate-avoidance candidate.
+		ResetPlayerAvoidance();
+		return;
+	}
+	IServerNetworkable *network = m_pEdict->GetNetworkable();
+	IHandleEntity *self = network != NULL ? network->GetEntityHandle() : NULL;
+	if ( self == NULL || !AgPB_BlocksWalkHull( m_Ctx.pTrace->GetCollideable( self ) ) )
+	{
 		ResetPlayerAvoidance();
 		return;
 	}
@@ -84,6 +112,14 @@ void CAgPB::UpdatePlayerAvoidance( CGlobalVars *globals, CBotCmd &cmd, const Vec
 	input.team = m_pInfo->GetTeamIndex(); input.slot = m_iIndex;
 	input.recentEnemy = hasGroundCommand && std::isfinite( lastSeen ) && lastSeen >= 0.0f &&
 		globals->curtime >= lastSeen && globals->curtime - lastSeen <= 1.5f;
+	if ( !hasGroundCommand && original.IsValid() && velocity.IsValid() )
+	{
+		Vector direction = original;
+		direction.z = 0.0f;
+		const float speed = VectorNormalize( direction );
+		const float momentum = DotProduct( velocity, direction ) * MIN( input.interval, 0.05f );
+		input.blockedLookahead = MIN( 64.0f, MAX( AgPB_HULL_RADIUS, speed * 0.2f ) + MAX( 0.0f, momentum ) );
+	}
 	input.owner = task.token; input.ducking = ( flags & FL_DUCKING ) != 0 || ( cmd.buttons & IN_DUCK ) != 0;
 	if ( !Valid( input ) || input.owner == 0 || original.Length2DSqr() <= 0.01f ) { ResetPlayerAvoidance(); return; }
 	m_vPlayerAvoidanceWish = original;
@@ -101,17 +137,15 @@ void CAgPB::UpdatePlayerAvoidance( CGlobalVars *globals, CBotCmd &cmd, const Vec
 	{
 		if ( slot == m_iIndex ) continue;
 		edict_t *entity = m_Ctx.pEngine->PEntityOfEntIndex( slot );
-		if ( entity == NULL || entity->IsFree() ) continue;
-		IPlayerInfo *info = m_Ctx.pPlayerInfoManager->GetPlayerInfo( entity );
-		if ( info == NULL || !info->IsPlayer() || info->IsObserver() || info->IsDead() ||
-			info->GetTeamIndex() != input.team || AgPB_ReadNetVarInt( entity, "m_lifeState", -1 ) != LIFE_ALIVE ) continue;
-		IServerNetworkable *network = entity->GetNetworkable();
-		if ( network == NULL || network->GetEntityHandle() == NULL ) continue;
-		ICollideable *collide = m_Ctx.pTrace->GetCollideable( network->GetEntityHandle() );
-		if ( collide == NULL || collide->GetSolid() == SOLID_NONE || ( collide->GetSolidFlags() & FSOLID_NOT_SOLID ) != 0 ) continue;
+		IPlayerInfo *info = PlayerAvoidanceAlly( entity );
+		if ( info == NULL ) continue;
+		const uintp handle = AgPB_RefEHandle( entity );
+		if ( !NetVar_HandleIsValid( handle ) ) continue;
 		Neighbor neighbor;
-		neighbor.handle = (std::uint64_t)network->GetEntityHandle()->GetRefEHandle().ToInt();
-		neighbor.userid = info->GetUserID(); neighbor.slot = slot; neighbor.team = info->GetTeamIndex();
+		neighbor.handle = static_cast<std::uint64_t>( handle );
+		neighbor.userid = info->GetUserID(); neighbor.slot = slot;
+		// The engine team is only a policy key here. ZM allies were filtered by ZR role.
+		neighbor.team = input.team;
 		const Vector position = info->GetAbsOrigin(), speed = AgPB_ReadNetVarVector( entity, "m_vecVelocity" );
 		const Vector otherMins = info->GetPlayerMins(), otherMaxs = info->GetPlayerMaxs();
 		neighbor.position = Vec2( position.x, position.y ); neighbor.z = position.z;
@@ -144,15 +178,20 @@ void CAgPB::UpdatePlayerAvoidance( CGlobalVars *globals, CBotCmd &cmd, const Vec
 				probes.rightOnly = safe( SideWish( steering, 1 ) );
 				probes.leftOnly = safe( SideWish( steering, -1 ) );
 			}
-			else if ( !contact.retreat )
+			if ( !contact.retreat && !probes.rightOnly && !probes.leftOnly )
 			{
 				probes.right = safe( CandidateWish( steering, 1 ) );
 				probes.left = safe( CandidateWish( steering, -1 ) );
 			}
-			probes.rightBack = safe( CandidateWish( steering, 1, true ) );
-			probes.leftBack = safe( CandidateWish( steering, -1, true ) );
+			if ( !contact.anticipated && !probes.rightOnly && !probes.leftOnly && !probes.right && !probes.left )
+			{
+				probes.rightBack = safe( CandidateWish( steering, 1, true ) );
+				probes.leftBack = safe( CandidateWish( steering, -1, true ) );
+			}
 		}
-		probes.back = safe( CandidateWish( steering, 0, true ) );
+		if ( !contact.anticipated && !probes.rightOnly && !probes.leftOnly && !probes.right && !probes.left &&
+		     !probes.rightBack && !probes.leftBack )
+			probes.back = safe( CandidateWish( steering, 0, true ) );
 	}
 	const Output output = Step( m_PlayerAvoidance, input, contact, probes );
 	m_pszPlayerAvoidance = output.reason;
@@ -164,29 +203,41 @@ void CAgPB::UpdatePlayerAvoidance( CGlobalVars *globals, CBotCmd &cmd, const Vec
 	if ( wish.Length2DSqr() > 0.01f && !safe( output.wish ) ) wish.Init();
 	const AgPBMovement::LocalWish local = AgPBMovement::WorldToLocal( wish.x, wish.y, cmd.viewangles.y );
 	cmd.forwardmove = local.forward; cmd.sidemove = local.side;
-	if ( m_uRouteTaskToken == task.token && HasRoute() )
+	if ( !contact.anticipated && m_uRouteTaskToken == task.token && HasRoute() )
 	{
 		m_flStuckCheckTime = input.now + 2.0f;
 		m_flStuckRecoveryUntil = 0.0f;
-		if ( output.requestReplan && !NetVar_HandleIsValid( m_uCombatEnemy ) )
+		if ( output.requestReplan && ( zm || !NetVar_HandleIsValid( m_uCombatEnemy ) ) )
 		{
 			const int goal = m_iGoalWaypoint;
 			const std::uint64_t owner = m_uRouteTaskToken;
 			const State continued = m_PlayerAvoidance;
 			char error[192];
 			++m_uPlayerAvoidanceReplans;
-			const bool rebuilt = BuildRoute( goal, error, sizeof( error ) );
-			// Failed candidates leave the old route intact. Successful candidates
-			// retain the exact task/goal and use only existing manual graph edges.
-			m_uRouteTaskToken = owner;
-			m_PlayerAvoidance = continued;
-			m_vPlayerAvoidanceWish = original;
-			m_iPlayerAvoidanceWishTick = globals->tickcount;
-			m_pszPlayerAvoidance = rebuilt ? "player-repath" : "player-repath-wait";
-			m_bPlayerAvoidanceActive = true; m_bPlayerAvoidanceYielding = output.yielding;
-			m_flPlayerAvoidanceAt = input.now;
+			const int avoid = contact.physical && m_iRouteIndex + 1 < m_vecRoute.Count() ?
+			                  RouteNode( m_iRouteIndex ) : -1;
+			CUtlVector<int> candidate;
+			const bool found = FindRouteCandidate( goal, candidate, error, sizeof( error ), avoid );
+			const bool changed = found && AgPBPropAvoid::HasAlternativeRoute( m_vecRoute.Base(), m_vecRoute.Count(),
+				m_iRouteIndex, candidate.Base(), candidate.Count() );
+			if ( changed )
+			{
+				ClearRoute();
+				m_vecRoute = candidate;
+				m_iGoalWaypoint = goal;
+				m_uRouteTaskToken = owner;
+				ResetRouteProgress( input.now );
+				m_PlayerAvoidance = continued;
+				m_vPlayerAvoidanceWish = original;
+				m_iPlayerAvoidanceWishTick = globals->tickcount;
+				m_bPlayerAvoidanceActive = true;
+				m_bPlayerAvoidanceYielding = output.yielding;
+				m_flPlayerAvoidanceAt = input.now;
+			}
+			m_pszPlayerAvoidance = changed ? "player-repath" : "player-repath-wait";
 			RouteReport( "player recovery goal=%d owner=%llu replan=%u result=%s",
-				goal, (unsigned long long)owner, m_uPlayerAvoidanceReplans, rebuilt ? "ready" : error );
+				goal, (unsigned long long)owner, m_uPlayerAvoidanceReplans,
+				changed ? "alternative" : ( found ? "same-blocked-leg" : error ) );
 		}
 	}
 }

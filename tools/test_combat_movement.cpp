@@ -1,5 +1,6 @@
 // Regression of SyPB normal combat movement, independent of Source SDK/runtime.
 #include "../src/combat_movement.h"
+#include <cmath>
 #include <cstdio>
 #include <cstdlib>
 #include <limits>
@@ -47,16 +48,16 @@ int main() {
     in.distance = 96.0f;
     Require(Stopped(Step(state, in, random)), "96-unit boundary is outside close retreat");
     in.health = 15.0f; in.aggression = 1.0f; in.distance = 350.0f; in.attacking = false;
-    in.enemyFacingSelf = true;
+    in.enemyInViewCone = true;
     out = Step(state, in, random);
     Require(out.forward == -in.walkSpeed, "low-health exposed rifle backs away at final walk speed instead of charging");
-    in.enemyFacingSelf = false;
-    Require(Stopped(Step(state, in, random)), "low health alone does not imply the enemy is aiming here");
-    in.enemyFacingSelf = true; in.bombPlanted = true;
-    Require(Stopped(Step(state, in, random)), "planted-bomb context suppresses generic fear retreat");
+    in.enemyInViewCone = false;
+    Require(Stopped(Step(state, in, random)), "low health does not trigger this retreat when the enemy is outside the bot view cone");
+    in.enemyInViewCone = true; in.bombPlanted = true;
+    Require(Step(state, in, random).forward == 0.0f, "planted-bomb context suppresses generic fear retreat");
 
     Reset(state); in = Input(); in.weapon = Weapon::Rifle; in.now = 40.0f;
-    in.distance = 400.0f; in.reloading = true; in.enemyFacingSelf = true;
+    in.distance = 400.0f; in.reloading = true; in.enemyInViewCone = true;
     out = Step(state, in, random);
     Require(out.forward == -in.maxSpeed && out.side != 0.0f && !out.duck && !out.stopForAccuracy &&
         out.motion == Motion::ReloadRetreat, "exposed reload retreats at full speed with lateral evasion");
@@ -110,7 +111,7 @@ int main() {
         "expired direction lease may choose a new direction from actual enemy orientation");
     in.skill = 69;
     Require(Step(state, in, random).side == 0.0f, "skill below 70 does not get normal strafe style evasion");
-    in.reloading = true; in.enemyFacingSelf = true;
+    in.reloading = true; in.enemyInViewCone = true;
     Require(Step(state, in, random).side != 0.0f, "reload allows evasion independently of skill style threshold");
 
     Reset(state); in = Input(); random = Random();
@@ -123,7 +124,7 @@ int main() {
     Require(out.duck && out.forward == -in.maxSpeed && out.side == 0.0f,
         "actual close rifle shot suppresses side evasion while retaining crouched retreat");
     in.distance = 300.0f; in.health = 15.0f; in.aggression = 1.0f;
-    in.attacking = false; in.enemyFacingSelf = true; in.crouchRequired = true;
+    in.attacking = false; in.enemyInViewCone = true; in.crouchRequired = true;
     out = Step(state, in, random);
     Require(out.duck && out.forward == -in.maxSpeed,
         "authored crouch also retains SyPB GetWalkSpeed maximum-speed exception");
@@ -144,7 +145,7 @@ int main() {
         "MP5 retains SMG aggression bonus and full approach on an inter-shot command");
     in.attacking = true;
     Require(Stopped(Step(state, in, random)), "MP5 actual attack remains distinct from mobilePrimary fire");
-    in.mobilePrimary = true; in.health = 15.0f; in.aggression = 0.1f; in.enemyFacingSelf = true;
+    in.mobilePrimary = true; in.health = 15.0f; in.aggression = 0.1f; in.enemyInViewCone = true;
     out = Step(state, in, random);
     Require(Stopped(out), "SMG approach bonus does not invent a low-health lateral retreat below close range");
 
@@ -165,7 +166,7 @@ int main() {
 
     Reset(state); in = Input(); random = Random();
     in.weapon = Weapon::Rifle; in.now = 85.0f; in.distance = 799.0f;
-    in.health = 15.0f; in.aggression = 1.0f; in.enemyFacingSelf = true; in.skill = 69;
+    in.health = 15.0f; in.aggression = 1.0f; in.enemyInViewCone = true; in.skill = 69;
     random.style = 0.0f;
     Require(Step(state, in, random).side == 0.0f, "low skill blocks normal fear strafe even inside 800 units");
     in.skill = 70; in.now += 0.01f;
@@ -229,10 +230,10 @@ int main() {
             "skill60 rifle late override can still approach on an actual non-attack frame");
     }
 
-    in = Input(); in.weapon = Weapon::Rifle; in.now = 110.0f; in.distance = 400.0f;
+    in = Input(); in.weapon = Weapon::Rifle; in.now = 110.0f; in.distance = 800.0f;
     in.attacking = true; in.skill = 20; in.aggression = 0.3f; Reset(state);
     Require(Stopped(StepFrame(state, in)), "low-skill dispatch does not force cautious rifles to pursue");
-    in.health = 15.0f; in.aggression = 1.0f; in.enemyFacingSelf = true;
+    in.health = 15.0f; in.aggression = 1.0f; in.enemyInViewCone = true;
     out = StepFrame(state, in);
     Require(out.forward == -in.walkSpeed && out.side == 0.0f,
         "low-skill early Fight retains genuine low-health retreat while the later gun fires");
@@ -271,7 +272,7 @@ int main() {
     Require(StepFrame(state, in, early, late).duck, "two same-time calls preserve an existing timed duck lease");
     in.now = 130.5f;
     Require(!StepFrame(state, in, early, late).duck, "frame duck expires exactly at the original half-second boundary");
-    state.duckUntil = 200.0f; in.reloading = true; in.enemyFacingSelf = true;
+    state.duckUntil = 200.0f; in.reloading = true; in.enemyInViewCone = true;
     out = StepFrame(state, in, early, late);
     Require(out.forward == -in.maxSpeed && !out.duck && state.duckUntil == 0.0f,
         "final reload override releases optional timed duck in both phases");
@@ -279,7 +280,7 @@ int main() {
     Require(StepFrame(state, in, early, late).duck, "frame reload still retains required authored crouch");
 
     in = Input(); in.weapon = Weapon::SMG; in.now = 140.0f; in.distance = 70.0f;
-    in.skill = 59; in.reloading = true; in.enemyFacingSelf = true; in.enemySide = -1.0f;
+    in.skill = 59; in.reloading = true; in.enemyInViewCone = true; in.enemySide = -1.0f;
     early.strafeFlip = 1.0f; early.duration = 0.5f; Reset(state);
     out = StepFrame(state, in, early, late);
     Require(out.side == in.walkSpeed && state.strafeUntil == 141.5f,
@@ -303,7 +304,7 @@ int main() {
         for (Weapon kind : reloadKinds) {
             in = Input(); in.weapon = kind; in.now = 150.0f; in.distance = 80.0f;
             in.skill = level; in.reloading = true; in.attacking = true;
-            in.canDuck = true; in.enemyFacingSelf = true; Reset(state);
+            in.canDuck = true; in.enemyInViewCone = true; Reset(state);
             state.duckUntil = 200.0f;
             // Initialize once before installing a prior optional duck lease.
             StepFrame(state, in, early, late);
@@ -321,5 +322,146 @@ int main() {
                 "all skill59/60 reload weapon classes retain required crouch even outside near range");
         }
     }
+
+    const struct {
+        Weapon weapon;
+        float range, walkSpeed;
+    } proactiveWeapons[] = {
+        {Weapon::Rifle, 768.0f, 96.5f},
+        {Weapon::Pistol, 544.0f, 109.0f},
+    };
+    for (const auto &test : proactiveWeapons) {
+        in = Input(); in.weapon = test.weapon; in.now = 160.0f;
+        in.distance = std::nextafter(test.range, 0.0f); in.walkSpeed = test.walkSpeed;
+        in.skill = 1; in.aggression = 0.9f; in.attacking = true;
+        in.enemyInViewCone = true; in.enemySide = -1.0f;
+        early = Random(); early.style = 1.0f; early.strafeFlip = 1.0f; early.duration = 0.0f;
+        late = Random(); late.strafeFlip = 0.0f; late.duration = 1.0f;
+        Reset(state);
+        out = StepFrame(state, in, early, late);
+        Require(out.forward == 0.0f && out.side == in.walkSpeed && !out.duck &&
+            !out.stopForAccuracy && out.motion == Motion::Strafe && out.strafe == StrafePlan::Moving &&
+            state.style == FightStyle::Stay && state.nextStyleAt == 163.0f && state.strafeUntil == 160.5f,
+            "minimum skill rifle and pistol attack with pure walk-speed strafe on the early-only path");
+
+        in.now = 160.125f; in.enemySide = 1.0f; early.duration = 1.0f;
+        out = StepFrame(state, in, early, late);
+        Require(out.forward == 0.0f && out.side == in.walkSpeed && state.strafeUntil == 160.5f,
+            "held attack and rotated enemy preserve the original direction and deadline");
+        in.now = 160.1875f; in.attacking = false;
+        out = StepFrame(state, in, early, late);
+        Require(out.forward == 0.0f && out.side == in.walkSpeed && state.strafeUntil == 160.5f,
+            "the frame without attack shares the direction lease and remains purely lateral");
+        in.now = 160.375f;
+        out = StepFrame(state, in, early, late);
+        Require(Stopped(out) && !out.stopForAccuracy && out.strafe == StrafePlan::Precision &&
+            state.strafeSign == 1 && state.strafeUntil == 160.5f,
+            "the accuracy pause stops movement between shots and preserves the direction lease");
+        in.now = 160.4375f; in.attacking = true;
+        out = StepFrame(state, in, early, late);
+        Require(Stopped(out) && out.stopForAccuracy && out.strafe == StrafePlan::Precision &&
+            state.strafeSign == 1 && state.strafeUntil == 160.5f,
+            "minimum skill early-only dispatch gates the actual attack during the accuracy pause");
+        in.now = 160.5f;
+        out = StepFrame(state, in, early, late);
+        Require(Stopped(out) && out.stopForAccuracy && state.strafeSign == 1 && state.strafeUntil == 160.5f,
+            "proactive accuracy pause holds through the exact direction deadline");
+        in.now = std::nextafter(in.now, 161.0f);
+        out = StepFrame(state, in, early, late);
+        Require(out.forward == 0.0f && out.side == -in.walkSpeed && !out.stopForAccuracy &&
+            state.strafeUntil == in.now + 2.5f && state.nextStyleAt == 163.0f,
+            "the next firing frame can reverse for the enemy orientation and select a full duration without rerolling style");
+
+        in.skill = 60; Reset(state);
+        out = StepFrame(state, in, early, late);
+        Require(out.forward == 0.0f && out.side == -in.walkSpeed && !out.stopForAccuracy &&
+            out.strafe == StrafePlan::Moving, "skill60 post-fire dispatch retains the proactive strafe during attack");
+        in.enemyInViewCone = false; Reset(state);
+        out = StepFrame(state, in, early, late);
+        Require(Stopped(out) && out.stopForAccuracy && out.strafe == StrafePlan::View,
+            "enemy outside own view cone keeps rifle and pistol precision stop");
+        in.enemyInViewCone = true; in.distance = test.range; early.style = 0.0f; Reset(state);
+        out = StepFrame(state, in, early, late);
+        Require(Stopped(out) && out.stopForAccuracy && out.strafe == StrafePlan::Distance &&
+            state.style == FightStyle::Strafe,
+            "exact weapon range excludes proactive side motion even when the style selects strafe");
+
+        in.distance = 400.0f; in.crouchRequired = true; Reset(state);
+        out = StepFrame(state, in, early, late);
+        Require(out.duck && Stopped(out) && out.stopForAccuracy && out.strafe == StrafePlan::Crouch,
+            "required crouch has priority over proactive strafe");
+        in.crouchRequired = false; in.distance = 95.0f; Reset(state);
+        out = StepFrame(state, in, early, late);
+        Require(out.duck && out.forward == -in.maxSpeed && out.side == 0.0f,
+            "close-range duck and retreat keep priority during a rifle or pistol shot");
+        in.distance = 96.0f; Reset(state);
+        out = StepFrame(state, in, early, late);
+        Require(!out.duck && out.forward == 0.0f && std::fabs(out.side) == in.walkSpeed &&
+            out.strafe == StrafePlan::Moving,
+            "rifle and pistol are eligible at the exact close-retreat boundary");
+        in.distance = 400.0f; in.health = 15.0f; Reset(state);
+        out = StepFrame(state, in, early, late);
+        Require(!out.duck && out.forward == -in.walkSpeed && out.side == 0.0f && out.motion == Motion::Retreat &&
+            out.strafe == StrafePlan::Retreat,
+            "low-health retreat stays ahead of rifle and pistol proactive strafing");
+        in.health = 100.0f; in.reloading = true; in.attacking = false; Reset(state);
+        out = StepFrame(state, in, early, late);
+        Require(out.forward == -in.maxSpeed && std::fabs(out.side) == in.walkSpeed &&
+            !out.stopForAccuracy && out.motion == Motion::ReloadRetreat && out.strafe == StrafePlan::Reload,
+            "reload keeps full retreat and its own lateral evasion inside the proactive range");
+
+        in.reloading = false; in.attacking = true; early.duration = 0.0f;
+        in.now = 165.0f; in.distance = std::nextafter(256.0f, 0.0f); Reset(state);
+        StepFrame(state, in, early, late);
+        in.now = state.strafeUntil;
+        out = StepFrame(state, in, early, late);
+        Require(out.forward == 0.0f && std::fabs(out.side) == in.walkSpeed && !out.stopForAccuracy,
+            "in-range rifle and pistol remain mobile through the direction deadline just inside 256 units");
+        in.now = 165.0f; in.distance = 256.0f; Reset(state);
+        StepFrame(state, in, early, late);
+        in.now = 165.375f;
+        out = StepFrame(state, in, early, late);
+        Require(Stopped(out) && out.stopForAccuracy && out.strafe == StrafePlan::Precision &&
+            state.strafeUntil == 165.5f,
+            "the exact 256-unit boundary allows a late-lease accuracy pause");
+    }
+
+    in = Input(); in.weapon = Weapon::Sniper; in.now = 170.0f; in.distance = 400.0f;
+    in.skill = 100; in.attacking = true; in.enemyInViewCone = true; Reset(state);
+    out = StepFrame(state, in);
+    Require(Stopped(out) && out.stopForAccuracy, "in-cone sniper stays with precision stop at maximum skill");
+    in.weapon = Weapon::SMG; in.mobilePrimary = true; in.aggression = 0.4f; Reset(state);
+    out = StepFrame(state, in);
+    Require(out.forward == in.maxSpeed && out.side == 0.0f && !out.stopForAccuracy,
+        "in-cone mobile SMG keeps its existing firing approach");
+    in.mobilePrimary = false; Reset(state);
+    out = StepFrame(state, in);
+    Require(Stopped(out) && out.stopForAccuracy, "in-cone MP5 retains its existing firing stop");
+
+    Output diagonal;
+    diagonal.forward = -120.0f;
+    diagonal.side = 100.0f;
+    Axes alternate = AlternateStep(diagonal, [](float forward, float side) {
+        return (forward == 0.0f && side == -100.0f) || (forward == -120.0f && side == 0.0f);
+    });
+    Require(alternate.forward == 0.0f && alternate.side == -100.0f,
+        "a blocked diagonal can keep a safe mirrored sidestep before retreating straight");
+    alternate = AlternateStep(diagonal, [](float forward, float side) {
+        return forward == -120.0f && side == 0.0f;
+    });
+    Require(alternate.forward == -120.0f && alternate.side == 0.0f,
+        "narrow passages retain a safe straight retreat when neither side fits");
+    alternate = AlternateStep(diagonal, [](float forward, float) { return forward > 0.0f; });
+    Require(alternate.forward == 0.0f && alternate.side == 0.0f,
+        "unsafe retreat candidates cannot turn into a charge");
+    const float pressuredRifle = CombatApproach(Weapon::Rifle, 50.0f, 0.35f, false);
+    Require(WantsToWithdraw(pressuredRifle, false, true),
+        "low approach hands the visible duel to cover even above the 30 HP emergency threshold");
+    Require(!WantsToWithdraw(CombatApproach(Weapon::Rifle, 50.0f, 0.40f, false), false, true),
+        "the exact approach threshold keeps the original strict comparison");
+    Require(!WantsToWithdraw(pressuredRifle, true, true) && !WantsToWithdraw(pressuredRifle, false, false),
+        "low approach still requires the own view cone and unplanted bomb");
+    Require(!WantsToWithdraw(CombatApproach(Weapon::SMG, 30.0f, 0.0f, false), false, true),
+        "SMGs retain SyPB's closing bias when evaluating low approach");
     std::puts("combat movement policy tests passed");
 }

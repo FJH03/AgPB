@@ -18,7 +18,7 @@ spec.loader.exec_module(client)
 
 def snapshot(token=0, deadline=0.0, auto=1, alive=1, team=3, mapserial=2, userid=12):
     active = token != 0
-    return ("[AgPB agent] v=1 map=de_dust2 mapserial=%d round=7 bots=1\n" % mapserial +
+    return ("[AgPB agent] v=1 map=de_dust2 mapserial=%d round=7 bots=1 combat_override=1 chat_override=0\n" % mapserial +
             "[AgPB] AgPB-1: agent v=1 userid=%d mapserial=%d round=7 lease-map=%d lease-round=%d "
             "token=%d mode=%s wp=%d deadline=%.3f remaining=3.000 state=%s reason=test auto=%d route-owner=%d\n" %
             (userid,mapserial,mapserial if active else 0,7 if active else 0,token,

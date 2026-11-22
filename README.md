@@ -27,9 +27,10 @@ SDK 静态库必须先编好：`hl2sdk-css\source-engine-czero\build\{tier0,vstd
 ## 构建与部署
 
 命令模板、包目录、部署步骤、红线都在 [`AGENTS.md`](AGENTS.md) §2，这里不重复。
-一句话版本：`ambuild` 产出 `build\package\addons\...`（SourceMod 目录约定，不压 zip），
-构建命令最后一条 `xcopy` 把它覆盖到 [`AGENTS.md`](AGENTS.md) §2 写的目标目录。
+`ambuild` 产出 `build\package\addons\...`（SourceMod 目录约定，不压 zip）。监听服和专服使用同一份 AgPB 本体、路点和默认配置。监听服用于可视化制作路点，专服用于插件和实际游戏模式验收。 [部署模板](AGENTS.md#2-构建与部署)
 `server.cfg` 建议设置 `bot_quota 0`，避免引擎自带 bot 干预。
+
+给感染服打包时，在 `configure.py` 的参数里加 `--with-spcomp "<SourceMod scripting 目录中的编译器完整路径>"`。编译器旁须有 `include/`。`ambuild` 会把 ZR 检测桥编进 `addons/sourcemod/plugins/`。进图后用 `agpb_mode_status` 确认模式和 ZR 状态。 [模式命令](COMMANDS.md)
 
 ## 文档
 

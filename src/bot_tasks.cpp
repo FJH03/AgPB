@@ -45,7 +45,8 @@ bool CAgPB::IsHoldingTaskPosition() const
 		AgPB_IsRoundFrozen() || ( GetNetVarInt( "m_fFlags" ) & FL_FROZEN ) != 0 ) ||
 		!AgPBHolding::AgentValid( task, m_AgentIntent.token, m_AgentIntent.waypoint,
 			m_AgentIntent.deadline, gpGlobals->curtime ) ) return false;
-	return AgPBHolding::HoldsPosition( task, m_AgentIntent.camp, m_AgentIntent.arrived );
+	return AgPBHolding::HoldsPosition( task, m_AgentIntent.camp, m_AgentIntent.arrived ) ||
+		( task.id == AgPBTaskId::RadioOrder && task.token == m_RadioOrder.task && m_RadioOrder.holding );
 }
 
 bool CAgPB::NavigationRequiresCrouch( unsigned int flags )
@@ -64,13 +65,17 @@ bool CAgPB::TaskRequiresCrouch() const
 		AgPB_IsRoundFrozen() || ( GetNetVarInt( "m_fFlags" ) & FL_FROZEN ) != 0 ) ||
 		!AgPBHolding::AgentValid( task, m_AgentIntent.token, m_AgentIntent.waypoint,
 			m_AgentIntent.deadline, gpGlobals->curtime ) ) return false;
-	const AgPBPath *holding = BotWaypoints().Get( task.waypoint );
+	const AgPBPath *holding = task.id != AgPBTaskId::RadioOrder || m_RadioOrder.call == AgPBRadio::GetInPosition
+		? BotWaypoints().Get( task.waypoint ) : NULL;
 	const AgPBPath *node = BotWaypoints().Get( RouteNode( m_iRouteIndex ) );
 	const AgPBPath *previous = BotWaypoints().Get( RouteNode( m_iRouteIndex - 1 ) );
 	const bool previousCrouch = previous != NULL && NavigationRequiresCrouch( previous->flags );
 	const float previousDistance = previousCrouch && m_pInfo != NULL
 		? ( previous->origin - m_pInfo->GetAbsOrigin() ).Length2D() : 64.0f;
-	return AgPBHolding::RequiresCrouch( task, IsHoldingTaskPosition(),
+	// Grenade preparation can own the command while the bot stays in cover.
+	const bool holdingCover = task.id == AgPBTaskId::SeekCover && m_uRouteTaskToken == task.token &&
+		m_bRouteArrived && !HasRoute();
+	return AgPBHolding::RequiresCrouch( task, holdingCover || IsHoldingTaskPosition(),
 		holding != NULL && ( holding->flags & AgPB_WP_CROUCH ) != 0,
 		m_uRouteTaskToken, node != NULL && NavigationRequiresCrouch( node->flags ),
 		previousCrouch, previousDistance );
@@ -107,10 +112,22 @@ void CAgPB::ResetTaskSystem( const char *reason )
 	ClearCombat( reason );
 	m_flCombatZoomCheckAt = -1.0f;
 	ResetWeaponSelection( reason );
+	ResetGrenadeThrow();
+	m_flNextCoverAt = m_flCoverReachedAt = 0.0f;
+	m_iCoverEnemyUserId = 0;
+	m_uCoverReloadWeapon = (uintp)INVALID_EHANDLE_INDEX;
+	m_iCoverReloadClip = -1;
 	ResetSearch();
 	ResetAutonomy( gpGlobals != NULL ? gpGlobals->curtime : 0.0f );
+	ResetZombieMode();
 	ClearRoute();
 	m_Tasks.Reset();
+	m_PendingRadio = {};
+	m_RadioOrder = {};
+	m_RadioReply = {};
+	// Death and round end can themselves generate an outstanding chat cue.
+	if ( V_strcmp( reason, "dead" ) != 0 && V_strcmp( reason, "round-end" ) != 0 )
+		m_Chat.id = 0;
 	m_uObservedTaskToken = m_uRouteTaskToken = 0;
 	m_flNextTaskPlan = m_flTaskActionStarted = 0.0f;
 	m_uDeclinedObjectiveHandle = (uintp)INVALID_EHANDLE_INDEX;
@@ -186,7 +203,7 @@ void CAgPB::CompleteCurrentTask( const char *reason, bool failed )
 		ResetTaskUse();
 		return;
 	}
-	if ( failed && task.hasEntity && task.id != AgPBTaskId::PickupWeapon )
+	if ( failed && task.hasEntity && task.id != AgPBTaskId::PickupWeapon && task.id != AgPBTaskId::SeekCover )
 	{
 		m_uDeclinedObjectiveHandle = (uintp)task.entityHandle;
 		m_flObjectiveRetryAfter = ( gpGlobals != NULL ? gpGlobals->curtime : 0.0f ) + 5.0f;
@@ -668,12 +685,13 @@ void CAgPB::UpdateTasks( CGlobalVars *globals, CBotCmd &cmd )
 	}
 	if ( m_bAutonomous && AgPB_GameMode() != AgPB_MODE_NORMAL )
 	{
-		ResetTaskSystem( "mode" ); return;
+		return;
 	}
 	const AgPBTask beforeExpiry = m_Tasks.Current();
 	if ( beforeExpiry.deadline > 0.0f && globals->curtime >= beforeExpiry.deadline )
 	{
-		CompleteCurrentTask( "task deadline", beforeExpiry.id != AgPBTaskId::Camp && beforeExpiry.id != AgPBTaskId::Pause && beforeExpiry.id != AgPBTaskId::Investigate );
+		CompleteCurrentTask( "task deadline", beforeExpiry.id != AgPBTaskId::Camp && beforeExpiry.id != AgPBTaskId::Pause &&
+			beforeExpiry.id != AgPBTaskId::Investigate && beforeExpiry.id != AgPBTaskId::RadioOrder );
 		return;
 	}
 	m_Tasks.Expire( globals->curtime );
@@ -704,6 +722,16 @@ void CAgPB::UpdateTasks( CGlobalVars *globals, CBotCmd &cmd )
 		return;
 	}
 	if ( UpdateEnemyInvestigation( globals, cmd ) ) return;
+	if ( task.id == AgPBTaskId::RadioOrder )
+	{
+		ExecuteRadioOrder( globals, cmd );
+		return;
+	}
+	if ( task.id == AgPBTaskId::SeekCover )
+	{
+		UpdateCoverTask( globals, cmd );
+		return;
+	}
 	if ( IsHoldingTaskPosition() )
 	{
 		ApplyTaskPosture( cmd );
@@ -775,7 +803,12 @@ void CAgPB::UpdateTasks( CGlobalVars *globals, CBotCmd &cmd )
 				camp.waypoint = task.waypoint;
 				const float minimum = MAX( agpb_camp_min.GetFloat(), 1.0f );
 				camp.deadline = globals->curtime + RandomFloat( minimum, MAX( agpb_camp_max.GetFloat(), minimum ) );
-				if ( m_Tasks.Push( camp ) != 0 ) m_Autonomy.lastCampAt = globals->curtime;
+				const std::uint64_t campToken = m_Tasks.Push( camp );
+				if ( campToken != 0 )
+				{
+					m_Autonomy.lastCampAt = globals->curtime;
+					if ( m_Tasks.Current().token == campToken ) SendRadio( AgPBRadio::InPosition, globals->curtime );
+				}
 			}
 		}
 	}
@@ -783,6 +816,14 @@ void CAgPB::UpdateTasks( CGlobalVars *globals, CBotCmd &cmd )
 
 void CAgPB::ReportTasks() const
 {
+	if ( AgPB_GameMode() == AgPB_MODE_ZM )
+	{
+		const AgPBZRRole role = m_pInfo != NULL ? AgPB_ZRRoleForUserId( m_pInfo->GetUserID() ) : AgPBZRRole::Unknown;
+		const char *name = role == AgPBZRRole::Human ? "human" : role == AgPBZRRole::Zombie ? "zombie" : "unknown";
+		RouteReport( "zm role=%s goal=%d camp=%d holding=%d retreat=%d pursuit=%d",
+			name, m_ZM.goal, m_ZM.campGoal ? 1 : 0, IsZMHoldingPosition() ? 1 : 0,
+			m_ZM.retreating ? 1 : 0, m_ZM.pursuing ? 1 : 0 );
+	}
 	const AgPBObjectiveSnapshot &world = BotObjectives().Snapshot();
 	RouteReport( "autonomy=%s map=%s bomb-state=%d tasks=%d route-owner=%llu",
 		m_bAutonomous ? "on" : "off", ( world.mapFlags & AGPB_MAP_BOMB ) != 0 ? "bomb" :

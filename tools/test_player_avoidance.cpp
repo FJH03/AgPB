@@ -243,6 +243,27 @@ static void PhysicalYieldAndRecovery() {
     out = Step(state, in, c, Open());
     Require(!out.active && Same(out.wish, in.wish), "the original route wish resumes after lateral clearance");
 }
+static void GroundLookahead() {
+    Input in = Moving();
+    Neighbor n = Player();
+    in.recentEnemy = false;
+    in.hullMins = n.hullMins = Vec2(-16, -16);
+    in.hullMaxs = n.hullMaxs = Vec2(16, 16);
+    n.position = Vec2(64, 0);
+    Require(!FindContact(in, &n, 1).valid, "an ordinary route is clear of a distant stationary teammate");
+    in.blockedLookahead = 45.0f;
+    Require(FindContact(in, &n, 1).physical, "a stopped ground wish recovers a teammate inside its original probe");
+    in.blockedLookahead = 0.0f;
+    n.position = Vec2(80, 0);
+    n.velocity = Vec2(-150, 0);
+    const Contact c = FindContact(in, &n, 1);
+    Require(c.valid && c.anticipated && !c.physical, "moving head-on traffic can step aside before contact");
+    State state;
+    Require(Step(state, in, c, Open()).wish.x > 0, "an open diagonal keeps forward progress");
+    Require(!Step(state, in, c, Probes()).active, "prediction alone cannot stall a narrow passage");
+    n.velocity.x = 150.0f;
+    Require(!FindContact(in, &n, 1).valid, "a departing teammate does not cause an early sidestep");
+}
 static void PhysicalSharedAnchor() {
     Input in = Moving(); Neighbor n = Player(); State state;
     in.recentEnemy = false;
@@ -284,7 +305,7 @@ static void InvalidData() {
 }
 int main() {
     Contacts(); Prediction(); Steering(); ReplanningAndIdentity();
-    PhysicalContacts(); PhysicalYieldAndRecovery(); PhysicalSharedAnchor(); InvalidData();
+    PhysicalContacts(); PhysicalYieldAndRecovery(); GroundLookahead(); PhysicalSharedAnchor(); InvalidData();
     std::puts("player avoidance policy regression passed");
     return 0;
 }

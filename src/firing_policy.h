@@ -97,6 +97,7 @@ inline bool ToggleBurstMode(Weapon weapon, float distance, bool burstEnabled) {
     return false;
 }
 enum class Zoom { Unknown, Unzoomed, First, Second };
+enum class ZoomAction { None, Open, Close };
 inline bool ScopedRifle(Weapon weapon) { return weapon == Weapon::AUG || weapon == Weapon::SG552; }
 inline bool BoltSniper(Weapon weapon) { return weapon == Weapon::AWP || weapon == Weapon::Scout; }
 inline bool ScopedSniper(Weapon weapon) { return BoltSniper(weapon) || weapon == Weapon::G3SG1 || weapon == Weapon::SG550; }
@@ -111,18 +112,22 @@ inline Zoom ZoomForFov(Weapon weapon, int fov, int defaultFov) {
     return fov == (weapon == Weapon::AWP ? 10 : 15) ? Zoom::Second : Zoom::Unknown;
 }
 inline bool IsZoomed(Zoom zoom) { return zoom == Zoom::First || zoom == Zoom::Second; }
-inline bool ToggleCombatZoom(Weapon weapon, float distance, int skill, Zoom zoom) {
-    if (!std::isfinite(distance) || distance < 0.0f) return false;
+inline ZoomAction CombatZoomAction(Weapon weapon, float distance, int skill, Zoom zoom) {
+    if (!std::isfinite(distance) || distance < 0.0f || zoom == Zoom::Unknown) return ZoomAction::None;
     if (ScopedSniper(weapon)) {
         // A sniper already at the second zoom stays there until close range.
-        if (distance <= 150.0f) return IsZoomed(zoom);
-        return zoom == Zoom::Unzoomed || (distance > 1500.0f && zoom == Zoom::First);
+        if (distance <= 150.0f) return IsZoomed(zoom) ? ZoomAction::Close : ZoomAction::None;
+        if (zoom == Zoom::Unzoomed || (distance > 1500.0f && zoom == Zoom::First)) return ZoomAction::Open;
     }
-    return ScopedRifle(weapon) && skill < 90 &&
-        (distance > 800.0f ? zoom == Zoom::Unzoomed : zoom == Zoom::First);
+    else if (ScopedRifle(weapon)) {
+        if (distance <= 800.0f && IsZoomed(zoom)) return ZoomAction::Close;
+        if (distance > 800.0f && skill < 90 && zoom == Zoom::Unzoomed) return ZoomAction::Open;
+    }
+    return ZoomAction::None;
 }
 inline bool IdleZoomDue(float now, float lastCheck) {
-    return lastCheck >= 0.0f && now > lastCheck + 1.0f;
+    return std::isfinite(now) && now >= 0.0f && std::isfinite(lastCheck) &&
+        (lastCheck < 0.0f || now > lastCheck + 1.0f);
 }
 inline bool PrimaryFireHold(Weapon weapon) {
     // Exact SyPB table: XM1014 and the auto-snipers are classified as

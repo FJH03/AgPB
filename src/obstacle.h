@@ -65,6 +65,9 @@ bool AgPB_FindPathBreakable( const BotEngineContext &ctx, edict_t *self,
                             bool crouched, bool stuck, AgPBObstacle &result );
 
 
+// Reuse the route-entry walk-hull collision rules for player avoidance.
+bool AgPB_BlocksWalkHull( ICollideable *collide );
+
 // Complete ground movement hull, including individually clipped pushaway props.
 // Reports the nearest real contact. Player/world contacts remain in result;
 // only a physics-prop return can start local prop recovery.

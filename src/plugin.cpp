@@ -14,9 +14,12 @@
 #include <engine/IEngineTrace.h>
 #include <engine/ivdebugoverlay.h>
 #include <vphysics_interface.h>
+#include <dt_send.h>
+#include <irecipientfilter.h>
 
 #include "plugin.h"
 #include "bot.h"
+#include "game_mode.h"
 #include "obstacle.h"
 #include "waypoint.h"
 #include "menu.h"
@@ -29,6 +32,11 @@ AgPBPlugin g_AgPBPlugin;
 SH_DECL_HOOK1_void(IServerGameDLL, GameFrame, SH_NOATTRIB, 0, bool);
 SH_DECL_HOOK1_void(IServerGameClients, ClientDisconnect, SH_NOATTRIB, 0, edict_t *);
 SH_DECL_HOOK2_void(IServerGameClients, ClientCommand, SH_NOATTRIB, 0, edict_t *, const CCommand &);
+#if !defined( AGPB_GAME_CSGO )
+SH_DECL_HOOK2(IVEngineServer, UserMessageBegin, SH_NOATTRIB, 0, bf_write *, IRecipientFilter *, int);
+SH_DECL_HOOK5_void(IVEngineServer, PlaybackTempEntity, SH_NOATTRIB, 0, IRecipientFilter &, float, const void *, const SendTable *, int);
+#endif
+SH_DECL_HOOK1_void(ConCommand, Dispatch, SH_NOATTRIB, 0, const CCommand &);
 
 IServerGameDLL *server = NULL;
 IServerGameClients *gameclients = NULL;
@@ -47,6 +55,7 @@ IPhysicsSurfaceProps *AgPB_SurfaceProps() { return g_SurfaceProps; }
 
 static CAgPBManager g_Bots;
 static IGameEventManager2 *g_GameEvents = NULL;
+static ConCommand *g_ChatCommands[2] = {};
 static bool g_RoundFrozen = false;
 static AgPBPurchaseRound g_PurchaseRound;
 static unsigned int g_AgentMapSerial = 1;
@@ -115,6 +124,7 @@ public:
 			for ( int i = 0; i < g_Bots.Count(); ++i )
 				g_Bots.Get( i )->OnPerceptionEvent( source, snapshot, gpGlobals->curtime, shot ? 1400.0f : 600.0f, shot ? 4.0f : 2.5f );
 		}
+		else AgPB_OnCommunicationEvent( event );
 	}
 };
 static CAgPBRoundListener g_RoundListener;
@@ -130,6 +140,7 @@ CAgPBManager &AgPB_Bots()
 
 static ConVar agpb_enable( "agpb_enable", "1", FCVAR_GAMEDLL,
                           "Enable or disable per-tick AgPB bot thinking." );
+bool AgPB_IsEnabled() { return agpb_enable.GetBool(); }
 
 static ConVar agpb_team( "agpb_team", "2", FCVAR_GAMEDLL,
                          "Default team for agpb_add (1=spectator, 2=T, 3=CT)." );
@@ -172,12 +183,35 @@ static void Cmd_Add( const CCommand &args )
 	                pBot->Name(), pBot->Index(), team );
 }
 
+static void Cmd_Fill( const CCommand &args )
+{
+	const char *skill = args.ArgC() >= 2 ? args.Arg( 1 ) : "default";
+	const char *teamName = args.ArgC() >= 3 ? args.Arg( 2 ) : "auto";
+	const bool normal = V_stricmp( skill, "normal" ) == 0;
+	const int team = V_stricmp( teamName, "t" ) == 0 ? AgPB_TEAM_T :
+		V_stricmp( teamName, "ct" ) == 0 ? AgPB_TEAM_CT : 0;
+	if ( args.ArgC() > 3 || ( !normal && V_stricmp( skill, "default" ) != 0 ) ||
+	     ( team == 0 && V_stricmp( teamName, "auto" ) != 0 ) )
+	{
+		META_CONPRINTF( "[AgPB] usage: agpb_fill [default|normal] [auto|t|ct]\n" );
+		return;
+	}
+	char error[256] = {};
+	const int count = g_Bots.FillServer( team, normal ? 40 : -1, normal ? 60 : -1, -1, error, sizeof( error ) );
+	if ( count < 0 )
+		META_CONPRINTF( "[AgPB] cannot fill the server: %s\n", error );
+	else if ( count == 0 )
+		META_CONPRINTF( "[AgPB] the server is already full.\n" );
+	else
+		META_CONPRINTF( "[AgPB] queued %d bot(s) to fill the server.\n", count );
+}
+
 static void Cmd_Kick( const CCommand &args )
 {
 	if ( args.ArgC() >= 2 && !V_stricmp( args.Arg( 1 ), "all" ) )
 	{
 		const int n = g_Bots.Count();
-		g_Bots.RemoveAll();
+		g_Bots.KickAll();
 		META_CONPRINTF( "[AgPB] removed %d bot(s).\n", n );
 		return;
 	}
@@ -216,6 +250,15 @@ static void Cmd_List( const CCommand &args )
 		                i, pBot->Name(), pBot->Index(), team, pBot->DesiredTeam(), health, weapon,
 		                origin.x, origin.y, origin.z );
 	}
+}
+
+static void Cmd_ModeStatus( const CCommand &args )
+{
+	const char *map = gpGlobals != NULL ? STRING( gpGlobals->mapname ) : "";
+	META_CONPRINTF( "[AgPB] mode requested=%s effective=%s zr=%s map=%s\n",
+	                AgPB_RequestedGameMode(), AgPB_GameModeName( AgPB_GameMode() ),
+	                AgPB_IsZRAvailable() ? "available" : "unavailable",
+	                map != NULL && map[0] != '\0' ? map : "unknown" );
 }
 
 static void Cmd_SetTeam( const CCommand &args )
@@ -1644,9 +1687,10 @@ static void Cmd_AgentState( const CCommand &args )
 {
 	if ( args.ArgC() != 1 ) { META_CONPRINTF( "[AgPB] usage: agpb_agent_state\n" ); return; }
 	const char *map = gpGlobals != NULL ? STRING( gpGlobals->mapname ) : "";
-	META_CONPRINTF( "[AgPB agent] v=1 map=%s mapserial=%u round=%u bots=%d\n",
+	META_CONPRINTF( "[AgPB agent] v=1 map=%s mapserial=%u round=%u bots=%d combat_override=%d chat_override=%d\n",
 		map != NULL && map[0] != '\0' ? map : "unknown", AgPB_MapSerial(),
-		BotObjectives().Snapshot().roundEpoch, g_Bots.Count() );
+		BotObjectives().Snapshot().roundEpoch, g_Bots.Count(),
+		AgPB_AgentCombatOverrideEnabled() ? 1 : 0, AgPB_AgentChatOverrideEnabled() ? 1 : 0 );
 	for ( int i = 0; i < g_Bots.Count(); ++i ) g_Bots.Get( i )->ReportAgentIntent();
 }
 
@@ -1731,10 +1775,14 @@ static ConCommand agpb_objectives_cmd( "agpb_objectives", Cmd_Objectives, "Read-
 
 static ConCommand agpb_add_cmd( "agpb_add", Cmd_Add,
                                 "Create an AgPB bot. [team]", FCVAR_GAMEDLL );
+static ConCommand agpb_fill_cmd( "agpb_fill", Cmd_Fill,
+                                 "Fill free slots with AgPB bots: [default|normal] [auto|t|ct]." );
 static ConCommand agpb_kick_cmd( "agpb_kick", Cmd_Kick,
                                  "Remove bot(s): agpb_kick <idx|all>", FCVAR_GAMEDLL );
 static ConCommand agpb_list_cmd( "agpb_list", Cmd_List,
                                  "List all AgPB bots.", FCVAR_GAMEDLL );
+static ConCommand agpb_mode_status_cmd( "agpb_mode_status", Cmd_ModeStatus,
+                                        "Show the current AgPB profile and ZR availability.", FCVAR_GAMEDLL );
 static ConCommand agpb_bot_team_cmd( "agpb_bot_team", Cmd_SetTeam,
                                  "Switch a bot's team: agpb_bot_team <idx> <1=spec|2=T|3=CT>", FCVAR_GAMEDLL );
 static ConCommand agpb_netlist_cmd( "agpb_netlist", Cmd_NetList,
@@ -1833,7 +1881,9 @@ bool AgPBPlugin::Load( PluginId id, ISmmAPI *ismm, char *error, size_t maxlen, b
 	GET_V_IFACE_CURRENT( GetEngineFactory, enginetrace, IEngineTrace, INTERFACEVERSION_ENGINETRACE_SERVER );
 	GET_V_IFACE_CURRENT( GetEngineFactory, helpers, IServerPluginHelpers, INTERFACEVERSION_ISERVERPLUGINHELPERS );
 	GET_V_IFACE_CURRENT( GetEngineFactory, filesystem, IFileSystem, FILESYSTEM_INTERFACE_VERSION );
-	GET_V_IFACE_CURRENT( GetEngineFactory, debugoverlay, IVDebugOverlay, VDEBUG_OVERLAY_INTERFACE_VERSION );
+	CreateInterfaceFn engineFactory = ismm->GetEngineFactory();
+	debugoverlay = engineFactory != NULL ? static_cast<IVDebugOverlay *>(
+		engineFactory( VDEBUG_OVERLAY_INTERFACE_VERSION, NULL ) ) : NULL;
 
 	GET_V_IFACE_ANY( GetServerFactory, server, IServerGameDLL, INTERFACEVERSION_SERVERGAMEDLL );
 	GET_V_IFACE_ANY( GetServerFactory, gameclients, IServerGameClients, INTERFACEVERSION_SERVERGAMECLIENTS );
@@ -1857,6 +1907,10 @@ bool AgPBPlugin::Load( PluginId id, ISmmAPI *ismm, char *error, size_t maxlen, b
 		Q_strncpy( error, "could not register navigation round events", (int)maxlen );
 		return false;
 	}
+	const char *communicationEvents[] = { "player_say", "player_radio", "player_death", "bomb_planted" };
+	for ( const char *event : communicationEvents )
+		if ( !g_GameEvents->AddListener( &g_RoundListener, event, true ) )
+			META_CONPRINTF( "[AgPB] communication event unavailable: %s\n", event );
 
 	g_SMAPI->AddListener( this, this );
 
@@ -1871,6 +1925,22 @@ bool AgPBPlugin::Load( PluginId id, ISmmAPI *ismm, char *error, size_t maxlen, b
 	SH_ADD_HOOK_MEMFUNC( IServerGameDLL, GameFrame, server, this, &AgPBPlugin::Hook_GameFrame, true );
 	SH_ADD_HOOK_MEMFUNC( IServerGameClients, ClientDisconnect, gameclients, this, &AgPBPlugin::Hook_ClientDisconnect, true );
 	SH_ADD_HOOK_MEMFUNC( IServerGameClients, ClientCommand, gameclients, this, &AgPBPlugin::Hook_ClientCommand, false );
+#if !defined( AGPB_GAME_CSGO )
+	const int radioMessageHook = SH_ADD_HOOK_MEMFUNC( IVEngineServer, UserMessageBegin, engine, this, &AgPBPlugin::Hook_RadioMessage, false );
+	const int radioIconHook = SH_ADD_HOOK_MEMFUNC( IVEngineServer, PlaybackTempEntity, engine, this, &AgPBPlugin::Hook_RadioTempEntity, false );
+	g_AgPBNativeRadioAudienceReady = radioMessageHook != 0 && radioIconHook != 0;
+#endif
+	g_ChatCommands[0] = icvar->FindCommand( "say" );
+	g_ChatCommands[1] = icvar->FindCommand( "say_team" );
+	for ( ConCommand *command : g_ChatCommands )
+		if ( command != NULL )
+		{
+			SH_ADD_HOOK_MEMFUNC( ConCommand, Dispatch, command, this, &AgPBPlugin::Hook_ChatDispatch, false );
+			SH_ADD_HOOK_MEMFUNC( ConCommand, Dispatch, command, this, &AgPBPlugin::Hook_ChatDispatchPost, true );
+		}
+	if ( g_ChatCommands[0] == NULL || g_ChatCommands[1] == NULL )
+		META_CONPRINTF( "[AgPB] chat command hooks unavailable: say=%d say_team=%d\n",
+			g_ChatCommands[0] != NULL, g_ChatCommands[1] != NULL );
 
 	g_pCVar = icvar;
 	ConVar_Register( 0, &s_BaseAccessor );
@@ -1917,6 +1987,19 @@ bool AgPBPlugin::Unload( char *error, size_t maxlen )
 	SH_REMOVE_HOOK_MEMFUNC( IServerGameDLL, GameFrame, server, this, &AgPBPlugin::Hook_GameFrame, true );
 	SH_REMOVE_HOOK_MEMFUNC( IServerGameClients, ClientDisconnect, gameclients, this, &AgPBPlugin::Hook_ClientDisconnect, true );
 	SH_REMOVE_HOOK_MEMFUNC( IServerGameClients, ClientCommand, gameclients, this, &AgPBPlugin::Hook_ClientCommand, false );
+#if !defined( AGPB_GAME_CSGO )
+	g_AgPBNativeRadioAudienceReady = false;
+	SH_REMOVE_HOOK_MEMFUNC( IVEngineServer, PlaybackTempEntity, engine, this, &AgPBPlugin::Hook_RadioTempEntity, false );
+	SH_REMOVE_HOOK_MEMFUNC( IVEngineServer, UserMessageBegin, engine, this, &AgPBPlugin::Hook_RadioMessage, false );
+#endif
+	for ( ConCommand *&command : g_ChatCommands )
+		if ( command != NULL )
+		{
+			SH_REMOVE_HOOK_MEMFUNC( ConCommand, Dispatch, command, this, &AgPBPlugin::Hook_ChatDispatchPost, true );
+			SH_REMOVE_HOOK_MEMFUNC( ConCommand, Dispatch, command, this, &AgPBPlugin::Hook_ChatDispatch, false );
+			command = NULL;
+		}
+	AgPB_ResetCommunications();
 
 	g_Bots.RemoveAll();
 	g_Bots.Shutdown();
@@ -1945,6 +2028,8 @@ void AgPBPlugin::AllPluginsLoaded()
 void AgPBPlugin::OnLevelShutdown()
 {
 	if ( ++g_AgentMapSerial == 0 ) g_AgentMapSerial = 1;
+	AgPB_ResetGameMode();
+	AgPB_ResetCommunications();
 	BotObjectives().Reset();
 	g_RoundFrozen = false;
 	g_PurchaseRound.active = false;
@@ -1957,7 +2042,13 @@ void AgPBPlugin::OnLevelShutdown()
 
 void AgPBPlugin::Hook_GameFrame( bool simulating )
 {
-	if ( !simulating || gpGlobals == NULL )
+	if ( gpGlobals == NULL )
+		return;
+
+	if ( AgPB_UpdateGameMode() )
+		g_Bots.ResetAllTasks( "mode" );
+
+	if ( !simulating )
 		return;
 
 	// 让路点模块跟着当前地图走。SetMapName 内部只做一次字符串比较，
@@ -1965,12 +2056,9 @@ void AgPBPlugin::Hook_GameFrame( bool simulating )
 	//
 	// 注意 gpGlobals->mapname 是 string_t，不能拿 0/NULL 去比
 	// （string_t.h:34 里它是"指针式"的），STRING() 对空表返回 ""。
-	{
-		const char *pszMap = STRING( gpGlobals->mapname );
-
-		if ( pszMap != NULL && pszMap[0] != '\0' )
-			BotWaypoints().SetMapName( pszMap );
-	}
+	const char *pszMap = STRING( gpGlobals->mapname );
+	if ( pszMap != NULL && pszMap[0] != '\0' )
+		BotWaypoints().SetMapName( pszMap );
 
 	// 路点编辑器与 bot 驱动无关：agpb_enable=0 时也要能画图 / 打点
 	AgPB_EditorFrame();
@@ -1978,12 +2066,14 @@ void AgPBPlugin::Hook_GameFrame( bool simulating )
 	// 菜单续命（客户端 5 秒没输入会自己收，靠重发顶着）
 	AgPB_MenuTick();
 
+	g_Bots.UpdateAutoPlayers( gpGlobals );
 	g_Bots.UpdateFill( gpGlobals );
 
 	if ( !agpb_enable.GetBool() )
 		return;
 
 	g_Bots.ThinkAll( gpGlobals );
+	AgPB_UpdateIdleChat( gpGlobals->curtime );
 }
 
 void AgPBPlugin::Hook_ClientDisconnect( edict_t *pEntity )
@@ -2007,6 +2097,7 @@ void AgPBPlugin::Hook_ClientCommand( edict_t *pEntity, const CCommand &args )
 		RETURN_META( MRES_IGNORED );
 
 	const char *pszCmd = args.Arg( 0 );
+	if ( V_stricmp( pszCmd, "ignorerad" ) == 0 ) AgPB_ToggleIgnoreRadio( pEntity );
 
 	if ( V_stricmp( pszCmd, "agpb_menu" ) == 0 )
 	{
@@ -2032,5 +2123,34 @@ void AgPBPlugin::Hook_ClientCommand( edict_t *pEntity, const CCommand &args )
 			RETURN_META( MRES_SUPERCEDE );
 	}
 
+	RETURN_META( MRES_IGNORED );
+}
+
+#if !defined( AGPB_GAME_CSGO )
+bf_write *AgPBPlugin::Hook_RadioMessage( IRecipientFilter *, int message )
+{
+	if ( IRecipientFilter *audience = AgPB_NativeRadioMessageFilter( message ) )
+		RETURN_META_VALUE_NEWPARAMS( MRES_IGNORED, NULL, &IVEngineServer::UserMessageBegin, ( audience, message ) );
+	RETURN_META_VALUE( MRES_IGNORED, NULL );
+}
+
+void AgPBPlugin::Hook_RadioTempEntity( IRecipientFilter &, float delay, const void *sender, const SendTable *table, int classId )
+{
+	if ( table != NULL && V_strcmp( table->GetName(), "DT_TERadioIcon" ) == 0 )
+		if ( IRecipientFilter *audience = AgPB_NativeRadioIconFilter() )
+			RETURN_META_NEWPARAMS( MRES_IGNORED, &IVEngineServer::PlaybackTempEntity, ( *audience, delay, sender, table, classId ) );
+	RETURN_META( MRES_IGNORED );
+}
+#endif
+
+void AgPBPlugin::Hook_ChatDispatch( const CCommand &args )
+{
+	AgPB_BeginChatDispatch( V_stricmp( args.Arg( 0 ), "say_team" ) == 0 );
+	RETURN_META( MRES_IGNORED );
+}
+
+void AgPBPlugin::Hook_ChatDispatchPost( const CCommand & )
+{
+	AgPB_EndChatDispatch();
 	RETURN_META( MRES_IGNORED );
 }

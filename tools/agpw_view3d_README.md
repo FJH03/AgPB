@@ -8,7 +8,7 @@
 
 需要 Python 3.10 或更新版本，以及支持 WebGL 的现代浏览器。Python 仅使用标准库；界面依赖的 Three.js 已随工具附带，运行时无需安装 npm 包或联网下载资源。
 
-双击 `agpw_view3d.bat` 后，在首页点击“导入 AGPW”选择任意 `.agpw` 文件。工具读取文件头中的地图名，通过 `gameinfo.txt` 的 GAME SearchPaths 查找 `maps/<地图名>.bsp`；找不到就直接显示缺图错误，不自动加载 office 或其他默认地图。可在界面中反复导入文件来切换地图。默认游戏内容目录仍从仓库 `AGENTS.md` 的部署目标读取；也可用 `--game-dir` 指定。
+双击 `agpw_view3d.bat` 后，在首页点击“导入 AGPW”选择任意 `.agpw` 文件。工具读取文件头中的地图名，通过 `gameinfo.txt` 的 GAME SearchPaths 查找 `maps/<地图名>.bsp`，包含标为 `game+download` 的下载目录；找不到就直接显示缺图错误，不自动加载 office 或其他默认地图。可在界面中反复导入文件来切换地图。默认游戏内容目录仍从仓库 `AGENTS.md` 的部署目标读取；也可用 `--game-dir` 指定。
 
 把 `.agpw` 文件拖到启动器，或在命令行显式传入文件，也可以直接打开对应场景。
 
@@ -18,7 +18,7 @@ py -B tools/agpw_view3d.py "D:\waypoints\cs_office.agpw"
 py -B tools/agpw_view3d.py "D:\waypoints\cs_office.agpw" --game-dir "O:\SteamLibrary\steamapps\common\czero-game-x64\cstrike"
 ```
 
-可用 `--bsp <地图.bsp>` 显式指定地图。`--game-dir` 是包含 `gameinfo.txt`、模型资源和 `maps` 的游戏内容目录，不是插件目录。把工具复制到其他位置时，保留入口、`agpw3d_bsp.py`、`agpw3d_models.py`、`agpw3d_materials.py`、`agpw3d_document.py` 和整个 `agpw3d_web` 目录，并显式传入文件和游戏目录即可。
+可用 `--bsp <地图.bsp>` 显式指定地图。直接指定 `download/maps` 中的 BSP 时，工具沿用下载目录上层游戏的 `gameinfo.txt`。`--game-dir` 是包含 `gameinfo.txt`、模型资源和 `maps` 的游戏内容目录，不是插件目录。把工具复制到其他位置时，保留入口、`agpw3d_bsp.py`、`agpw3d_models.py`、`agpw3d_materials.py`、`agpw3d_document.py` 和整个 `agpw3d_web` 目录，并显式传入文件和游戏目录即可。
 
 启动后保留控制台窗口，浏览器通过随机地址访问仅绑定 `127.0.0.1` 的本机服务。关闭控制台或按 Ctrl+C 结束工具。`--no-browser` 仅打印地址，不自动打开浏览器；`--port` 可指定端口。
 
@@ -51,7 +51,7 @@ py -B tools/agpw_view3d.py "D:\waypoints\cs_office.agpw" --game-dir "O:\SteamLib
 
 ## 基础贴图与几何范围
 
-地图基础面、位移地形和 brush 实体的初始变换由 BSP 读取；静态物件及模型实体从游戏资源中读取三角形。地图和模型按 UV 显示 VMT 的 `$basetexture` 对应 VTF；必要的 Patch / include / insert / replace 用于找到基础贴图。其余材质参数和 Source 着色器效果一律忽略，使用工具自身照明；贴图按不透明首帧显示，缺失或无法解码的材质回退灰色并提示。当前地图内嵌 ZIP 按引擎地图挂载规则位于最前；外部模型资源只使用 `gameinfo.txt` 中包含 `GAME` path ID 的 `SearchPaths`。目录和 VPK（包括分卷）严格保持配置中的混合顺序，同名资源命中第一项；`custom/*` 等通配项展开后，目录和 VPK 统一按字母序插入原位置。仅 `MOD` / `PLATFORM` 等条目不作为模型搜索来源。不自动加入未声明的游戏目录，也不猜测其他包；缺少或无法解析 `gameinfo.txt` 时明确报错。不读取游戏进程或链接游戏 DLL。
+地图基础面、位移地形和 brush 实体的初始变换由 BSP 读取；静态物件及模型实体从游戏资源中读取三角形。地图和模型按 UV 显示 VMT 的 `$basetexture` 对应 VTF；必要的 Patch / include / insert / replace 用于找到基础贴图。其余材质参数和 Source 着色器效果一律忽略，使用工具自身照明；贴图按不透明首帧显示，缺失或无法解码的材质回退灰色并提示。当前地图内嵌 ZIP 按引擎地图挂载规则位于最前。跳过保留绝对路径或越级路径的条目，其余资源仍按原挂载顺序读取。外部模型资源只使用 `gameinfo.txt` 中包含 `GAME` path ID 的 `SearchPaths`。目录和 VPK（包括分卷）严格保持配置中的混合顺序，同名资源命中第一项；`custom/*` 等通配项展开后，目录和 VPK 统一按字母序插入原位置。仅 `MOD` / `PLATFORM` 等条目不作为模型搜索来源。不自动加入未声明的游戏目录，也不猜测其他包；缺少或无法解析 `gameinfo.txt` 时明确报错。不读取游戏进程或链接游戏 DLL。
 
 几何用于观察布局，不是游戏运行时碰撞模拟。模型采用 body 0 / LOD 0 的静态姿态；门、可移动物件、可破坏物和脚本状态不会动态模拟。缺失或不支持的模型会列出提示，并用橙色标记或已知边界框显示占位，避免静默消失。包围框和可见网格均不能替代游戏里的实际通行验证。
 

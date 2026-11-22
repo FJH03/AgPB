@@ -1,5 +1,5 @@
 /*
- * AgPB ordinary-mode purchases. GPL-3.0-only.
+ * AgPB native purchases for ordinary mode and ZM humans. GPL-3.0-only.
  * Based on SyPB 4c364fb basecode.cpp (PerformWeaponPurchase) and control.cpp
  * (CheckTeamEconomics). The upstream copyright and license are retained in
  * weapon_selection.h. CS-EBOT 2333562 omits ordinary-mode buying.
@@ -172,10 +172,16 @@ int ReserveAmmo( const CAgPB &bot, edict_t *weapon )
 }
 
 // Use the scalar SendProp proxy for CCSPlayer's adjacent one-byte bools.
-const char *CurrentGate( const CAgPB &bot, const AgPBPurchaseRound &round, float now )
+const char *CurrentGate( const CAgPB &bot, AgPBGameMode mode, const AgPBPurchaseRound &round, float now )
 {
-	if ( AgPB_GameMode() != AgPB_MODE_NORMAL || !bot.IsAutonomous() ) return "inactive";
+	if ( !bot.IsAutonomous() || ( mode != AgPB_MODE_NORMAL && mode != AgPB_MODE_ZM ) ) return "inactive";
 	if ( !bot.IsAlive() ) return "dead";
+	if ( mode == AgPB_MODE_ZM )
+	{
+		IPlayerInfo *info = bot.PlayerInfo();
+		const AgPBZRRole role = info != NULL ? AgPB_ZRRoleForUserId( info->GetUserID() ) : AgPBZRRole::Unknown;
+		if ( role != AgPBZRRole::Human ) return role == AgPBZRRole::Zombie ? "zr-zombie" : "waiting-zr-role";
+	}
 	if ( round.epoch == 0 ) return "waiting-round";
 	if ( !round.active ) return "round-ended";
 	if ( !BuyTimeOpen( round, now ) ) return "buy-time-closed";
@@ -221,7 +227,8 @@ void CAgPB::UpdatePurchases( CGlobalVars *globals )
 
 	// Poll for entry and engine state at a lower rate than the movement tick.
 	state.nextAt = now + 0.15f;
-	const char *gate = CurrentGate( *this, round, now );
+	const AgPBGameMode mode = AgPB_GameMode();
+	const char *gate = CurrentGate( *this, mode, round, now );
 	if ( gate != NULL )
 	{
 		state.status = gate;
@@ -248,7 +255,8 @@ void CAgPB::UpdatePurchases( CGlobalVars *globals )
 		return;
 	}
 
-	state.teamCanBuy = TeamCanBuy( round, team );
+	// Infection roles are independent of the original T/CT team economy.
+	state.teamCanBuy = mode == AgPB_MODE_ZM || TeamCanBuy( round, team );
 	state.status = "shopping";
 	edict_t *primary = NULL;
 	edict_t *pistol = NULL;
@@ -334,7 +342,8 @@ void CAgPB::UpdatePurchases( CGlobalVars *globals )
 		case Stage::Defuser:
 		{
 			const AgPBObjectiveSnapshot &objectives = BotObjectives().Snapshot();
-			if ( fundedLoadout && team == AgPB_TEAM_CT && ( objectives.mapFlags & AGPB_MAP_BOMB ) != 0 &&
+			if ( mode == AgPB_MODE_NORMAL && fundedLoadout && team == AgPB_TEAM_CT &&
+			     ( objectives.mapFlags & AGPB_MAP_BOMB ) != 0 &&
 			     cash >= DefuserPrice && GetNetVarInt( "m_bHasDefuser", -1 ) == 0 && RandomInt( 1, 100 ) <= 80 )
 				alias = "defuser";
 			break;
@@ -407,7 +416,7 @@ void CAgPB::ReportPurchases() const
 {
 	const AgPBPurchaseRound &round = AgPB_PurchaseRound();
 	const AgPBPurchaseState &state = m_Purchases;
-	const char *gate = gpGlobals != NULL ? CurrentGate( *this, round, gpGlobals->curtime ) : "inactive";
+	const char *gate = gpGlobals != NULL ? CurrentGate( *this, AgPB_GameMode(), round, gpGlobals->curtime ) : "inactive";
 	RouteReport( "buy round=%u stage=%s status=%s cash=%d zone=%d team-economy=%s plan=%s attempts=%d confirmed=%d spent=%d last=%s result=%s",
 		round.epoch, StageName( state.stage ), gate != NULL ? gate : state.status,
 		GetNetVarInt( "m_iAccount", -1 ), InBuyZone( *this ) ? 1 : 0,

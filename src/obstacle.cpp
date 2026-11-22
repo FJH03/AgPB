@@ -435,6 +435,29 @@ bool AgPB_FindPathBreakable( const BotEngineContext &ctx, edict_t *self,
 // SyPB CheckTerrain uses full local collision probes and finite collision memory;
 // CS-EBOT is the comparison for alternate side/back recovery. Source SDK
 // StepMove supplies only the physical step/floor contract, not bot decisions.
+bool AgPB_BlocksWalkHull( ICollideable *collide )
+{
+	if ( collide == NULL || collide->GetSolid() == SOLID_NONE || ( collide->GetSolidFlags() & FSOLID_NOT_SOLID ) != 0 )
+		return false;
+	// Source CGameRules / CCSGameRules::ShouldCollide, PLAYER_MOVEMENT.
+	// Pushaway props have separate obstacle inspection.
+	switch ( collide->GetCollisionGroup() )
+	{
+	case COLLISION_GROUP_DEBRIS:
+	case COLLISION_GROUP_DEBRIS_TRIGGER:
+	case COLLISION_GROUP_INTERACTIVE_DEBRIS:
+	case COLLISION_GROUP_IN_VEHICLE:
+	case COLLISION_GROUP_WEAPON:
+	case COLLISION_GROUP_VEHICLE_CLIP:
+	case COLLISION_GROUP_DOOR_BLOCKER:
+	case COLLISION_GROUP_DISSOLVING:
+	case COLLISION_GROUP_PUSHAWAY:
+		return false;
+	default:
+		return true;
+	}
+}
+
 static bool NavigationSolid( ICollideable *collide )
 {
 	if ( collide == NULL || collide->GetSolid() == SOLID_NONE ) return false;

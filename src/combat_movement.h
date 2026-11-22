@@ -32,6 +32,7 @@ namespace AgPBCombatMove {
 enum class Weapon { Knife, Pistol, Shotgun, SMG, Rifle, Sniper, MachineGun, Unknown };
 enum class FightStyle { Stay, Strafe };
 enum class Motion { Invalid, Hold, Approach, Retreat, ReloadRetreat, Strafe, Crouch };
+enum class StrafePlan { Weapon, Distance, View, Reload, Crouch, Retreat, Moving, Precision };
 
 struct Input {
     Weapon weapon = Weapon::Unknown;
@@ -42,7 +43,7 @@ struct Input {
     // the pre-fire task call and the actual proposal to the late override.
     // Desire to fire or a remembered firing window is not this button state.
     bool attacking = false;
-    bool reloading = false, enemyFacingSelf = false, bombPlanted = false;
+    bool reloading = false, enemyInViewCone = false, bombPlanted = false;
     // SyPB UsesBadPrimary includes UMP45/MAC10/TMP/P90, but excludes MP5.
     // Set this for those SMGs; shotguns are handled by their category below.
     bool mobilePrimary = false;
@@ -77,11 +78,39 @@ struct Output {
     // has settled; this policy never writes velocity or synthesizes braking.
     bool stopForAccuracy = false;
     Motion motion = Motion::Hold;
+    StrafePlan strafe = StrafePlan::Weapon;
 };
+
+struct Axes {
+    float forward = 0.0f, side = 0.0f;
+};
+
+template<class CanStep>
+Axes AlternateStep(const Output &movement, CanStep canStep) {
+    if (movement.side == 0.0f) return {};
+    const float forward = movement.forward;
+    const float side = movement.side;
+    if (canStep(forward, -side)) return {forward, -side};
+    if (forward == 0.0f) return {};
+    if (canStep(0.0f, side)) return {0.0f, side};
+    if (canStep(0.0f, -side)) return {0.0f, -side};
+    if (canStep(forward, 0.0f)) return {forward, 0.0f};
+    return {};
+}
 
 inline void Reset(State &state) { state = State(); }
 inline float Clamp(float value, float low, float high) {
     return value < low ? low : value > high ? high : value;
+}
+inline float CombatApproach(Weapon weapon, float health, float aggression, bool reloading) {
+    if (reloading) return 19.0f;
+    const float approach = health * Clamp(aggression, 0.0f, 1.0f);
+    if (weapon == Weapon::SMG) return approach + 20.0f;
+    if (weapon == Weapon::Pistol || weapon == Weapon::Sniper) return Clamp(approach, 0.0f, 49.0f);
+    return approach;
+}
+inline bool WantsToWithdraw(float approach, bool bombPlanted, bool enemyInViewCone) {
+    return approach < 20.0f && !bombPlanted && enemyInViewCone;
 }
 inline float Sample(float value) { return std::isfinite(value) ? Clamp(value, 0.0f, 1.0f) : 0.5f; }
 inline bool KnownWeapon(Weapon weapon) {
@@ -113,6 +142,16 @@ inline const char *MotionName(Motion motion) {
     }
 }
 
+inline StrafePlan PlanProactiveStrafe(const Input &in, bool duck, float forward) {
+    if (in.weapon != Weapon::Rifle && in.weapon != Weapon::Pistol) return StrafePlan::Weapon;
+    if (in.distance >= (in.weapon == Weapon::Rifle ? 768.0f : 544.0f)) return StrafePlan::Distance;
+    if (!in.enemyInViewCone) return StrafePlan::View;
+    if (in.reloading) return StrafePlan::Reload;
+    if (duck) return StrafePlan::Crouch;
+    if (forward < 0.0f) return StrafePlan::Retreat;
+    return StrafePlan::Moving;
+}
+
 inline Output Step(State &state, const Input &in, const Random &random = Random()) {
     Output out;
     if (!Valid(in)) { Reset(state); out.motion = Motion::Invalid; return out; }
@@ -138,13 +177,9 @@ inline Output Step(State &state, const Input &in, const Random &random = Random(
 
     // SyPB CombatFight normal branch: health/personality control approach,
     // SMGs favor closing, while pistols/snipers do not chase for aggression.
-    float approach = in.reloading ? 19.0f : in.health * Clamp(in.aggression, 0.0f, 1.0f);
-    if (!in.reloading) {
-        if (in.weapon == Weapon::SMG) approach += 20.0f;
-        else if (approach > 49.0f && (in.weapon == Weapon::Pistol || in.weapon == Weapon::Sniper)) approach = 49.0f;
-    }
+    const float approach = CombatApproach(in.weapon, in.health, in.aggression, in.reloading);
     bool setStrafe = false;
-    if (approach < 20.0f && !in.bombPlanted && in.enemyFacingSelf) {
+    if (WantsToWithdraw(approach, in.bombPlanted, in.enemyInViewCone)) {
         out.forward = -in.maxSpeed;
         setStrafe = true;
     } else if (approach >= 50.0f && (!in.attacking || mobile)) {
@@ -160,6 +195,15 @@ inline Output Step(State &state, const Input &in, const Random &random = Random(
     // SyPB tests this command's attack bit, so an inter-shot command can still
     // approach. A Strafe style alone never authorizes healthy SMG side motion.
     if (in.attacking && !mobile) setStrafe = false;
+
+    // YaPB ba08596 AttackMovement permits proactive rifle and pistol side
+    // motion during fire. Keep AgPB's retreat, crouch and direction handling.
+    out.strafe = PlanProactiveStrafe(in, out.duck, out.forward);
+    const bool proactiveStrafe = out.strafe == StrafePlan::Moving;
+    if (proactiveStrafe) {
+        setStrafe = true;
+        out.forward = 0.0f;
+    }
 
     // GetWalkSpeed also sees a duck requested in this command, even before
     // posture settles. The caller supplies its other current/old-state gates.
@@ -179,7 +223,7 @@ inline Output Step(State &state, const Input &in, const Random &random = Random(
         } else state.style = roll < 0.65f ? FightStyle::Strafe : FightStyle::Stay;
         state.nextStyleAt = in.now + 3.0f;
     }
-    if (in.reloading || (skill >= 70 && state.style == FightStyle::Strafe && in.distance < 800.0f)) {
+    if (proactiveStrafe || in.reloading || (skill >= 70 && state.style == FightStyle::Strafe && in.distance < 800.0f)) {
         if (!setStrafe) state.strafeUntil = in.now + 1.0f + 1.5f * Sample(random.duration);
         else {
             if (in.now > state.strafeUntil) {
@@ -187,7 +231,12 @@ inline Output Step(State &state, const Input &in, const Random &random = Random(
                 if (Sample(random.strafeFlip) < 0.30f) state.strafeSign = -state.strafeSign;
                 state.strafeUntil = in.now + 0.5f + 2.0f * Sample(random.duration);
             }
-            out.side = strafeSpeed * float(state.strafeSign);
+            // Outside close range, release movement briefly before the next
+            // sidestep. The caller uses actual speed to gate the settled shot.
+            const bool precisionWindow = proactiveStrafe && in.distance >= 256.0f &&
+                state.strafeUntil - in.now <= 0.30f;
+            if (precisionWindow) out.strafe = StrafePlan::Precision;
+            else out.side = strafeSpeed * float(state.strafeSign);
         }
     } else if (state.style == FightStyle::Stay && out.forward == 0.0f &&
                in.canDuck && Sample(random.duck) < 0.10f) {
@@ -196,6 +245,7 @@ inline Output Step(State &state, const Input &in, const Random &random = Random(
     if (state.duckUntil > in.now) {
         out.forward = out.side = 0.0f;
         out.duck = true;
+        if (proactiveStrafe) out.strafe = StrafePlan::Crouch;
     }
     // SyPB CombatFight's final walk conversion follows its timed duck hold:
     // SMGs retain full-speed advance; every firearm retreats at walk speed.
@@ -231,7 +281,9 @@ inline Output StepFrame(State &state, const Input &in,
     // this wrapper for holding tasks; visibility alone is not a Fight task.
     Input beforeFire = in;
     beforeFire.attacking = false;
-    const Output first = Step(state, beforeFire, early);
+    Output first = Step(state, beforeFire, early);
+    // The early-only path still gates the actual attack during a precision stop.
+    if (first.strafe == StrafePlan::Precision) first.stopForAccuracy = in.attacking;
     if (first.motion == Motion::Invalid || in.skill < 60) return first;
     return Step(state, in, late);
 }

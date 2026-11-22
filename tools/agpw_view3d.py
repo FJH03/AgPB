@@ -539,6 +539,9 @@ def resolve_inputs(args):
     bsp = Path(args.bsp).resolve() if args.bsp else None
     if args.game_dir is None and bsp and bsp.parent.name.lower() == 'maps':
         game_dir = bsp.parent.parent
+        if (game_dir.name.lower() == 'download' and not (game_dir / 'gameinfo.txt').is_file()
+                and (game_dir.parent / 'gameinfo.txt').is_file()):
+            game_dir = game_dir.parent
     if game_dir is None:
         if waypoint and waypoint.parent.name.lower() == 'waypoints' and len(waypoint.parents) >= 4:
             game_dir = waypoint.parents[3]

@@ -17,24 +17,36 @@
 - `E:\Plugins-Platform` 下须同层放齐 `hl2sdk-css\`、`hl2sdk-manifests\`、`metamod-source\`（MMS 2.0，Source 1）和 `AgPB\`。
 - 先构建 `hl2sdk-css\source-engine-czero\build\{tier0,vstdlib,mathlib,tier1}\*.lib`。Metamod:Source 和 AgPB 都依赖这些静态库。
 - 部署目标：`O:\SteamLibrary\steamapps\common\czero-game-x64\cstrike`
+- 专服部署目标：`O:\SteamLibrary\steamapps\common\czero-server-x64\cstrike`
 
-构建模板和本机工具使用上面的部署目标。换目标目录时只改这一行。保留 `chcp 65001`、`PYTHONIOENCODING=utf-8` 和日常构建的 `-s css`。
+2026-11-22 分工：`部署目标` 是监听服，由路点工具使用，供游戏内可视化制作与用户观察。专服用于插件和实际游戏模式的验收，ZR 检测桥部署到专服。每次部署把同一份包的 AgPB 本体、默认配置、路点和 VDF 覆盖到两边。保留 `chcp 65001`、`PYTHONIOENCODING=utf-8` 和日常构建的 `-s css`。
 
 ```powershell
 cd E:\Plugins-Platform\AgPB
 $agpbRequirements = Get-Content -LiteralPath .\AGENTS.md -Raw -Encoding utf8
-$agpbDeployTarget = [regex]::Match($agpbRequirements, '(?m)^- 部署目标：\s*`([^`]+)`').Groups[1].Value
-if (!$agpbDeployTarget) { throw 'Deployment target missing' }
+$agpbListenTarget = [regex]::Match($agpbRequirements, '(?m)^- 部署目标：\s*`([^`]+)`').Groups[1].Value
+$agpbDedicatedTarget = [regex]::Match($agpbRequirements, '(?m)^- 专服部署目标：\s*`([^`]+)`').Groups[1].Value
+if (!$agpbListenTarget -or !$agpbDedicatedTarget) { throw 'Deployment target missing' }
+$agpbSpcomp = Join-Path $agpbDedicatedTarget 'addons\sourcemod\scripting\spcomp64.exe'
 New-Item -ItemType Directory -Path build -Force | Out-Null
 cd build
-cmd /c ('"E:\vs\VC\Auxiliary\Build\vcvarsall.bat" amd64 && chcp 65001 && set PYTHONIOENCODING=utf-8 && py ../configure.py -s css --targets x86_64 --enable-optimize && ambuild && xcopy /E /I /Y .\package\addons "{0}\addons"' -f $agpbDeployTarget)
+cmd /c ('"E:\vs\VC\Auxiliary\Build\vcvarsall.bat" amd64 && chcp 65001 && set PYTHONIOENCODING=utf-8 && py ../configure.py -s css --targets x86_64 --enable-optimize --with-spcomp "{0}" && ambuild' -f $agpbSpcomp)
+if ($LASTEXITCODE -ne 0) { throw 'Build failed' }
+
+foreach ($agpbTarget in @($agpbListenTarget, $agpbDedicatedTarget)) {
+    xcopy.exe /E /I /Y .\package\addons\AgPB "$agpbTarget\addons\AgPB"
+    if ($LASTEXITCODE -ne 0) { throw "Copy failed: $agpbTarget" }
+    Copy-Item -LiteralPath .\package\addons\metamod\AgPB.vdf -Destination "$agpbTarget\addons\metamod" -ErrorAction Stop
+}
+Copy-Item -LiteralPath .\package\addons\sourcemod\plugins\agpb_zr_bridge.smx -Destination "$agpbDedicatedTarget\addons\sourcemod\plugins" -ErrorAction Stop
+Copy-Item -LiteralPath .\package\addons\sourcemod\scripting\agpb_zr_bridge.sp -Destination "$agpbDedicatedTarget\addons\sourcemod\scripting" -ErrorAction Stop
 ```
 
 - `configure.py` 的 `--game csczs|css|csgo` 默认为 `csczs`，映射到 `src/game_target.h` 的 `AGPB_GAME_*` 宏。构建 CS:S / CS:GO 变体时显式指定，CS:GO 真机构建须有 `hl2sdk-csgo` manifest。
 - 裸 DLL 在 `build\agpb_mm\windows-x86_64\agpb_mm.dll`。`ambuild` 的 `PackageScript` 按 SourceMod 目录约定直接组装 `build\package\addons\`，包含 `AgPB\bin\win64\agpb_mm.dll`、`AgPB\waypoints\` 和 `metamod\AgPB.vdf`。直接部署目录，保持不压 ZIP。
 - VDF 源模板放 `configs/metamod/AgPB.vdf`。源码树不建 `addons/`、`cstrike/` 或 `bin/` 部署目录。
 - 新 `.cpp` 必须登记到 `AMBuilder`。修改 `src/` 头文件后，核对 `AMBuilder` 基于头文件内容触发 C++ 消费者重编。
-- 部署用模板末尾的 `xcopy /E /I /Y` 将 `build\package\addons\` 覆盖到目标 `addons\`。服务器启动后须看到 `[AgPB] loaded. ... IBotManager=ok ...`。
+- 部署从 `build\package\addons\` 取产物。启动后用 `agpb_list` 确认 `IBotManager=ok`，专服再用 `agpb_mode_status` 核对 ZR 和实际模式。
 - 2026-11-22 补充：仓库根目录的 `waypoints/` 存放可纳入 Git 的正式 AGPW 路点。构建将此目录完整打包到 `addons/AgPB/waypoints/`，部署随 `addons/` 一起覆盖复制。
 
 ## 3. 项目铁律
@@ -45,11 +57,11 @@ cmd /c ('"E:\vs\VC\Auxiliary\Build\vcvarsall.bat" amd64 && chcp 65001 && set PYT
 - 零特征码、零硬编码 vtable 索引。反射用 SendTable，调用公开虚接口，禁止链接 `server.dll`。
 - 路点、连边及跳跃标志一律手工制作。原生 NAV 和几何体检只读，禁止自动导入 NAV 图、自动连线和自动补跳跃标志。
 - 目标游戏为 csczs（当前）、CS:S 和 CS:GO。只实现用户确认的游戏差异。实现点用 `AGPB_GAME_<目标>` 显式编译期分支，可用编译期常量，并用 `[game-diff]` 注释说明。禁止为区分游戏而读内存或运行期探测。
-- 普通模式（SyPB）与 ZM / ZE（EBot）共用插件、路点格式和核心，通过运行期 profile 区分。用户在地图 CFG 中显式设置 `agpb_mode normal|zombie`。禁止自动判定模式，目前僵尸模式只留开关。
+- 普通模式（SyPB）与 ZM / ZE（EBot）共用插件、路点格式和核心，通过运行期 profile 区分。
 - 普通模式以 SyPB 为行为基线，CS-EBOT 仅作实现对照。移植时对照同名文件，普通模式剔除僵尸专用分支。引擎源码仅用于核实公开接口、物理和伤害规则。遵守 GPL-3.0，保留移植代码的来源与版权。
   - SyPB `4c364fb` 在 `E:\Plugins-Platform\refs\SyPB`，使用 `Project SyPB\SyPB_BOT\`。`SwNPC\` 和 `AMXX\` 不在移植范围内。
   - CS-EBOT `2333562` 在 `E:\Plugins-Platform\refs\CS-EBOT`，是 ZP / ZE 专用参考。
-  - CS:S 引擎源码在 `E:\Plugins-Platform\hl2sdk-css\source-engine-czero\`。
+  - CS:CZS 引擎源码在 `E:\Plugins-Platform\hl2sdk-css\source-engine-czero\`。
 
 ## 4. 编码约定
 

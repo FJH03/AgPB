@@ -285,6 +285,11 @@ void CAgPB::TryJoinTeam( float flCurTime )
 		return;
 
 	const int iCurTeam = m_pInfo->GetTeamIndex();
+	// Once initial team/class selection is complete, ZR owns infection team changes.
+	// An explicit AgPB team request clears m_bClassRequested before retrying.
+	if ( m_bClassRequested && ( iCurTeam == AgPB_TEAM_T || iCurTeam == AgPB_TEAM_CT ) &&
+	     AgPB_GameMode() == AgPB_MODE_ZM )
+		return;
 
 	if ( iCurTeam == m_iTeam )
 	{
@@ -361,6 +366,7 @@ void CAgPB::Think( CGlobalVars *pGlobals )
 	cmd.viewangles.x = GetNetVarFloat( "m_angEyeAngles[0]", 0.0f );
 	cmd.viewangles.y = GetNetVarFloat( "m_angEyeAngles[1]", 0.0f );
 	const bool alive = IsAlive();
+	UpdateCommunication( pGlobals );
 	if ( !alive )
 	{
 		if ( m_bWasAlive ) ResetTaskSystem( "dead" );
@@ -370,7 +376,10 @@ void CAgPB::Think( CGlobalVars *pGlobals )
 	{
 		if ( !m_bWasAlive || m_uKnifeSpawnRound != AgPB_PurchaseRound().epoch )
 			BeginKnifeSpawn( pGlobals->curtime );
+		const AgPBGameMode mode = AgPB_GameMode();
+		if ( !m_bWasAlive && mode == AgPB_MODE_ZM ) m_Purchases = AgPBPurchaseState();
 		m_bWasAlive = true;
+		if ( m_bAutonomous && mode == AgPB_MODE_NORMAL ) UpdateAutonomyEmotions( pGlobals->curtime );
 		UpdatePurchases( pGlobals );
 		if ( m_Ladder.Active() && ( AgPB_IsRoundFrozen() || ( GetNetVarInt( "m_fFlags" ) & FL_FROZEN ) != 0 ) )
 		{
@@ -382,12 +391,25 @@ void CAgPB::Think( CGlobalVars *pGlobals )
 		}
 		UpdateAgentIntent( pGlobals );
 		Vector blockedWish( 0, 0, 0 );
-		if ( m_Ladder.Active() || !UpdateCombat( pGlobals, cmd, blockedWish ) )
+		const bool throwingGrenade = UpdateGrenadeThrow( pGlobals, cmd );
+		if ( throwingGrenade )
+		{
+			PauseCombatOwner( pGlobals );
+			ResetPropAvoidance();
+		}
+		else if ( m_bAutonomous && mode == AgPB_MODE_ZM )
+		{
+			m_vBlockedRouteWish.Init();
+			UpdateZombieMode( pGlobals, cmd );
+			UpdateIdleWeaponZoom( pGlobals, cmd );
+			blockedWish = m_vBlockedRouteWish;
+		}
+		else if ( m_Ladder.Active() || !UpdateCombat( pGlobals, cmd, blockedWish ) )
 		{
 			m_vBlockedRouteWish.Init();
 			UpdateTasks( pGlobals, cmd );
 			blockedWish = m_vBlockedRouteWish;
-			if ( HasRoute() && !m_Ladder.Active() )
+			if ( HasRoute() && !m_Ladder.Active() && m_Tasks.Current().id != AgPBTaskId::SeekCover )
 				UpdateWeaponSelection( pGlobals, cmd, NULL, 0.0f, true );
 			UpdateIdleWeaponZoom( pGlobals, cmd );
 		}
@@ -395,7 +417,7 @@ void CAgPB::Think( CGlobalVars *pGlobals )
 		// Task posture survives every command owner, including the released
 		// target-loss frame, weapon selection and a route already cleared at camp.
 		ApplyTaskPosture( cmd );
-		if ( m_Ladder.Active() ) ResetPlayerAvoidance();
+		if ( throwingGrenade || m_Ladder.Active() ) ResetPlayerAvoidance();
 		else UpdatePlayerAvoidance( pGlobals, cmd, blockedWish );
 	}
 
@@ -422,7 +444,10 @@ void CAgPB::Think( CGlobalVars *pGlobals )
 		++m_uSubmittedAttackCommands;
 		m_iLastSubmittedAttackTick = cmd.tick_count;
 	}
-	m_pController->RunPlayerMove( &cmd );
+	const bool logStrafe = alive && CombatStrafeLogEnabled();
+	const Vector strafeStart = logStrafe ? m_pInfo->GetAbsOrigin() : vec3_origin;
+	RunPlayerCommand( cmd );
+	if ( logStrafe ) ReportCombatStrafe( pGlobals, m_LastSubmittedCmd, strafeStart );
 	if ( agpb_weapons_debug.GetBool() && ( cmd.weaponselect != 0 || ( cmd.buttons & ( IN_ATTACK2 | IN_RELOAD ) ) != 0 ) )
 	{
 		uintp held = (uintp)INVALID_EHANDLE_INDEX;
@@ -912,27 +937,7 @@ public:
 	{
 		if ( entity == m_Ignore || entity == m_ExitContact ) return false;
 		ICollideable *collide = m_Trace->GetCollideable( entity );
-		if ( collide == NULL ) return true;
-		if ( collide->GetSolid() == SOLID_NONE || ( collide->GetSolidFlags() & FSOLID_NOT_SOLID ) != 0 )
-			return false;
-		// Source CGameRules / CCSGameRules::ShouldCollide, PLAYER_MOVEMENT:
-		// these groups do not block the movement hull. Pushaway props are
-		// handled separately by obstacle inspection while following the route.
-		switch ( collide->GetCollisionGroup() )
-		{
-		case COLLISION_GROUP_DEBRIS:
-		case COLLISION_GROUP_DEBRIS_TRIGGER:
-		case COLLISION_GROUP_INTERACTIVE_DEBRIS:
-		case COLLISION_GROUP_IN_VEHICLE:
-		case COLLISION_GROUP_WEAPON:
-		case COLLISION_GROUP_VEHICLE_CLIP:
-		case COLLISION_GROUP_DOOR_BLOCKER:
-		case COLLISION_GROUP_DISSOLVING:
-		case COLLISION_GROUP_PUSHAWAY:
-			return false;
-		default:
-			return true;
-		}
+		return collide == NULL || AgPB_BlocksWalkHull( collide );
 	}
 private:
 	IEngineTrace *m_Trace;
@@ -1242,10 +1247,8 @@ bool CAgPB::CanPlayerAvoidStep( const Vector &wish, bool crouch, float interval,
 	if ( contact == NULL || contact->IsFree() || m_Ctx.pTrace == NULL || m_pInfo == NULL ||
 		!wish.IsValid() || !IsFinite( interval ) || interval <= 0.0f || wish.Length2DSqr() < 0.01f ||
 		( GetNetVarInt( "m_fFlags" ) & FL_ONGROUND ) == 0 ) return false;
-	IPlayerInfo *other = m_Ctx.pPlayerInfoManager->GetPlayerInfo( contact );
-	if ( other == NULL || !other->IsPlayer() || other->IsObserver() || other->IsDead() ||
-		other->GetTeamIndex() != m_pInfo->GetTeamIndex() ||
-		AgPB_ReadNetVarInt( contact, "m_lifeState", -1 ) != LIFE_ALIVE ) return false;
+	IPlayerInfo *other = PlayerAvoidanceAlly( contact );
+	if ( other == NULL ) return false;
 	const Vector origin = m_pInfo->GetAbsOrigin(), away = origin - other->GetAbsOrigin();
 	// Only an existing overlapping/touching same-team hull can be omitted,
 	// and only for a path whose separation is monotonically non-decreasing.
@@ -1284,7 +1287,7 @@ bool CAgPB::BuildRoute( int iGoalWaypoint, char *error, size_t maxlen )
 	return true;
 }
 
-bool CAgPB::FindRouteCandidate( int iGoalWaypoint, CUtlVector<int> &vecPath, char *error, size_t maxlen ) const
+bool CAgPB::FindRouteCandidate( int iGoalWaypoint, CUtlVector<int> &vecPath, char *error, size_t maxlen, int avoid ) const
 {
 	vecPath.RemoveAll();
 	CAgPBWaypoints &wp = BotWaypoints();
@@ -1337,7 +1340,7 @@ bool CAgPB::FindRouteCandidate( int iGoalWaypoint, CUtlVector<int> &vecPath, cha
 	for ( int i = 0; i < wp.Count(); ++i )
 	{
 		const AgPBPath *node = wp.Get( i );
-		if ( !wp.IsPassable( i, team ) || !node->origin.IsValid() )
+		if ( i == avoid || !wp.IsPassable( i, team ) || !node->origin.IsValid() )
 			continue;
 		AgPBRouteEntryCandidate entry;
 		entry.index = i;
@@ -1358,7 +1361,7 @@ bool CAgPB::FindRouteCandidate( int iGoalWaypoint, CUtlVector<int> &vecPath, cha
 		                          NavigationRequiresCrouch( node->flags ) || enteringDucked, stepSize ) )
 			continue;
 		foundEntry = true;
-		if ( wp.FindPath( i, iGoalWaypoint, vecPath, team ) )
+		if ( wp.FindPath( i, iGoalWaypoint, vecPath, team, avoid ) )
 			break;
 	}
 	if ( vecPath.Count() == 0 )
@@ -1609,7 +1612,9 @@ bool CAgPB::UpdateLadderRoute( CGlobalVars *globals, CBotCmd &cmd )
 	// SyPB pauses at an occupied entry. Reserve its authored ladder only when
 	// about to mount, so competing approaches cannot both wait on each other.
 	const bool approaching = !onLadder && m_Ladder.stage == Stage::Approach;
-	if ( approaching && std::isfinite( now ) && now >= m_Ladder.started && AgPB_GameMode() == AgPB_MODE_NORMAL &&
+	const AgPBGameMode mode = AgPB_GameMode();
+	if ( approaching && std::isfinite( now ) && now >= m_Ladder.started &&
+		( mode == AgPB_MODE_NORMAL || ( mode == AgPB_MODE_ZM && m_bAutonomous ) ) &&
 		( entry->origin - position ).LengthSqr() <= 48.0f * 48.0f )
 	{
 		if ( now >= m_Ladder.entryRetryAt || now < m_Ladder.entryWaitSince )
@@ -2266,7 +2271,7 @@ CAgPB *CAgPBManager::Add( int team, char *error, size_t maxlen, const AgPBBotAdd
 	char szName[MAX_PLAYER_NAME_LENGTH];
 	IServer *server = m_Ctx.pEngine->GetIServer();
 	unsigned int serial = m_uNextSerial;
-	if ( AgPB_GameMode() != AgPB_MODE_NORMAL || !SelectBotPoolName( server, szName ) )
+	if ( !SelectBotPoolName( server, szName ) )
 	{
 		V_snprintf( szName, sizeof( szName ), "AgPB_%02u", serial );
 		while ( BotNameInUse( server, szName ) )
@@ -2297,19 +2302,25 @@ int CAgPBManager::FreeClientSlots() const
 	return MAX( 0, slots );
 }
 
-// Fill rules follow SyPB (CCNHsK-Dev and contributors, GPL-3.0), with CS-EBOT as a comparison.
+// Fill and population rules follow SyPB (CCNHsK-Dev and contributors, GPL-3.0).
+static ConVar agpb_auto_players( "agpb_auto_players", "-1", FCVAR_GAMEDLL,
+	"Maintain this total player count with AgPB bots. -1 disables; one slot stays open for joins.",
+	true, -1.0f, false, 0.0f );
+static ConVar agpb_join_after_player( "agpb_join_after_player", "1", FCVAR_GAMEDLL,
+	"Wait for an active human before adding bots through agpb_auto_players." );
+
 int CAgPBManager::FillServer( int team, int minSkill, int maxSkill, int personality, char *error, size_t maxlen )
 {
+	const bool defaultSkill = minSkill == -1 && maxSkill == -1;
 	const char *failure = NULL;
 	if ( !IsReady() )
 		failure = "Bot manager unavailable";
 	else if ( m_Fill.remaining > 0 )
 		failure = "A server fill is already in progress";
 	else if ( ( team != 0 && team != AgPB_TEAM_T && team != AgPB_TEAM_CT ) ||
-	          minSkill < 1 || maxSkill > 100 || minSkill > maxSkill || personality < -1 || personality > 2 )
+	          ( !defaultSkill && ( minSkill < 1 || maxSkill > 100 || minSkill > maxSkill ) ) ||
+	          personality < -1 || personality > 2 )
 		failure = "Invalid fill team, skill range, or personality";
-	else if ( m_Ctx.pEngine->IsDedicatedServer() )
-		failure = "Server fill is available on a listen server";
 
 	const int slots = failure == NULL ? FreeClientSlots() : -1;
 	if ( slots < 0 )
@@ -2352,7 +2363,7 @@ void CAgPBManager::UpdateFill( CGlobalVars *globals )
 
 	m_Fill.nextAddAt = globals->curtime + 0.18f;
 	AgPBBotAddOptions options;
-	options.skill = RandomInt( m_Fill.minSkill, m_Fill.maxSkill );
+	if ( m_Fill.minSkill != -1 ) options.skill = RandomInt( m_Fill.minSkill, m_Fill.maxSkill );
 	options.personality = m_Fill.personality;
 	char error[256] = {};
 	if ( Add( m_Fill.team, error, sizeof( error ), options ) == NULL )
@@ -2364,6 +2375,59 @@ void CAgPBManager::UpdateFill( CGlobalVars *globals )
 
 	if ( m_Fill.remaining > 0 && --m_Fill.remaining == 0 )
 		META_CONPRINTF( "[AgPB] Server fill complete.\n" );
+}
+
+void CAgPBManager::UpdateAutoPlayers( CGlobalVars *globals )
+{
+	const int target = agpb_auto_players.GetInt();
+	if ( target < 0 || !IsReady() || m_Fill.remaining > 0 || globals->curtime < m_flNextAutoPlayersAt )
+		return;
+	IServer *server = m_Ctx.pEngine->GetIServer();
+	if ( server == NULL || !server->IsActive() ) return;
+	m_flNextAutoPlayersAt = globals->curtime + 0.18f;
+
+	// The engine rejects a connection before the game DLL sees it if no slot is free.
+	const int limit = MIN( target, MAX( 0, server->GetMaxClients() - 1 ) );
+	const int occupied = server->GetNumClients();
+	const int otherClients = MAX( 0, occupied - m_Bots.Count() );
+	const int desired = MAX( 0, limit - otherClients );
+	if ( m_Bots.Count() > desired )
+	{
+		const int largerTeam = SelectTeam() == AgPB_TEAM_T ? AgPB_TEAM_CT : AgPB_TEAM_T;
+		for ( int i = m_Bots.Count() - 1; i >= 0; --i )
+		{
+			const CAgPB *bot = m_Bots[i];
+			IPlayerInfo *info = bot->PlayerInfo();
+			int team = info != NULL ? info->GetTeamIndex() : 0;
+			if ( team != AgPB_TEAM_T && team != AgPB_TEAM_CT ) team = bot->DesiredTeam();
+			if ( team != largerTeam ) continue;
+			Remove( i );
+			return;
+		}
+		Remove( m_Bots.Count() - 1 );
+		return;
+	}
+	if ( m_Bots.Count() == desired || occupied >= limit ) return;
+	if ( agpb_join_after_player.GetBool() )
+	{
+		bool activeHuman = false;
+		for ( int i = 0; i < server->GetClientCount(); ++i )
+		{
+			const IClient *client = server->GetClient( i );
+			if ( client != NULL && client->IsActive() && !client->IsFakeClient() && !client->IsHLTV() )
+			{
+				activeHuman = true;
+				break;
+			}
+		}
+		if ( !activeHuman ) return;
+	}
+	char error[256] = {};
+	if ( Add( 0, error, sizeof( error ) ) == NULL )
+	{
+		META_CONPRINTF( "[AgPB] Auto fill could not add a bot: %s\n", error );
+		m_flNextAutoPlayersAt = globals->curtime + 5.0f;
+	}
 }
 
 bool CAgPBManager::Remove( int listIndex )
@@ -2382,6 +2446,7 @@ bool CAgPBManager::Remove( int listIndex )
 void CAgPBManager::RemoveAll()
 {
 	m_Fill = {};
+	m_flNextAutoPlayersAt = 0.0f;
 	for ( int i = 0; i < m_Bots.Count(); ++i )
 	{
 		m_Bots[i]->Destroy();
@@ -2389,6 +2454,12 @@ void CAgPBManager::RemoveAll()
 	}
 
 	m_Bots.RemoveAll();
+}
+
+void CAgPBManager::KickAll()
+{
+	agpb_auto_players.SetValue( -1 );
+	RemoveAll();
 }
 
 void CAgPBManager::RemoveByEdict( edict_t *pEdict )

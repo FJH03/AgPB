@@ -129,7 +129,11 @@ agpb_wp_legend
 agpb_wp_thick 4
 agpb_wp_xray 0
 agpb_wp_flag t
-agpb_mode zombie          // 菜单头应显示"模式 zombie"；切回：agpb_mode normal
+agpb_mode zm              // 菜单头应显示"模式 zm"
+agpb_mode ze              // 菜单头应显示"模式 ze"
+agpb_mode normal          // 强制普通模式
+agpb_mode auto            // 恢复 ZR 接口和地图前缀自动判定
+agpb_mode_status          // 查看当前检测结果
 ```
 
 期望：

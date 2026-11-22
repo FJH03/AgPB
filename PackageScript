@@ -9,6 +9,8 @@
 #   addons/AgPB/configs/defaults/   (shipped configuration)
 #   addons/AgPB/waypoints/          (shipped waypoints)
 #   addons/metamod/AgPB.vdf
+#   addons/sourcemod/scripting/agpb_zr_bridge.sp
+#   addons/sourcemod/plugins/agpb_zr_bridge.smx (with --with-spcomp)
 import os
 
 builder.SetBuildFolder('package')
@@ -55,3 +57,24 @@ for source_dir, subdirs, files in os.walk(waypoint_source):
 defaults_folder = builder.AddFolder(os.path.join('addons', plugin_name, 'configs', 'defaults'))
 for name in ('names.cfg', 'weapons.cfg'):
   builder.AddCopy(os.path.join(builder.sourcePath, 'configs', name), defaults_folder)
+
+# The bridge can also be compiled using an installed SourceMod toolchain.
+sm_path = os.path.join('addons', 'sourcemod')
+bridge_source = os.path.join(builder.sourcePath, 'compat', 'sourcemod', 'agpb_zr_bridge.sp')
+builder.AddCopy(bridge_source, builder.AddFolder(os.path.join(sm_path, 'scripting')))
+
+if builder.options.with_spcomp:
+  spcomp = os.path.abspath(builder.options.with_spcomp)
+  sp_include = os.path.join(os.path.dirname(spcomp), 'include')
+  if not os.path.isfile(spcomp) or not os.path.isfile(os.path.join(sp_include, 'sourcemod.inc')):
+    raise Exception('--with-spcomp requires a SourcePawn compiler with a sibling include directory.')
+
+  sm_plugins = builder.AddFolder(os.path.join(sm_path, 'plugins'))
+  bridge_binary = 'agpb_zr_bridge.smx'
+  # spcomp -h emits include dependencies using the MSVC showIncludes format.
+  builder.AddCommand(
+    inputs=[spcomp, bridge_source],
+    argv=[spcomp, '-i' + sp_include, '-h', '-E', '-o' + bridge_binary, bridge_source],
+    outputs=[bridge_binary],
+    folder=sm_plugins,
+    dep_type='msvc')

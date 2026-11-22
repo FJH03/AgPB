@@ -36,4 +36,7 @@ parser.options.add_argument('--targets', type=str, dest='targets', default=None,
                             help="Override the target architecture (use commas to separate multiple targets).")
 parser.options.add_argument('--game', type=str, dest='game', default='csczs',
                             help='Target game for AGPB_GAME_* defines: csczs (default), css, csgo.')
+parser.options.add_argument('--with-spcomp', default=None,
+                            help='Path to the SourcePawn compiler for the optional ZR bridge. '
+                                 'Uses the compiler\'s sibling include directory.')
 parser.Configure()

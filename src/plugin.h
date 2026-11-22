@@ -37,6 +37,12 @@ public: // hooks
 	void Hook_GameFrame(bool simulating);
 	void Hook_ClientDisconnect(edict_t *pEntity);
 	void Hook_ClientCommand(edict_t *pEntity, const CCommand &args);
+#if !defined( AGPB_GAME_CSGO )
+	bf_write *Hook_RadioMessage(IRecipientFilter *filter, int message);
+	void Hook_RadioTempEntity(IRecipientFilter &filter, float delay, const void *sender, const SendTable *table, int classId);
+#endif
+	void Hook_ChatDispatch(const CCommand &args);
+	void Hook_ChatDispatchPost(const CCommand &args);
 
 public: // plugin metadata
 	const char *GetAuthor() { return PLUGIN_AUTHOR; }
