@@ -7,10 +7,8 @@
 # After "ambuild" this produces build/package/:
 #   addons/AgPB/bin/win64/agpb_mm.dll
 #   addons/AgPB/configs/defaults/   (shipped configuration)
-#   addons/AgPB/waypoints/            (runtime data folder)
+#   addons/AgPB/waypoints/          (shipped waypoints)
 #   addons/metamod/AgPB.vdf
-# The zip root is addons/, so extracting into cstrike/ deploys the plugin.
-# Run "py package.py" afterwards to create the release zip.
 import os
 
 builder.SetBuildFolder('package')
@@ -39,8 +37,19 @@ for task in MMSPlugin.binaries:
   bin_folder = builder.AddFolder(bin_path)
   builder.AddCopy(task.binary, bin_folder)
 
-# Runtime data folder; the plugin also creates it on demand.
-builder.AddFolder(os.path.join('addons', plugin_name, 'waypoints'))
+# Package the waypoint tree with its relative paths intact.
+waypoint_source = os.path.join(builder.sourcePath, 'waypoints')
+waypoint_path = os.path.join('addons', plugin_name, 'waypoints')
+waypoint_folder = builder.AddFolder(waypoint_path)
+for source_dir, subdirs, files in os.walk(waypoint_source):
+  subdirs.sort()
+  builder.AddConfigureFile(source_dir)
+  relative_dir = os.path.relpath(source_dir, waypoint_source)
+  package_folder = waypoint_folder
+  if relative_dir != '.':
+    package_folder = builder.AddFolder(os.path.join(waypoint_path, relative_dir))
+  for name in sorted(files):
+    builder.AddCopy(os.path.join(source_dir, name), package_folder)
 
 # Keep shipped defaults below the server's editable configuration directory.
 defaults_folder = builder.AddFolder(os.path.join('addons', plugin_name, 'configs', 'defaults'))

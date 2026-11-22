@@ -35,6 +35,7 @@ cmd /c ('"E:\vs\VC\Auxiliary\Build\vcvarsall.bat" amd64 && chcp 65001 && set PYT
 - VDF 源模板放 `configs/metamod/AgPB.vdf`。源码树不建 `addons/`、`cstrike/` 或 `bin/` 部署目录。
 - 新 `.cpp` 必须登记到 `AMBuilder`。修改 `src/` 头文件后，核对 `AMBuilder` 基于头文件内容触发 C++ 消费者重编。
 - 部署用模板末尾的 `xcopy /E /I /Y` 将 `build\package\addons\` 覆盖到目标 `addons\`。服务器启动后须看到 `[AgPB] loaded. ... IBotManager=ok ...`。
+- 2026-11-22 补充：仓库根目录的 `waypoints/` 存放可纳入 Git 的正式 AGPW 路点。构建将此目录完整打包到 `addons/AgPB/waypoints/`，部署随 `addons/` 一起覆盖复制。
 
 ## 3. 项目铁律
 

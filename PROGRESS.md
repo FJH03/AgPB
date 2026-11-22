@@ -12,14 +12,17 @@
 
 ## 当前部署
 
-csczs / Win64 的裸 DLL、分发包和游戏部署的 SHA-256 均为 `20EFC3088A0642C08C6AA6E8AC3D5E4FC6129A53104406072C6153A9BF129603`。部署路径以 AGENTS 为准。历史实机结果各自绑定验收用 DLL、地图及路点。
+csczs / Win64 的裸 DLL、分发包和现服 DLL 的 SHA-256 均为 `A9F82FD3F257F726459F3D58AB5FE56E08863236668A18696578ACD19A67B8BD`。历史实机结果各自绑定验收用 DLL、地图及路点。
 
 | 部署地图 | 当前 AGPW | 已验收及待办 |
 |---|---|---|
-| cs_office | nav10 · v2 · 405 点 / 1,080 有向边 / 61 跳边 · `275B8EAAB833AD1058841FBC2C41362BCDBCB482B8CD3A968EA1A45FEF35959F` | T / CT 有向图强连通，14 个原生 NAV 命名区均有路点，两处雨棚和泵坑深尾已布点，最高车库小箱因蹲姿净空不足排除。两把梯子双向 4/4 通过（`926C`，同队 CT）。401 个普通终点与 1,080 条边的逐项实走待补。 [计划](build/waypoint-output/office-nav10-closeout-20261121/cs_office.plan.json) · [离线审计](build/waypoint-output/office-nav10-closeout-20261121/offline-audit.json) · [梯子实走](build/waypoint-output/office-nav10-closeout-20261121/ladder-verification.json) |
-| de_dust2 | v2 · 208 点 / 521 有向边 / 14 跳边 · `95C4A52C35140C58BBF469D319EF7E009093FA78F2FA4E245FE8F22FFE271C00` | 先备份部署图，对照原生 NAV / BSP 补分区和楼层覆盖。F4A8 旧图通过 175/175 终点、360/360 边、A/B 的 T 与 CT 逃爆和 CT 拆包六项。拾包及安放证据覆盖指定路线。 [冻结验收](build/waypoint-output/de_dust2-20261023-final/bundle-index.json) |
+| cs_office | v2 · 405 点 / 1,136 有向边 / 61 跳边 · `81F0A7F66F4AE51138CCF50E99FF0310F0E4AD09EAAF81B673840577F92CD5CD` | 用户游戏保存版。新版本逐项实走待补。 [仓库 AGPW](waypoints/cs_office.agpw) |
+| de_dust2 | v2 · 209 点 / 599 有向边 / 14 跳边 · `F229F1528EBF3D37F3C0B78B0EAB8E1BF64ADB1F3EA2372AA28828CE0AC4F087` | 用户游戏保存版。待对照原生 NAV / BSP 复核分区、多层覆盖及实走。 [仓库 AGPW](waypoints/de_dust2.agpw) |
 
-office nav10 的计划可导出与部署字节一致的 AGPW。 [归档 AGPW](build/waypoint-output/office-nav10-closeout-20261121/cs_office.agpw) · [空间核对](build/waypoint-output/office-full-20261029-98d4da1b/office-spatial-review-nav08.md)
+两张 AGPW 的仓库、分发包和游戏文件 SHA-256 一致。已通过 `xcopy` 覆盖整个分发包的 `addons/`，包括 `configs/defaults/` 下的 `names.cfg` 与 `weapons.cfg`。无 bot 启动冒烟通过，`IBotManager=ok`，Dust2 与 Office 分别加载 209 与 405 点。
+
+- office nav10 旧版有 405 点 / 1,080 条有向边，T / CT 有向图强连通，覆盖 14 个原生 NAV 命名区。两把梯子双向 4/4 通过（`926C`，同队 CT）。两处雨棚和泵坑深尾已布点，最高车库小箱因蹲姿净空不足排除。 [旧计划](build/waypoint-output/office-nav10-closeout-20261121/cs_office.plan.json) · [离线审计](build/waypoint-output/office-nav10-closeout-20261121/offline-audit.json) · [梯子实走](build/waypoint-output/office-nav10-closeout-20261121/ladder-verification.json) · [空间核对](build/waypoint-output/office-full-20261029-98d4da1b/office-spatial-review-nav08.md)
+- Dust2 F4A8 旧版通过 175/175 终点、360/360 边和 A/B 的 T 与 CT 逃爆、CT 拆包六项。拾包及安放证据覆盖指定路线。 [冻结验收](build/waypoint-output/de_dust2-20261023-final/bundle-index.json)
 
 ## 接手清单
 
