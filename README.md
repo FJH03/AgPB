@@ -6,7 +6,7 @@ Counter-Strike: Source（Source 1 / Win64）的 agent 控制 bot —— Metamod:
 
 - 假客户端用 `server.dll` 的 `BotManager001` 创建，**不带任何 AI**；`RunPlayerMove` 与引擎
   驱动真人玩家是同一条路径，不需要特征码、硬编码偏移，也不链接 `server.dll`。
-- 常规移动 / 视角 / 按键走 `CUserCmd`；手工跳跃连边的弹道初速度按用户授权使用服务端变量，见 AGENTS 的弹道跳补充。
+- 常规移动、视角和按键走 `CUserCmd`。手工跳跃连边的弹道初速度按用户授权使用服务端变量。 [项目铁律](AGENTS.md#3-项目铁律) · [手工弹道跳设计](waypoint-workflow/references/authoring.md#手工弹道跳设计)
 - 现状 / 进度 / 下一步看 [`PROGRESS.md`](PROGRESS.md)。
 
 ## 需要什么
@@ -29,6 +29,7 @@ SDK 静态库必须先编好：`hl2sdk-css\source-engine-czero\build\{tier0,vstd
 命令模板、包目录、部署步骤、红线都在 [`AGENTS.md`](AGENTS.md) §2，这里不重复。
 一句话版本：`ambuild` 产出 `build\package\addons\...`（SourceMod 目录约定，不压 zip），
 构建命令最后一条 `xcopy` 把它覆盖到 [`AGENTS.md`](AGENTS.md) §2 写的目标目录。
+`server.cfg` 建议设置 `bot_quota 0`，避免引擎自带 bot 干预。
 
 ## 文档
 

@@ -1,147 +1,57 @@
-# 项目要求（硬性要求 · 常驻）
+# AgPB 全局硬规则
 
-> 本文件 = 用户给的硬性要求。**现状 / 进度 / 修复记录一律写 [`PROGRESS.md`](PROGRESS.md)**，不要写回这里。
-> 新增要求按「追加 + 日期」并入，只增不删；冲突时以最新条目为准。最近更新：2026-10-02
+项目现状、进度与修复记录统一写 [PROGRESS.md](PROGRESS.md)。保留当前行为、必要回归和验收结论，明确未解决与未验证事项。省去已修复问题的排查和失败尝试。工作流只保留可复用的操作和工具，合并重复说明。
+新增全局要求按日期追加，冲突以用户最新要求为准。合并或删减已有条款须经用户授权。
+
+路点制作与验收遵循[路点工作流](waypoint-workflow/README.md)。普通模式战斗行为与验证遵循[战斗验证](combat-tests/README.md)。其余入口见[项目文档索引](README.md#文档)。
 
 ## 1. 操作规则
 
-- 构建 / 部署 / 文件增删在**普通 shell** 里执行；受限 / 沙箱环境里 MSVC 探测会失败
-  （报找不到 `cl.exe`，但同一个 shell 里 `where cl.exe` 又能找到）。
-- 临时脚本 / 日志 / 临时数据放系统临时目录，用完即删，仓库里不落临时文件。
-- 只跟踪源码、文档、必要脚本；`build/`、构建产物、游戏二进制保持 ignore。
-- 每次操作前后 `git status`；`commit` / `rebase` 由用户自己做。
-- 服务器运行中 DLL 被占用：**先停服再替换**。
-- 测试必须让 bot 与人类**同队**（freezetime 的 `Radio()` 崩溃未修，见 [`CRASH_REPORT.md`](CRASH_REPORT.md)）；
-  换场景前先 `agpb_kick all`。
+- 构建、部署和文件操作在普通 shell 执行。用户已授权必要的普通 shell 操作和游戏插件扩展覆盖。替换被占用的 DLL 前先停服。
+- 临时脚本、日志和临时数据放系统 TEMP。待删除的文件只列完整路径交用户处理。Git 只跟踪源码、文档和必要脚本，忽略 `build/`、构建产物和游戏二进制。
+- 每次操作前后检查 `git status`。`commit` 和 `rebase` 由用户执行。子代理只使用 `gpt-6.2-sol / ultra`。
+- 测试时 bot 必须与真人同队，换场景前先 `agpb_kick all`。Radio 兼容条件见 [CRASH_REPORT.md](CRASH_REPORT.md)。
 
-## 2. 构建 → 部署（红线）
+## 2. 构建与部署
 
-- 构建前置：`E:\Plugins-Platform` 下同层放齐 `hl2sdk-css\`、`hl2sdk-manifests\`、`metamod-source\`、`AgPB\`。
-- SDK 静态库必须是先编好的：`hl2sdk-css\source-engine-czero\build\{tier0,vstdlib,mathlib,tier1}\*.lib`
-  （MMS 自身也依赖，缺了直接 `LNK1181`）。
-- AMBuild 命令模板（在 `build\` 里跑，不能少 `chcp` 和 `PYTHONIOENCODING`）：
-
-  ```powershell
-  cd E:\Plugins-Platform\AgPB
-  mkdir build
-  cd build
-  cmd /c '"E:\vs\VC\Auxiliary\Build\vcvarsall.bat" amd64 && chcp 65001 && set PYTHONIOENCODING=utf-8 && py ../configure.py -s css --targets x86_64 --enable-optimize && ambuild && xcopy /E /I /Y .\package\addons "O:\SteamLibrary\steamapps\common\czero-game-x64\cstrike\addons"'
-  ```
-
-  csczs 基于 css 改造，**日常构建命令保持原样**（`-s css`）；`configure.py` 另接
-  `--game csczs|css|csgo`（默认 `csczs`），映射到 `src/game_target.h` 的 `AGPB_GAME_*` 宏，
-  只有真去编 css / csgo 变体时才需要显式指定；CS:GO 真机构建要等 `hl2sdk-csgo` manifest。
-
-- 产物（裸 DLL）：`build\agpb_mm\windows-x86_64\agpb_mm.dll`。
-- `ambuild` 同时按 SourceMod 目录约定组装好可分发的包目录（由 `PackageScript` 负责，
-  不需要额外命令，**不压 zip**）：`build\package\addons\AgPB\bin\win64\agpb_mm.dll`
-  \+ `addons\AgPB\waypoints\` + `addons\metamod\AgPB.vdf`。
+- `E:\Plugins-Platform` 下须同层放齐 `hl2sdk-css\`、`hl2sdk-manifests\`、`metamod-source\`（MMS 2.0，Source 1）和 `AgPB\`。
+- 先构建 `hl2sdk-css\source-engine-czero\build\{tier0,vstdlib,mathlib,tier1}\*.lib`。Metamod:Source 和 AgPB 都依赖这些静态库。
 - 部署目标：`O:\SteamLibrary\steamapps\common\czero-game-x64\cstrike`
-  （构建命令里的 `xcopy` 和 `tools\agpw_view.py` 都看**本行**，换目录只改这一行。）
-- 部署就是构建命令最后那条 `xcopy /E /I /Y .\package\addons "<目标>\addons"`：
-  把 `build\package\addons\` 覆盖过去；服务器运行中 DLL 被占用，替换前先停服。
-- VDF 模板在 `configs\metamod\AgPB.vdf`（打包时由 `PackageScript` 拷进包里）；
-  `server.cfg` 建议 `bot_quota 0`，避免引擎自带 bot 干预。
-- 冒烟：启动服务器，控制台出现 `[AgPB] loaded. ... IBotManager=ok ...` 才算成功。
-- 改过 `src/*.h` 或新增 `src/*.cpp`：AMBuild 不跟踪头文件依赖 / 新文件要进 `AMBuilder`，
-  否则会出现「代码没生效」或 `LNK2019`（详见 [`PROGRESS.md`](PROGRESS.md) 的坑）。
 
-## 3. 铁律（项目原则，不能破）
+构建模板和本机工具使用上面的部署目标。换目标目录时只改这一行。保留 `chcp 65001`、`PYTHONIOENCODING=utf-8` 和日常构建的 `-s css`。
 
-- 不用引擎自带的 `CCSBot` AI —— 假客户端必须是**无 AI** 的。
-- bot 的行为（移动 / 视角 / 按键 / 战斗）一律走 `CUserCmd`；netvar 写入只留作开发 / 诊断工具。
-- **零特征码、零硬编码 vtable 索引**：反射走 SendTable，接口走公开虚接口；不链接 `server.dll`。
-- 源码树里不建部署目录（`addons/`、`cstrike/`、`bin/`）：metamod vdf 放 `configs/metamod/`，
-  `addons/` 只出现在构建产物 `build/package/` 里。
-- 路点连边一律手工；不做自动连线、不自动补跳跃标志（几何判定只做只读体检）。
-- 移植 EBot / SyPB 代码时**两个对照着看**：原生模式的行为基线是 **SyPB**；
-  CS-EBOT 只当实现对照（其 README 自述只面向 zombie plague / escape / biohazard 模式），
-  同名文件 diff，僵尸专用分支直接砍。
-- 目标游戏：**csczs（当前）/ css / csgo**。游戏间差异**只认用户指出的**，不自己猜；
-  每处差异在实现点用 `AGPB_GAME_<目标>` 宏显式分支（**允许编译期硬编码**，不要为了
-  区分游戏去读内存 / 做运行期探测），并在代码注释里标 `[game-diff]` 说明差异内容。
-- 游戏模式：**普通模式（SyPB 血统）和 ZM/ZE（EBot 血统）都要支持** —— 同一个插件、
-  同一套路点格式，模式差异走运行期 profile 分支，不复制两套核心代码。
-  切换入口是 cvar **`agpb_mode normal|zombie`**（用户按图在 cfg 里设置，不做自动判定）；
-  **僵尸模式行为暂不实现**（先留开关）。
-- 控制台输出英文（控制台是 GBK）；HUD 菜单用中文（UTF-8）。
-- 许可证 GPL-3.0：移植 CS-EBOT / SyPB 代码时保留来源与版权。
+```powershell
+cd E:\Plugins-Platform\AgPB
+$agpbRequirements = Get-Content -LiteralPath .\AGENTS.md -Raw -Encoding utf8
+$agpbDeployTarget = [regex]::Match($agpbRequirements, '(?m)^- 部署目标：\s*`([^`]+)`').Groups[1].Value
+if (!$agpbDeployTarget) { throw 'Deployment target missing' }
+New-Item -ItemType Directory -Path build -Force | Out-Null
+cd build
+cmd /c ('"E:\vs\VC\Auxiliary\Build\vcvarsall.bat" amd64 && chcp 65001 && set PYTHONIOENCODING=utf-8 && py ../configure.py -s css --targets x86_64 --enable-optimize && ambuild && xcopy /E /I /Y .\package\addons "{0}\addons"' -f $agpbDeployTarget)
+```
+
+- `configure.py` 的 `--game csczs|css|csgo` 默认为 `csczs`，映射到 `src/game_target.h` 的 `AGPB_GAME_*` 宏。构建 CS:S / CS:GO 变体时显式指定，CS:GO 真机构建须有 `hl2sdk-csgo` manifest。
+- 裸 DLL 在 `build\agpb_mm\windows-x86_64\agpb_mm.dll`。`ambuild` 的 `PackageScript` 按 SourceMod 目录约定直接组装 `build\package\addons\`，包含 `AgPB\bin\win64\agpb_mm.dll`、`AgPB\waypoints\` 和 `metamod\AgPB.vdf`。直接部署目录，保持不压 ZIP。
+- VDF 源模板放 `configs/metamod/AgPB.vdf`。源码树不建 `addons/`、`cstrike/` 或 `bin/` 部署目录。
+- 新 `.cpp` 必须登记到 `AMBuilder`。修改 `src/` 头文件后，核对 `AMBuilder` 基于头文件内容触发 C++ 消费者重编。
+- 部署用模板末尾的 `xcopy /E /I /Y` 将 `build\package\addons\` 覆盖到目标 `addons\`。服务器启动后须看到 `[AgPB] loaded. ... IBotManager=ok ...`。
+
+## 3. 项目铁律
+
+- AgPB 假客户端必须无引擎 AI。任务、路点导航和执行行为由 AgPB 实现，禁止使用 `CCSBot` 或引擎 ZBot AI 代替。
+- 本地核心依据感知、内部状态和游戏规则自主选择任务。LLM + harness 负责最高层任务决策与仲裁，提交任务或意图。有效干预由本地执行，无干预、结束或失联后回到本地自主核心。
+- 移动、视角、按键和战斗统一由本地核心通过 `CUserCmd` 执行。netvar 写入限开发和诊断。手工弹道跳是运行时例外，允许本地核心为起跳写入 bot 的服务端变量。
+- 零特征码、零硬编码 vtable 索引。反射用 SendTable，调用公开虚接口，禁止链接 `server.dll`。
+- 路点、连边及跳跃标志一律手工制作。原生 NAV 和几何体检只读，禁止自动导入 NAV 图、自动连线和自动补跳跃标志。
+- 目标游戏为 csczs（当前）、CS:S 和 CS:GO。只实现用户确认的游戏差异。实现点用 `AGPB_GAME_<目标>` 显式编译期分支，可用编译期常量，并用 `[game-diff]` 注释说明。禁止为区分游戏而读内存或运行期探测。
+- 普通模式（SyPB）与 ZM / ZE（EBot）共用插件、路点格式和核心，通过运行期 profile 区分。用户在地图 CFG 中显式设置 `agpb_mode normal|zombie`。禁止自动判定模式，目前僵尸模式只留开关。
+- 普通模式以 SyPB 为行为基线，CS-EBOT 仅作实现对照。移植时对照同名文件，普通模式剔除僵尸专用分支。引擎源码仅用于核实公开接口、物理和伤害规则。遵守 GPL-3.0，保留移植代码的来源与版权。
+  - SyPB `4c364fb` 在 `E:\Plugins-Platform\refs\SyPB`，使用 `Project SyPB\SyPB_BOT\`。`SwNPC\` 和 `AMXX\` 不在移植范围内。
+  - CS-EBOT `2333562` 在 `E:\Plugins-Platform\refs\CS-EBOT`，是 ZP / ZE 专用参考。
+  - CS:S 引擎源码在 `E:\Plugins-Platform\hl2sdk-css\source-engine-czero\`。
 
 ## 4. 编码约定
 
-- 源码要 `/utf-8` 编译；`AMBuildScript` / `PackageScript` / `AMBuilder` 等构建脚本里
-  **不能有非 ASCII 字符**（AMBuild 用系统 locale 读脚本，中文注释会直接炸 `UnicodeDecodeError`）。
-- 字符串 / 内存操作用 tier1 的 `V_*` / `Q_*`；`string_t` 先 `STRING()` 再判空串。
-- 块注释里不要出现 `*/` 字样（会提前结束注释）。
-- 中文注释可以；面向控制台的日志 / 回显不行。
-
-## 5. 参考坐标
-
-- 参考实现（本地副本，血统：POD-Bot → YaPB → SyPB → CS-EBOT）：
-  - `E:\Plugins-Platform\refs\SyPB`（`Project SyPB\SyPB_BOT\`，通用基线；`SwNPC\` / `AMXX\` 与本项目无关）—— `4c364fb`
-  - `E:\Plugins-Platform\refs\CS-EBOT`（ZP/ZE 专用 fork，做对照）—— `2333562`
-- CS:S SDK：`E:\Plugins-Platform\hl2sdk-css`（含完整引擎源码 `source-engine-czero\`）。
-- 宿主：`E:\Plugins-Platform\metamod-source`（MMS 2.0，Source 1）。
-- 文档索引见 [`README.md`](README.md)。
-
-
-## 6. 路点制作补充（2026-10-20）
-
-- 路点任务交付目标是用户指定地图的全图路点，局部两点试走只作链路验证。
-- 路点制作不使用 computer-use；通过本机普通 shell、游戏原生控制台和 TGA 截图观察操作。
-  已知 `jpeg` 会导致 engine.dll 崩溃，暂不修复，制作流程禁用 JPEG 命令。
-- 此工作流需要子代理时使用 `gpt-6.2-sol / ultra`，不使用 astra ultra。
-- 用户已授权必要的普通 shell 操作与游戏插件扩展覆盖；替换占用 DLL 仍先停服。
-- 需要删除文件时只列出完整路径交用户自行删除；此条优先于原临时文件用完即删的执行要求。
-
-
-### 行为移植来源补充（2026-10-21）
-
-- 游戏引擎中的 ZBot 源码只能作为参考；行为核心仍以 SyPB / EBot 逻辑实现。
-  原生模式继续以 SyPB 为主线、EBot 作实现对照；引擎源码仅核实公开接口、物理及伤害规则，
-  不用引擎 ZBot AI 替代本项目的任务、路点导航与行为核心。
-
-### 子代理限制补充（2026-10-23）
-
-- 用户要求子代理只使用 gpt-6.2-sol / ultra；此前允许 Astra ultra 的条目据此收紧。
-
-
-### 文档精简补充（2026-10-23）
-
-- 工作流只保留必要的可复用工具与操作说明，重复说明合并，不积累一次性试验和过程记录。
-- 已在代码层面修复的bug，不在日常进度 / 工作流文档保留故障经过、排查和失败尝试；
-  保留当前行为说明、必要回归检查与验收结论。尚未解决或代码已修但未验证的事项明确标注。
-
-### 本地核心兜底与难度机制补充（2026-10-23）
-
-- 普通模式基础行为仍以 SyPB 为主线、EBot 作对照，本地核心无需 agent 即可自主运行；agent 可以干预，干预结束或失联后由本地 SyPB / EBot 核心兜底。
-- 普通模式瞄准保留 SyPB 五档 difficulty 机制及最高档（Godlike）行为，不能仅改一个统一转向速度数值替代分档。
-
-### 路点与战斗验证分离（2026-10-23）
-
-- 战斗验证不属于路点制作范畴，须使用独立目录和说明入口；路点制作工作流不收录战斗验证脚本、夹具或操作流程。通用控制台传输与纯离线解析工具可以复用。
-
-### 独立 2D 路点工具停用（2026-10-23）
-
-- 停用 `tools/agpw_view.py` / `tools/agpw_view.bat` 这套独立 2D 路点工具，不再将其列为制作流程或维护入口；独立路点查看与属性编辑使用 3D 工具。此前条目中的 2D 工具引用以本条为准。
-
-### 任务决策分层补充（2026-10-23）
-
-- bot 的 task 应由本地 SyPB / EBot 核心依据感知、内部状态与游戏规则自主选择；最高层任务决策 / 仲裁由 LLM+harness 决定。存在有效高层干预时执行其意图，无干预、干预结束或失联后回退本地自主核心；高层给任务 / 意图，移动、视角、按键与战斗执行仍走本地核心的 CUserCmd。
-
-### 覆盖度、战斗移动与编辑体验补充（2026-10-23）
-
-- 路点制作以地图可玩区域及多层通路的充分覆盖为目标，需与原生 NAV 的可达范围作只读对照；已创建节点 / 有向边全部走通，不等于地图空间覆盖完成。继续遵守手工布点 / 连边规则，不自动导入 NAV 图或补连边。
-- 普通模式战斗移动以 SyPB 按武器、距离与局势选择进退 / 横移 / 停枪的机制为主，EBot 作实现对照；不能把所有交战统一处理为原地输出，也不能把所有武器统一改成持续跑打。
-- 手动加点、工作流坐标、游戏显示及准星选点需核对一致的高度语义；准星反馈问题与存储坐标问题分开验证，不能凭显示偏移认定整张路点需整体抬高。
-
-
-### 弹道跳初速度补充（2026-10-24）
-
-- 用户要求按 SyPB 机制支持手工跳跃连边的 XYZ 三维初速度，默认 `0 0 0`；起跳瞬间视角对准跳跃方向。
-- 为实现弹道跳，用户明确允许本地核心修改 bot 的服务端变量。此项为前文 CUserCmd 原则的弹道跳例外；普通移动、视角、按键与战斗仍走 CUserCmd，不引入自动连边或自动补跳标志。
-
-### 弹道跳场景设计补充（2026-10-24）
-
-- 设计弹道跳前，必须先通过游戏原生 TGA 截图实际查看起点、终点及中间场景，核对障碍、头顶净空和落脚面；不能仅凭两点 XYZ / 高差决定初速度。必要时以只读体积扫掠补充截图判断，再逐方向实走验证。
-- 若点位设计不合理，明确指出具体位置、落脚 / 遮挡问题及重布方案；用户可删除并重做该点。
+- 源码用 `/utf-8` 编译。`AMBuildScript`、`PackageScript`、`AMBuilder` 等构建脚本只用 ASCII。
+- 字符串和内存操作用 tier1 `V_*` / `Q_*`。`string_t` 先 `STRING()` 再判空串。
+- 块注释正文禁止出现 `*/`。源码可用中文注释。面向 GBK 控制台的输出只用英文，HUD 菜单用中文 UTF-8。
