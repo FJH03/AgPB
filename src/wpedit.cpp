@@ -1013,7 +1013,7 @@ void AgPB_OpenMenu( edict_t *pClient, int iMenuId )
 			menu.AddItem( "狙击点", 4 );
 			menu.SetItem( 4, "蹲行点", 1 );
 			menu.AddItem( "需要按按钮", 3 );
-			menu.AddItem( "需要看脚下", 6 );
+			menu.AddItem( "检查地面支撑 (FALLCHECK)", 6 );
 			menu.AddItem( "别侧移(防掉落)", 7 );
 			menu.AddItem( "回避点", 2 );
 			menu.AddItem( "返回...", 8 );
@@ -1037,7 +1037,7 @@ void AgPB_OpenMenu( edict_t *pClient, int iMenuId )
 		case AgPB_MENU_WP_FLAGS2:
 		{
 			menu.Reset( "切换路点标志 (2/2)", szContext );
-			menu.AddItem( "需要看脚下", 1 );
+			menu.AddItem( "检查地面支撑 (FALLCHECK)", 1 );
 			menu.AddItem( "跳跃点", 2 );
 			menu.AddItem( "需要按按钮", 3 );
 			menu.AddItem( "地图目标点", 4 );
@@ -1377,7 +1377,8 @@ void AgPB_Cmd_Flag( const CCommand &args )
 	if ( args.ArgC() < 2 )
 	{
 		PrintTo( pHost, "usage: agpb_wp_flag <flag|clear>  (camp goal rescue avoid usebutton "
-		                "ladder crouch jump lift fallcheck fallrisk sniper t ct)\n" );
+		                "ladder crouch jump lift fallcheck fallrisk sniper t ct)\n"
+		                "fallcheck checks ground support along adjacent walking links\n" );
 		return;
 	}
 

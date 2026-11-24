@@ -820,9 +820,9 @@ void CAgPB::ReportTasks() const
 	{
 		const AgPBZRRole role = m_pInfo != NULL ? AgPB_ZRRoleForUserId( m_pInfo->GetUserID() ) : AgPBZRRole::Unknown;
 		const char *name = role == AgPBZRRole::Human ? "human" : role == AgPBZRRole::Zombie ? "zombie" : "unknown";
-		RouteReport( "zm role=%s goal=%d camp=%d holding=%d retreat=%d pursuit=%d",
+		RouteReport( "zm role=%s goal=%d camp=%d holding=%d retreat=%d pursuit=%d pursuit-userid=%d sight-userid=%d",
 			name, m_ZM.goal, m_ZM.campGoal ? 1 : 0, IsZMHoldingPosition() ? 1 : 0,
-			m_ZM.retreating ? 1 : 0, m_ZM.pursuing ? 1 : 0 );
+			m_ZM.retreating ? 1 : 0, m_ZM.pursuing ? 1 : 0, m_ZM.pursuit.userId, m_ZM.sight.userId );
 	}
 	const AgPBObjectiveSnapshot &world = BotObjectives().Snapshot();
 	RouteReport( "autonomy=%s map=%s bomb-state=%d tasks=%d route-owner=%llu",

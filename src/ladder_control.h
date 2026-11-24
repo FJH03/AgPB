@@ -32,11 +32,9 @@ struct State {
     int first = -1, last = -1, exit = -1;
     std::uint64_t owner = 0;
     bool ascending = true, attached = false;
-    bool entryClaimed = false;
     float faceYaw = 0.0f;
     float started = 0.0f, progressAt = 0.0f, bestDistance = -1.0f;
     float duration = 0.0f;
-    float entryWaitSince = -1.0f, entryRetryAt = -1.0f;
     bool Active() const { return stage != Stage::Idle; }
 };
 inline void Reset(State &state) { state = State(); }
@@ -60,20 +58,6 @@ inline void Begin(State &state, int first, int last, int exit,
     state.duration = 10.0f + std::fabs(toZ - fromZ) / 80.0f;
     if (state.duration > 45.0f) state.duration = 45.0f;
 }
-inline void PauseEntry(State &state, float now) {
-    state.entryClaimed = false;
-    if (state.entryWaitSince < 0.0f || now < state.entryWaitSince) state.entryWaitSince = now;
-    state.entryRetryAt = now + 1.2f; // SyPB DoWaypointNav ladder pause.
-}
-inline void ResumeEntry(State &state, float now) {
-    if (state.entryWaitSince < 0.0f) return;
-    const float elapsed = now - state.entryWaitSince;
-    if (elapsed > 0.0f) {
-        state.started += elapsed;
-        state.progressAt += elapsed;
-    }
-    state.entryWaitSince = state.entryRetryAt = -1.0f;
-}
 inline void SetStage(State &state, Stage stage, float now) {
     if (state.stage == stage) return;
     state.stage = stage; state.bestDistance = -1.0f; state.progressAt = now;
@@ -95,6 +79,11 @@ inline bool HeightReached(bool ascending, float currentZ, float targetZ, float t
 inline bool EntryReached(float x, float y, float z) {
     return std::isfinite(x) && std::isfinite(y) && std::isfinite(z) &&
         x * x + y * y + z * z <= 15.0f * 15.0f;
+}
+inline bool NearAttachedEntry(float x, float y, float z) {
+    // The engine attaches the player hull, so the feet can be off center.
+    // Keep a separate height bound to exclude ladders on an adjacent floor.
+    return x * x + y * y <= 32.0f * 32.0f && std::fabs(z) <= 16.0f;
 }
 inline bool CanAdvanceUnattachedEntry(bool ascending, float x, float y, float z) {
     // A descending top point is an attachment target, not a ground-arrival

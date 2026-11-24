@@ -24,6 +24,7 @@
 #define _INCLUDE_AGPB_WAYPOINT_H_
 
 #include <mathlib/vector.h>
+#include <tier1/utlmap.h>
 #include <utlvector.h>
 
 #include "game_target.h"
@@ -89,7 +90,7 @@ float AgPB_HullDuckHeight();
 #define AgPB_WP_AVOID         ( 1u << 11 )   // 尽量避开
 #define AgPB_WP_USEBUTTON     ( 1u << 12 )   // 需要按按钮
 #define AgPB_WP_FALLRISK      ( 1u << 17 )   // 在这个点上不要侧移
-#define AgPB_WP_FALLCHECK     ( 1u << 26 )   // 需要检查脚下
+#define AgPB_WP_FALLCHECK     ( 1u << 26 )   // 检查相邻步行边的地面支撑
 #define AgPB_WP_JUMP          ( 1u << 27 )   // 跳跃点
 #define AgPB_WP_SNIPER        ( 1u << 28 )   // 狙击点
 #define AgPB_WP_TERRORIST     ( 1u << 29 )   // T 专用
@@ -189,6 +190,11 @@ public:
 	bool IsConnected( int iFrom, int iTo, unsigned int *pFlags = NULL ) const;
 	int  LinkCount() const;
 
+	// FALLCHECK applies to authored walking links between these endpoints.
+	bool RequiresGroundSupport( int from, int to, unsigned int flags ) const;
+	bool LinkHasGroundSupport( int from, int to, unsigned int flags ) const;
+	bool PointHasGroundSupport( int waypoint ) const;
+
 	// ------------------------------------------------------------------
 	// 寻路（移植 EBot RunAsyncAStar / MatrixWorker）
 	// ------------------------------------------------------------------
@@ -249,6 +255,8 @@ private:
 	bool GetLinkCost( int iFrom, int iTo, unsigned int uLinkFlags, float &flCost ) const;
 
 	CUtlVector< AgPBPath > m_Paths;
+	mutable CUtlMap<int, bool, int> m_GroundSupport{ DefLessFunc( int ) };
+	mutable int m_iGroundSupportTick = -1;
 	unsigned int m_FileVersion;
 
 	char m_szMapName[64];

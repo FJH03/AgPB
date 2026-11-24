@@ -41,6 +41,9 @@ int main() {
     Require(EntryReached(0, 0, 0) && EntryReached(9, 0, 12) && !EntryReached(0, 0, 16) &&
         !EntryReached(0, 0, 32) && !EntryReached(nan, 0, 0),
         "an aligned XY position cannot consume a ladder point on another level");
+    Require(NearAttachedEntry(2, 28, 5) && !EntryReached(2, 28, 5) &&
+        !NearAttachedEntry(0, 33, 0) && !NearAttachedEntry(0, 0, 17) && !NearAttachedEntry(0, nan, 0),
+        "early physical attachment accepts the Westwood ladder footprint but not another floor or ladder");
     Require(EntryReached(13, 0, 0) && !CanAdvanceUnattachedEntry(false, 13, 0, 0) &&
         !CanAdvanceUnattachedEntry(false, 0, 0, 0),
         "descending approach retains its top target until a real ladder attachment");

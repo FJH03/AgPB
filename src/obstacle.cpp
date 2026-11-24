@@ -11,6 +11,7 @@
 #include <shareddefs.h>
 #include <iservernetworkable.h>
 #include <toolframework/itoolentity.h>
+#include <worldsize.h>
 
 #include "obstacle.h"
 #include "waypoint.h"
@@ -22,6 +23,8 @@ static const float kNearDistance = 20.0f;
 static const float kFarDistance = 300.0f;
 // props_shared.h: PHYSICS_MULTIPLAYER_SOLID; avoid game-internal header dependencies.
 static const int kSolidPhysicsMode = 1;
+// func_break.h: SF_BREAK_TRIGGER_ONLY.
+static const int kBreakTriggerOnly = 0x0001;
 // Source ZBot's vertical probe starts above walkable step-height obstacles.
 static const float kProbeBottom = 18.1f;
 
@@ -116,10 +119,13 @@ static void Classify( const BotEngineContext &ctx, AgPBObstacle &result )
 		result.healthKnown = ReadKeyInt( ctx, result.entity, "health", result.health );
 	const bool surface = Q_stricmp( name, "func_breakable_surf" ) == 0;
 	const bool brush = Q_stricmp( name, "func_breakable" ) == 0 || surface;
+	// CPhysBoxMultiplayer inherits CPhysBox's brush health and damage rules.
+	const bool physicsBrush = Q_stricmp( name, "func_physbox" ) == 0 ||
+	                          Q_stricmp( name, "func_physbox_multiplayer" ) == 0;
 	const bool physics = Q_stricmp( name, "prop_physics" ) == 0 ||
 	                     Q_stricmp( name, "prop_physics_multiplayer" ) == 0 ||
 	                     Q_stricmp( name, "prop_physics_override" ) == 0;
-	result.kind = physics ? "physics-prop" : ( brush ? "breakable-brush" : "entity" );
+	result.kind = physics ? "physics-prop" : ( brush || physicsBrush ? "breakable-brush" : "entity" );
 
 	// Source IsBreakableEntity's public / reflected checks. Its damage modifiers,
 	// minimum damage, and non-network health / takedamage cannot be assumed.
@@ -136,12 +142,23 @@ static void Classify( const BotEngineContext &ctx, AgPBObstacle &result )
 	const bool nonSolidPhysics = Q_stricmp( name, "prop_physics_multiplayer" ) == 0 &&
 		ReadKeyInt( ctx, result.entity, "physicsmode", physicsMode ) && physicsMode != kSolidPhysicsMode;
 	const bool largeDamageRequired = ReadKeyInt( ctx, result.entity, "minhealthdmg", minDamage ) && minDamage >= 50;
-	// Physics health zero also means an intact, indestructible prop. Missing
-	// public health is not proof that shooting this physics object helps.
-	result.breakableCandidate = ( brush || ( physics && AgPBPropAvoid::KnownBreakHealth( result.healthKnown, result.health ) ) ) && groupAllowed && !result.broken &&
+	bool canTakeDamage = !result.damageKnown || result.damage == DAMAGE_YES;
+	if ( physicsBrush )
+	{
+		int spawnFlags = 0;
+		const bool spawnFlagsKnown = ReadInt( result.entity, "m_spawnflags", spawnFlags ) ||
+			ReadKeyInt( ctx, result.entity, "spawnflags", spawnFlags );
+		// CPhysBox enables damage for positive health unless it is trigger-only.
+		canTakeDamage = canTakeDamage &&
+			( spawnFlagsKnown ? ( spawnFlags & kBreakTriggerOnly ) == 0 : result.damageKnown );
+	}
+	// An intact physics object can have zero health. Require known positive health.
+	const bool physicsBreakable = ( physics || physicsBrush ) &&
+		AgPBPropAvoid::KnownBreakHealth( result.healthKnown, result.health );
+	result.breakableCandidate = ( brush || physicsBreakable ) && groupAllowed && !result.broken &&
 		!nonSolidPhysics && !largeDamageRequired &&
 		( !result.healthKnown || ( ( surface || result.health > 0 ) && result.health <= 200 ) ) &&
-		( !result.damageKnown || result.damage == DAMAGE_YES );
+		canTakeDamage;
 }
 
 class CObstacleTraceFilter : public CTraceFilter
@@ -484,6 +501,65 @@ static bool IsPhysicsClass( const char *name )
 {
 	return name != NULL && ( Q_stricmp( name, "prop_physics" ) == 0 ||
 		Q_stricmp( name, "prop_physics_multiplayer" ) == 0 || Q_stricmp( name, "prop_physics_override" ) == 0 );
+}
+
+class CGroundSupportFilter : public CTraceFilter
+{
+public:
+	explicit CGroundSupportFilter( const BotEngineContext &ctx ) : m_Ctx( ctx ) {}
+	bool ShouldHitEntity( IHandleEntity *entity, int )
+	{
+		if ( entity == NULL ) return false;
+		ICollideable *collide = m_Ctx.pTrace->GetCollideable( entity );
+		if ( !AgPB_BlocksWalkHull( collide ) || ( collide->GetSolidFlags() & FSOLID_TRIGGER ) != 0 ) return false;
+
+		const uintp handle = (uintp)entity->GetRefEHandle().ToInt();
+		const int index = NetVar_HandleEntry( handle );
+		if ( !NetVar_HandleIsValid( handle ) || index <= 0 || index >= MAX_EDICTS ||
+		     ( gpGlobals != NULL && index <= gpGlobals->maxClients ) ) return false;
+		edict_t *edict = m_Ctx.pEngine->PEntityOfEntIndex( index );
+		if ( edict == NULL || edict->IsFree() || AgPB_RefEHandle( edict ) != handle ) return false;
+		const char *name = edict->GetClassName();
+		if ( name == NULL || Q_stricmp( name, "player" ) == 0 || IsPhysicsClass( name ) ) return false;
+
+		// Brushes and fixed or map-controlled solids can support walking. A
+		// loose prop can pass through this segment without restoring its floor.
+		if ( collide->GetSolid() == SOLID_BSP ) return true;
+		const int moveType = AgPB_ReadNetVarInt( edict, "movetype", -1 );
+		return moveType == MOVETYPE_NONE || moveType == MOVETYPE_PUSH;
+	}
+
+private:
+	const BotEngineContext &m_Ctx;
+};
+
+bool AgPB_HasGroundSupport( const BotEngineContext &ctx, const Vector &from, const Vector &to )
+{
+	const auto withinWorld = []( const Vector &position ) {
+		return position.IsValid() && fabsf( position.x ) <= MAX_COORD_FLOAT &&
+			fabsf( position.y ) <= MAX_COORD_FLOAT && fabsf( position.z ) <= MAX_COORD_FLOAT;
+	};
+	if ( ctx.pTrace == NULL || ctx.pEngine == NULL || !withinWorld( from ) || !withinWorld( to ) ) return false;
+
+	// Sample at half a player radius. The narrow traces keep a missing deck
+	// from picking up the banks or railings beside the authored walking line.
+	const float spacing = AgPB_HULL_RADIUS * 0.5f;
+	const Vector height( 0.0f, 0.0f, 18.1f );
+	const Vector delta = to - from;
+	const int steps = MAX( 1, (int)ceilf( delta.Length() / spacing ) );
+	CGroundSupportFilter filter( ctx );
+	for ( int i = 0; i <= steps; ++i )
+	{
+		const Vector position = from + delta * ( (float)i / steps );
+		Ray_t ray;
+		ray.Init( position + height, position - height );
+		trace_t hit;
+		ctx.pTrace->TraceRay( ray, MASK_PLAYERSOLID, &filter, &hit );
+		if ( hit.startsolid || hit.allsolid || !IsFinite( hit.fraction ) ||
+		     hit.fraction < 0.0f || hit.fraction >= 1.0f ||
+		     !IsFinite( hit.plane.normal.z ) || hit.plane.normal.z < 0.7f ) return false;
+	}
+	return true;
 }
 
 class CNavigationHullFilter : public CTraceFilter

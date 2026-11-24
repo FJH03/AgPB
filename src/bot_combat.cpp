@@ -277,7 +277,7 @@ IHandleEntity *EntityHandle( edict_t *entity )
 
 KeyValues *LoadBulletScript( const char *name )
 {
-#if defined( AGPB_GAME_CSCZS )
+#if defined( AGPB_GAME_CSCZS ) || defined( AGPB_GAME_CSS )
     // [game-diff] The current CSCZS source's script format and ICE key are
     // verified in weapon_parse.cpp and cs_gamerules.h. Other target sources
     // have not been verified for this read-only penetration estimator.

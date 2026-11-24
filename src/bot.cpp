@@ -387,10 +387,10 @@ void CAgPB::Think( CGlobalVars *pGlobals )
 			// authored dismount owner while suspending its movement deadlines.
 			m_Ladder.started = m_Ladder.progressAt = pGlobals->curtime;
 			m_Ladder.bestDistance = -1.0f;
-			if ( m_Ladder.entryWaitSince >= 0.0f ) m_Ladder.entryWaitSince = pGlobals->curtime;
 		}
 		UpdateAgentIntent( pGlobals );
 		Vector blockedWish( 0, 0, 0 );
+		const bool hadRoute = HasRoute();
 		const bool throwingGrenade = UpdateGrenadeThrow( pGlobals, cmd );
 		if ( throwingGrenade )
 		{
@@ -417,7 +417,8 @@ void CAgPB::Think( CGlobalVars *pGlobals )
 		// Task posture survives every command owner, including the released
 		// target-loss frame, weapon selection and a route already cleared at camp.
 		ApplyTaskPosture( cmd );
-		if ( throwingGrenade || m_Ladder.Active() ) ResetPlayerAvoidance();
+		if ( throwingGrenade || m_Ladder.Active() || RecoverLadderAttachment( cmd, hadRoute, pGlobals->curtime ) )
+			ResetPlayerAvoidance();
 		else UpdatePlayerAvoidance( pGlobals, cmd, blockedWish );
 	}
 
@@ -523,6 +524,7 @@ void CAgPB::ClearRoute()
 	m_bRouteArrived = false;
 	m_flRouteSettleSince = -1.0f;
 	m_bRouteLegAirborne = false;
+	m_iFallCheckBlockedTick = -1;
 	AgPBJump::Reset( m_JumpLaunch );
 	AgPBLadder::Reset( m_Ladder );
 	m_bPendingJumpLaunch = false;
@@ -1279,12 +1281,22 @@ bool CAgPB::BuildRoute( int iGoalWaypoint, char *error, size_t maxlen )
 {
 	CUtlVector<int> path;
 	if ( !FindRouteCandidate( iGoalWaypoint, path, error, maxlen ) ) return false;
+	AdoptRoute( iGoalWaypoint, path );
+	return true;
+}
+
+void CAgPB::AdoptRoute( int goal, const CUtlVector<int> &path )
+{
 	ClearRoute();
 	m_vecRoute = path;
 	m_iRouteIndex = 0;
-	m_iGoalWaypoint = iGoalWaypoint;
+	m_iGoalWaypoint = goal;
 	ResetRouteProgress( gpGlobals != NULL ? gpGlobals->curtime : 0.0f );
-	return true;
+}
+
+static bool FallCheckRouteEntry( const AgPBPath &node )
+{
+	return ( node.flags & ( AgPB_WP_FALLCHECK | AgPB_WP_LADDER | AgPB_WP_LIFT ) ) == AgPB_WP_FALLCHECK;
 }
 
 bool CAgPB::FindRouteCandidate( int iGoalWaypoint, CUtlVector<int> &vecPath, char *error, size_t maxlen, int avoid ) const
@@ -1359,6 +1371,8 @@ bool CAgPB::FindRouteCandidate( int iGoalWaypoint, CUtlVector<int> &vecPath, cha
 		const AgPBPath *node = wp.Get( i );
 		if ( !CanWalkToRouteStart( m_Ctx.pTrace, self, vPos, node->origin,
 		                          NavigationRequiresCrouch( node->flags ) || enteringDucked, stepSize ) )
+			continue;
+		if ( FallCheckRouteEntry( *node ) && !AgPB_HasGroundSupport( m_Ctx, vPos, node->origin ) )
 			continue;
 		foundEntry = true;
 		if ( wp.FindPath( i, iGoalWaypoint, vecPath, team, avoid ) )
@@ -1503,6 +1517,29 @@ static void LadderCommand( CBotCmd &cmd, float pitch, float yaw, float forward, 
 	else if ( side < 0.0f ) cmd.buttons |= IN_MOVELEFT;
 }
 
+bool CAgPB::RecoverLadderAttachment( CBotCmd &cmd, bool hadRoute, float now )
+{
+	if ( GetNetVarInt( "movetype", MOVETYPE_NONE ) != MOVETYPE_LADDER ||
+	     !( m_bAutonomous || m_bRoam || HasRoute() || ( hadRoute && !m_bRouteArrived ) ) ||
+	     AgPB_IsRoundFrozen() || ( GetNetVarInt( "m_fFlags" ) & FL_FROZEN ) != 0 ) return false;
+
+	// Source can attach before the authored entrance or retain the attachment
+	// after a route is cancelled. With no ladder owner, jump off using the
+	// engine's ladder normal. Resume the current task after returning to walk.
+	LadderCommand( cmd, cmd.viewangles.x, cmd.viewangles.y, 0.0f );
+	cmd.buttons &= ~( IN_ATTACK | IN_ATTACK2 | IN_RELOAD | IN_USE );
+	cmd.weaponselect = 0;
+	m_bPendingJumpLaunch = false;
+	ResetPropAvoidance();
+	if ( ( m_LastSubmittedCmd.buttons & IN_JUMP ) == 0 )
+	{
+		cmd.buttons |= IN_JUMP;
+		ResetRouteProgress( now );
+		RouteReport( "detaching from unowned ladder at waypoint #%d", RouteNode( m_iRouteIndex ) );
+	}
+	return true;
+}
+
 static float AuthoredLadderYaw( IEngineTrace *trace, IHandleEntity *self,
                                const Vector &low, const Vector &high, Vector inward )
 {
@@ -1549,8 +1586,18 @@ bool CAgPB::UpdateLadderRoute( CGlobalVars *globals, CBotCmd &cmd )
 	const bool grounded = ( GetNetVarInt( "m_fFlags" ) & FL_ONGROUND ) != 0;
 	if ( !m_Ladder.Active() )
 	{
-		if ( ( node->flags & AgPB_WP_LADDER ) == 0 ) return false;
 		int first = m_iRouteIndex, last = m_iRouteIndex;
+		const bool earlyAttachment = ( node->flags & AgPB_WP_LADDER ) == 0;
+		if ( earlyAttachment )
+		{
+			if ( !onLadder ) return false;
+			const AgPBPath *entry = wp.Get( RouteNode( first + 1 ) );
+			if ( entry == NULL || ( entry->flags & AgPB_WP_LADDER ) == 0 ) return false;
+			const Vector delta = entry->origin - position;
+			if ( !NearAttachedEntry( delta.x, delta.y, delta.z ) ) return false;
+			++first;
+			++last;
+		}
 		while ( first > 0 )
 		{
 			const AgPBPath *previous = wp.Get( RouteNode( first - 1 ) );
@@ -1574,6 +1621,7 @@ bool CAgPB::UpdateLadderRoute( CGlobalVars *globals, CBotCmd &cmd )
 		const AgPBPath *end = wp.Get( RouteNode( last ) );
 		if ( start == NULL || end == NULL || first == last || fabsf( end->origin.z - start->origin.z ) < 4.0f )
 		{
+			if ( earlyAttachment ) return false;
 			RouteReport( "ladder route needs two authored LADDER endpoints at different heights - stopped" );
 			ClearRoute(); LadderCommand( cmd, 0, cmd.viewangles.y, 0 );
 			return true;
@@ -1590,6 +1638,14 @@ bool CAgPB::UpdateLadderRoute( CGlobalVars *globals, CBotCmd &cmd )
 		const float faceYaw = AuthoredLadderYaw( m_Ctx.pTrace, self, low, high, inward );
 		Begin( m_Ladder, first, last, last + 1 < m_vecRoute.Count() ? last + 1 : -1,
 			m_uRouteTaskToken, start->origin.z, end->origin.z, faceYaw, now );
+		if ( earlyAttachment )
+		{
+			m_iRouteIndex = first;
+			node = start;
+			m_bRouteLegAirborne = false;
+			AgPBJump::Reset( m_JumpLaunch );
+			ResetRouteProgress( now );
+		}
 		m_flRouteSettleSince = -1.0f;
 		ResetPlayerAvoidance();
 		RouteReport( "ladder begin direction=%s first=#%d last=#%d exit=#%d face=%.1f",
@@ -1608,75 +1664,6 @@ bool CAgPB::UpdateLadderRoute( CGlobalVars *globals, CBotCmd &cmd )
 	{
 		RouteReport( "ladder route lost authored endpoints - stopped" );
 		ClearRoute(); LadderCommand( cmd, 0, cmd.viewangles.y, 0 ); return true;
-	}
-	// SyPB pauses at an occupied entry. Reserve its authored ladder only when
-	// about to mount, so competing approaches cannot both wait on each other.
-	const bool approaching = !onLadder && m_Ladder.stage == Stage::Approach;
-	const AgPBGameMode mode = AgPB_GameMode();
-	if ( approaching && std::isfinite( now ) && now >= m_Ladder.started &&
-		( mode == AgPB_MODE_NORMAL || ( mode == AgPB_MODE_ZM && m_bAutonomous ) ) &&
-		( entry->origin - position ).LengthSqr() <= 48.0f * 48.0f )
-	{
-		if ( now >= m_Ladder.entryRetryAt || now < m_Ladder.entryWaitSince )
-		{
-			int blocker = 0;
-			if ( !m_Ladder.entryClaimed )
-			{
-				CAgPBManager &bots = AgPB_Bots();
-				for ( int i = 0; i < bots.Count() && blocker == 0; ++i )
-				{
-					const CAgPB *peer = bots.Get( i );
-					if ( peer == NULL || peer == this || !peer->m_Ladder.Active() ||
-						( !peer->m_Ladder.entryClaimed && !peer->m_Ladder.attached ) || !peer->HasRoute() ||
-						peer->m_Ladder.owner != peer->m_uRouteTaskToken ||
-						peer->m_Ladder.owner != peer->m_Tasks.Current().token || !peer->IsAlive() ) continue;
-					for ( int a = m_Ladder.first; a <= m_Ladder.last && blocker == 0; ++a )
-						for ( int b = peer->m_Ladder.first; b <= peer->m_Ladder.last; ++b )
-							if ( RouteNode( a ) == peer->RouteNode( b ) ) { blocker = peer->Index(); break; }
-				}
-			}
-			// CS-EBOT also checks players physically on the ladder. Compare
-			// their feet with the spans between the authored ladder points.
-			for ( int slot = 1; slot <= globals->maxClients && blocker == 0; ++slot )
-			{
-				if ( slot == m_iIndex ) continue;
-				edict_t *entity = m_Ctx.pEngine->PEntityOfEntIndex( slot );
-				if ( entity == NULL || entity->IsFree() ) continue;
-				IPlayerInfo *info = m_Ctx.pPlayerInfoManager->GetPlayerInfo( entity );
-				if ( info == NULL || !info->IsConnected() || !info->IsPlayer() || info->IsObserver() || info->IsDead() ||
-					AgPB_ReadNetVarInt( entity, "movetype", MOVETYPE_NONE ) != MOVETYPE_LADDER ||
-					AgPB_ReadNetVarInt( entity, "m_lifeState", -1 ) != LIFE_ALIVE ) continue;
-				const Vector other = info->GetAbsOrigin();
-				if ( !other.IsValid() ) continue;
-				for ( int i = m_Ladder.first; i < m_Ladder.last && blocker == 0; ++i )
-				{
-					const AgPBPath *from = wp.Get( RouteNode( i ) ), *to = wp.Get( RouteNode( i + 1 ) );
-					if ( from == NULL || to == NULL ) continue;
-					if ( CalcDistanceSqrToLineSegment( other, from->origin, to->origin ) <= 32.0f * 32.0f ) blocker = slot;
-				}
-			}
-			if ( blocker != 0 )
-			{
-				if ( m_Ladder.entryWaitSince < 0.0f )
-					RouteReport( "ladder entry #%d occupied by client #%d; waiting", RouteNode( m_Ladder.first ), blocker );
-				PauseEntry( m_Ladder, now );
-			}
-			else
-			{
-				ResumeEntry( m_Ladder, now );
-				m_Ladder.entryClaimed = true;
-			}
-		}
-		if ( m_Ladder.entryWaitSince >= 0.0f )
-		{
-			LadderCommand( cmd, cmd.viewangles.x, cmd.viewangles.y, 0 );
-			return true;
-		}
-	}
-	else
-	{
-		ResumeEntry( m_Ladder, now );
-		if ( approaching ) m_Ladder.entryClaimed = false;
 	}
 	if ( onLadder )
 	{
@@ -1777,6 +1764,64 @@ bool CAgPB::UpdateLadderRoute( CGlobalVars *globals, CBotCmd &cmd )
 	return true;
 }
 
+bool CAgPB::UpdateRouteGroundSupport( CGlobalVars *globals, CBotCmd &cmd, const AgPBPath &node,
+                                      const Vector &position, int playerFlags, unsigned int legFlags )
+{
+	const int from = RouteNode( m_iRouteIndex - 1 );
+	const int to = RouteNode( m_iRouteIndex );
+	const bool grounded = ( playerFlags & FL_ONGROUND ) != 0;
+	if ( m_iFallCheckBlockedTick < 0 )
+	{
+		CAgPBWaypoints &wp = BotWaypoints();
+		if ( from < 0 )
+		{
+			if ( AgPB_HasGroundSupport( m_Ctx, position, node.origin ) ) return false;
+		}
+		else
+		{
+			if ( wp.LinkHasGroundSupport( from, to, legFlags ) ) return false;
+			// A gap that opened behind this bot need not send it back across
+			// the deck. Check the remaining segment only from real ground.
+			const AgPBPath *start = wp.Get( from );
+			if ( grounded && start != NULL &&
+			     DotProduct( position - start->origin, node.origin - start->origin ) > 0.0f &&
+			     AgPB_HasGroundSupport( m_Ctx, position, node.origin ) ) return false;
+		}
+		m_iFallCheckBlockedTick = globals->tickcount;
+		RouteReport( "route aborted: FALLCHECK lost ground support #%d -> #%d; goal=#%d owner=%llu",
+			from, to, m_iGoalWaypoint, (unsigned long long)m_uRouteTaskToken );
+	}
+
+	cmd.forwardmove = cmd.sidemove = cmd.upmove = 0.0f;
+	cmd.buttons &= ~( IN_FORWARD | IN_BACK | IN_MOVELEFT | IN_MOVERIGHT | IN_JUMP );
+	m_vBlockedRouteWish.Init();
+	ResetPropAvoidance();
+	ResetPlayerAvoidance();
+	// Ground flags can still describe the previous command when a brush is
+	// removed this tick. Let movement update the player's support before
+	// reporting that no usable route begins from a falling position.
+	if ( !grounded || ( m_iFallCheckBlockedTick == globals->tickcount &&
+	     !CanWalkToTaskPosition( position, ( playerFlags & FL_DUCKING ) != 0 ) ) ) return true;
+
+	const int goal = m_iGoalWaypoint;
+	const std::uint64_t owner = m_uRouteTaskToken;
+	CUtlVector<int> candidate;
+	char error[192];
+	if ( FindRouteCandidate( goal, candidate, error, sizeof( error ) ) )
+	{
+		AdoptRoute( goal, candidate );
+		m_uRouteTaskToken = owner;
+		RouteReport( "FALLCHECK rebuilt route to #%d via #%d (%d hop(s), owner=%llu)",
+			goal, candidate[0], candidate.Count() - 1, (unsigned long long)owner );
+	}
+	else
+	{
+		RouteReport( "FALLCHECK replan failed: %s - stopped", error );
+		ClearRoute();
+	}
+	return true;
+}
+
 void CAgPB::UpdateRoute( CGlobalVars *pGlobals, CBotCmd &cmd )
 {
 	if ( !HasRoute() || m_pInfo == NULL )
@@ -1806,21 +1851,26 @@ void CAgPB::UpdateRoute( CGlobalVars *pGlobals, CBotCmd &cmd )
 
 	// 这一段要不要跳 —— 看"上一点 -> 这一点"那条边的标志
 	unsigned int uLegFlags = 0;
-
-	if ( m_iRouteIndex > 0 )
-		wp.IsConnected( m_vecRoute[m_iRouteIndex - 1], m_vecRoute[m_iRouteIndex], &uLegFlags );
+	const int iPrevious = RouteNode( m_iRouteIndex - 1 );
+	const bool bConnected = iPrevious >= 0 && wp.IsConnected( iPrevious, iNode, &uLegFlags );
 
 	const Vector vPos = m_pInfo->GetAbsOrigin();
 	const Vector vDelta = pNode->origin - vPos;
 	const float flDist2D = vDelta.Length2D();
 	const bool bJumpLeg = ( uLegFlags & AgPB_PATH_JUMP ) != 0;
-	AgPBJump::SetLeg( m_JumpLaunch, bJumpLeg ? RouteNode( m_iRouteIndex - 1 ) : -1, bJumpLeg ? iNode : -1 );
+	AgPBJump::SetLeg( m_JumpLaunch, bJumpLeg ? iPrevious : -1, bJumpLeg ? iNode : -1 );
 	unsigned int nextLegFlags = 0;
-	const bool bTakeoff = m_iRouteIndex + 1 < m_vecRoute.Count() &&
-		wp.IsConnected( iNode, m_vecRoute[m_iRouteIndex + 1], &nextLegFlags ) &&
-		( nextLegFlags & AgPB_PATH_JUMP ) != 0;
+	const int iNext = RouteNode( m_iRouteIndex + 1 );
+	const bool nextConnected = iNext >= 0 && wp.IsConnected( iNode, iNext, &nextLegFlags );
+	const bool bTakeoff = nextConnected && ( nextLegFlags & AgPB_PATH_JUMP ) != 0;
 	const bool bEntry = m_iRouteIndex == 0;
-	const bool bGrounded = ( GetNetVarInt( "m_fFlags" ) & FL_ONGROUND ) != 0;
+	const int playerFlags = GetNetVarInt( "m_fFlags" );
+	const bool bGrounded = ( playerFlags & FL_ONGROUND ) != 0;
+	const int routeMoveType = GetNetVarInt( "movetype", MOVETYPE_NONE );
+	const bool checkGround = bEntry ? FallCheckRouteEntry( *pNode ) :
+		bConnected && wp.RequiresGroundSupport( iPrevious, iNode, uLegFlags );
+	if ( ( m_iFallCheckBlockedTick >= 0 || ( checkGround && routeMoveType == MOVETYPE_WALK ) ) &&
+	     UpdateRouteGroundSupport( pGlobals, cmd, *pNode, vPos, playerFlags, uLegFlags ) ) return;
 	if ( PlayerAvoidanceActive( pGlobals->curtime ) )
 	{
 		// The final player layer owns its bounded yield/replan cycle; a live
@@ -1829,8 +1879,14 @@ void CAgPB::UpdateRoute( CGlobalVars *pGlobals, CBotCmd &cmd )
 		m_flStuckRecoveryUntil = 0.0f;
 	}
 	const bool bTerminal = m_iRouteIndex + 1 == m_vecRoute.Count();
-	const int routeMoveType = GetNetVarInt( "movetype", MOVETYPE_NONE );
-	const bool bTightIntermediate = AgPBTerminal::TightIntermediate( (float)pNode->radius,
+	const AgPBPath *pPrevious = wp.Get( iPrevious );
+	// Arrive at the center before turning onto or away from a checked floor.
+	// Otherwise a large waypoint radius can cut a corner off the authored line.
+	const bool fallCheckAnchor = !bTerminal && !bEntry && !bTakeoff && !bJumpLeg &&
+		routeMoveType == MOVETYPE_WALK && fabsf( vDelta.z ) < AgPB_ROUTE_ENTRY_TOLERANCE &&
+		( pPrevious == NULL || ( pPrevious->flags & ( AgPB_WP_LADDER | AgPB_WP_LIFT ) ) == 0 ) &&
+		( checkGround || ( nextConnected && wp.RequiresGroundSupport( iNode, iNext, nextLegFlags ) ) );
+	const bool bTightIntermediate = fallCheckAnchor || AgPBTerminal::TightIntermediate( (float)pNode->radius,
 		bTerminal, bEntry, bTakeoff, bJumpLeg,
 		( pNode->flags & AgPB_WP_LADDER ) != 0 || routeMoveType == MOVETYPE_LADDER );
 	const bool bTightControl = AgPBTerminal::TightIntermediateControl( bTightIntermediate,
@@ -1984,19 +2040,13 @@ void CAgPB::UpdateRoute( CGlobalVars *pGlobals, CBotCmd &cmd )
 		!CanWalkToTaskPosition( vPos, false );
 	bool bCrouch = NavigationRequiresCrouch( pNode->flags ) || lowCeiling;
 
-	if ( !bCrouch && m_iRouteIndex > 0 )
+	if ( !bCrouch && pPrevious != NULL && NavigationRequiresCrouch( pPrevious->flags ) )
 	{
-		const AgPBPath *pPrev = wp.Get( m_vecRoute[m_iRouteIndex - 1] );
-
-		if ( pPrev != NULL && NavigationRequiresCrouch( pPrev->flags ) )
-		{
-			if ( ( pPrev->origin - vPos ).Length2D() < 64.0f )
-				bCrouch = true;
-		}
+		if ( ( pPrevious->origin - vPos ).Length2D() < 64.0f )
+			bCrouch = true;
 	}
 
-	const AgPBPath *nextNode = m_iRouteIndex + 1 < m_vecRoute.Count()
-		? wp.Get( m_vecRoute[m_iRouteIndex + 1] ) : NULL;
+	const AgPBPath *nextNode = wp.Get( iNext );
 	const AgPBTerminal::RoutePosture posture = AgPBTerminal::ComputeRoutePosture(
 		bCrouch, nextNode != NULL && NavigationRequiresCrouch( nextNode->flags ),
 		bTakeoff, flDist2D, bJumpLeg, bLandedJumpLeg, bGrounded,

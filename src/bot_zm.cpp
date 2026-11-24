@@ -21,19 +21,25 @@ extern bool AgPB_IsRoundFrozen();
 namespace
 {
 constexpr float SightInterval = 0.20f;
+constexpr float ZombieSightInterval = 0.50f;
 constexpr float SightMemory = 5.0f;
 constexpr float SharedSightMemory = 2.5f;
+constexpr float PursuitUpdateDistance = 128.0f;
 constexpr float ThreatRange = 224.0f;
+constexpr float RetreatDistanceGain = 80.0f;
+constexpr float RouteThreatLead = 48.0f;
 
+enum class ZMWaypointPriority { SupportedCamp, SafeCamp, Camp, Move };
 struct ZMWaypointChoice
 {
 	int waypoint;
 	float score;
-	bool camp;
+	ZMWaypointPriority priority = ZMWaypointPriority::Move;
 };
 
 bool ZMPreferredWaypoint( const ZMWaypointChoice &left, const ZMWaypointChoice &right )
 {
+	if ( left.priority != right.priority ) return left.priority < right.priority;
 	if ( left.score != right.score ) return left.score < right.score;
 	return left.waypoint < right.waypoint;
 }
@@ -42,6 +48,12 @@ float ThreatDistance( const Vector &position, const Vector &threat )
 {
 	const Vector delta = position - threat;
 	return delta.Length2D() + 0.75f * std::abs( delta.z );
+}
+
+bool ZMThreatCanIntercept( const AgPBPath *node, const Vector &origin, const Vector &threat )
+{
+	return node != NULL &&
+		ThreatDistance( node->origin, threat ) + RouteThreatLead < ThreatDistance( node->origin, origin );
 }
 
 float PlayerHullSeparation( const Vector &delta, float distance )
@@ -106,15 +118,25 @@ int CAgPB::FindZMRouteEntry() const
 	return best;
 }
 
-bool CAgPB::StartZMRoute( int goal, float now, bool camp, bool retreat )
+bool CAgPB::StartZMRoute( int goal, float now, bool camp, const Vector *escapeFrom )
 {
-	if ( goal == m_ZM.goal && HasRoute() && m_uRouteTaskToken == m_ZM.task )
+	const bool retreat = escapeFrom != NULL;
+	if ( !retreat && goal == m_ZM.goal && HasRoute() && m_uRouteTaskToken == m_ZM.task )
 	{
-		m_ZM.retreating = retreat;
+		m_ZM.campGoal = camp;
+		m_ZM.retreating = false;
 		return true;
 	}
 	char error[160];
-	if ( !BuildRoute( goal, error, sizeof( error ) ) ) return false;
+	CUtlVector<int> path;
+	if ( !FindRouteCandidate( goal, path, error, sizeof( error ) ) ) return false;
+	if ( retreat )
+	{
+		const Vector origin = m_pInfo->GetAbsOrigin();
+		for ( int i = 0; i < MIN( path.Count(), 2 ); ++i )
+			if ( ZMThreatCanIntercept( BotWaypoints().Get( path[i] ), origin, *escapeFrom ) ) return false;
+	}
+	AdoptRoute( goal, path );
 	m_Tasks.RemoveToken( m_ZM.task );
 	AgPBTask task;
 	task.id = AgPBTaskId::MoveToPosition;
@@ -135,6 +157,7 @@ bool CAgPB::StartZMRoute( int goal, float now, bool camp, bool retreat )
 
 bool CAgPB::PlanZMHuman( CGlobalVars *globals, const Vector *threat, bool retreat )
 {
+	if ( retreat && threat == NULL ) return false;
 	const float now = globals->curtime;
 	CAgPBWaypoints &waypoints = BotWaypoints();
 	const int entry = FindZMRouteEntry();
@@ -163,19 +186,24 @@ bool CAgPB::PlanZMHuman( CGlobalVars *globals, const Vector *threat, bool retrea
 		if ( SafeTerminal( node ) ) reservations.push_back( bot->m_ZM.goal );
 	}
 	const float currentDanger = threat != NULL ? ThreatDistance( origin, *threat ) : 0.0f;
+	const bool holdingFallback = !retreat && IsZMHoldingPosition() && !m_ZM.campGoal && m_ZM.goal >= 0;
 	std::vector<ZMWaypointChoice> choices;
 	for ( int i = 0; i < waypoints.Count(); ++i )
 	{
 		const AgPBPath *node = waypoints.Get( i );
 		if ( !SafeTerminal( node ) || !waypoints.IsPassable( i, team ) || distances[i] >= AgPB_WP_DIST_INF ||
 		     ( i == m_ZM.blockedGoal && now < m_ZM.blockedUntil ) ) continue;
-		const float dangerDistance = threat != NULL ? ThreatDistance( node->origin, *threat ) : 0.0f;
-		if ( retreat && ( i == m_ZM.goal || dangerDistance < currentDanger + 80.0f ||
-		     distances[i] > 1800.0f ) ) continue;
 		const bool camp = ( node->flags & AgPB_WP_CAMP ) != 0;
+		const float dangerDistance = threat != NULL ? ThreatDistance( node->origin, *threat ) : 0.0f;
+		if ( retreat && ( i == m_ZM.goal || dangerDistance < currentDanger + RetreatDistanceGain ||
+		     distances[i] > 1800.0f ) ) continue;
 		// Reserve each authored stand position for one bot. Nearby positions
 		// can support one another while still accounting for crowding.
-		if ( camp && std::find( reservations.begin(), reservations.end(), i ) != reservations.end() ) continue;
+		if ( !retreat && camp && std::find( reservations.begin(), reservations.end(), i ) != reservations.end() ) continue;
+		// Wait at a fallback and reconsider camps as the sighting changes.
+		if ( holdingFallback && !camp ) continue;
+		if ( !retreat && camp && threat != NULL &&
+		     dangerDistance < MIN( currentDanger, ThreatRange + RetreatDistanceGain ) ) continue;
 		if ( !camp && !retreat && ( i == entry || ( node->origin - origin ).LengthSqr() < 64.0f * 64.0f ) ) continue;
 		float support = 0.0f, crowd = 0.0f;
 		for ( const Vector &ally : allies )
@@ -190,7 +218,6 @@ bool CAgPB::PlanZMHuman( CGlobalVars *globals, const Vector *threat, bool retrea
 			if ( ( waypoints.Get( reserved )->origin - node->origin ).LengthSqr() < 64.0f * 64.0f ) crowd += 1.0f;
 		if ( !camp && !retreat && support < 0.35f ) continue;
 		float score = distances[i] - MIN( support, 2.0f ) * 125.0f + crowd * 350.0f;
-		if ( !camp ) score += retreat ? 80.0f : 2000.0f;
 		if ( threat != NULL )
 		{
 			score += 4.0f * MAX( 0.0f, 500.0f - dangerDistance );
@@ -207,16 +234,50 @@ bool CAgPB::PlanZMHuman( CGlobalVars *globals, const Vector *threat, bool retrea
 				score += 600.0f;
 			}
 		}
-		choices.push_back( { i, score, camp } );
+		ZMWaypointPriority priority = ZMWaypointPriority::Move;
+		if ( !retreat && camp )
+		{
+			const bool nearThreat = threat != NULL && dangerDistance < ThreatRange + RetreatDistanceGain;
+			priority = nearThreat ? ZMWaypointPriority::Camp :
+				( support >= 0.35f ? ZMWaypointPriority::SupportedCamp : ZMWaypointPriority::SafeCamp );
+		}
+		choices.push_back( { i, score, priority } );
 	}
 	std::sort( choices.begin(), choices.end(), ZMPreferredWaypoint );
-	const std::size_t tries = MIN( choices.size(), static_cast<std::size_t>( 6 ) );
-	for ( std::size_t i = 0; i < tries; ++i )
-		if ( StartZMRoute( choices[i].waypoint, now, choices[i].camp, retreat ) ) return true;
+	int moveTries = 0;
+	for ( const ZMWaypointChoice &choice : choices )
+	{
+		const bool camp = choice.priority != ZMWaypointPriority::Move;
+		if ( !camp && moveTries++ == 6 ) break;
+		if ( StartZMRoute( choice.waypoint, now, camp, retreat ? threat : NULL ) ) return true;
+	}
 	return false;
 }
 
-bool CAgPB::PlanZMZombie( float now, const Vector *target )
+bool CAgPB::ZMAlreadySearched( const ZMSighting &sight, float now ) const
+{
+	if ( !NetVar_HandleIsValid( sight.handle ) ) return false;
+	const int slot = NetVar_HandleEntry( sight.handle );
+	if ( slot <= 0 || slot >= m_ZM.searched.Count() ) return false;
+	const ZMSighting &searched = m_ZM.searched[slot];
+	return searched.userId == sight.userId && searched.handle == sight.handle &&
+		( searched.origin - sight.origin ).LengthSqr() <= PursuitUpdateDistance * PursuitUpdateDistance &&
+		( sight.seenAt <= searched.seenAt || now - searched.seenAt < SightMemory );
+}
+
+void CAgPB::RememberZMSearch( const ZMSighting &sight, const CGlobalVars &globals )
+{
+	if ( !NetVar_HandleIsValid( sight.handle ) ) return;
+	const int slot = NetVar_HandleEntry( sight.handle );
+	if ( slot <= 0 || slot > globals.maxClients ) return;
+	if ( slot >= m_ZM.searched.Count() )
+		m_ZM.searched.AddMultipleToTail( slot + 1 - m_ZM.searched.Count() );
+	m_ZM.searched[slot] = sight;
+	m_ZM.searched[slot].seenAt = globals.curtime;
+	m_ZM.scanAt = globals.curtime;
+}
+
+bool CAgPB::PlanZMZombie( float now, const ZMSighting *target )
 {
 	CAgPBWaypoints &waypoints = BotWaypoints();
 	const int entry = FindZMRouteEntry();
@@ -237,11 +298,10 @@ bool CAgPB::PlanZMZombie( float now, const Vector *target )
 		float score;
 		if ( target != NULL )
 		{
-			const float miss = ( *target - node->origin ).Length();
+			const float miss = ( target->origin - node->origin ).Length();
 			if ( miss > 512.0f ) continue;
 			score = miss * 3.0f + distances[i] * 0.08f;
 			if ( i == entry && miss > 64.0f ) score += 300.0f;
-			if ( i == m_ZM.previousGoal && !HasRoute() ) continue;
 		}
 		else
 		{
@@ -250,16 +310,15 @@ bool CAgPB::PlanZMZombie( float now, const Vector *target )
 			score = RandomFloat( 0.0f, 1.0f );
 			if ( preferTerrorPoints && !terrorPoint ) score += 2.0f;
 		}
-		choices.push_back( { i, score, false } );
+		choices.push_back( { i, score } );
 	}
 	std::sort( choices.begin(), choices.end(), ZMPreferredWaypoint );
 	const std::size_t tries = MIN( choices.size(), static_cast<std::size_t>( 5 ) );
 	for ( std::size_t i = 0; i < tries; ++i )
-		if ( StartZMRoute( choices[i].waypoint, now, false, false ) )
+		if ( StartZMRoute( choices[i].waypoint, now, false ) )
 		{
 			m_ZM.pursuing = target != NULL;
-			if ( target != NULL ) m_ZM.pursuitPoint = *target;
-			else m_ZM.pursuitUserId = 0;
+			m_ZM.pursuit = target != NULL ? *target : ZMSighting();
 			return true;
 		}
 	return false;
@@ -349,7 +408,7 @@ void CAgPB::UpdateZombieMode( CGlobalVars *globals, CBotCmd &cmd )
 		}
 		m_ZM.task = 0;
 		m_ZM.goal = -1;
-		m_ZM.pursuitUserId = 0;
+		m_ZM.pursuit = ZMSighting();
 		m_ZM.campGoal = m_ZM.retreating = m_ZM.holding = m_ZM.pursuing = false;
 	};
 	const auto hold = [&]( int waypoint, bool camp ) {
@@ -393,14 +452,38 @@ void CAgPB::UpdateZombieMode( CGlobalVars *globals, CBotCmd &cmd )
 	if ( !origin.IsValid() ) return;
 
 	edict_t *visible = NULL;
-	edict_t *last = HandleToEdict( m_ZM.sight.handle );
-	IPlayerInfo *lastInfo = ZMPlayer( last, opponent, m_ZM.sight.userId );
+	bool followPursuit = !human && m_ZM.pursuing && HasRoute();
+	if ( followPursuit )
+	{
+		edict_t *target = HandleToEdict( m_ZM.pursuit.handle );
+		followPursuit = ZMPlayer( target, opponent, m_ZM.pursuit.userId ) != NULL &&
+			( AgPB_ReadNetVarInt( target, "m_fFlags" ) & FL_NOTARGET ) == 0;
+		if ( !followPursuit && !committedRoute )
+		{
+			releaseGoal();
+			m_ZM.planAt = m_ZM.scanAt = now;
+		}
+	}
+	const ZMSighting &lastSight = followPursuit ? m_ZM.pursuit : m_ZM.sight;
+	edict_t *last = HandleToEdict( lastSight.handle );
+	IPlayerInfo *lastInfo = ZMPlayer( last, opponent, lastSight.userId );
+	const bool validLast = lastInfo != NULL && ( AgPB_ReadNetVarInt( last, "m_fFlags" ) & FL_NOTARGET ) == 0;
 	Vector aimPoint;
-	const bool scan = now >= m_ZM.scanAt;
+	const auto observeLast = [&]() {
+		if ( !validLast || !lastInfo->GetAbsOrigin().IsValid() || !ZombieModeAimPoint( last, aimPoint ) ) return;
+		visible = last;
+		m_ZM.sight = { lastSight.handle, lastSight.userId, lastInfo->GetAbsOrigin(), now };
+	};
+	if ( !human ) observeLast();
+	const bool keepTarget = followPursuit ||
+		( !human && visible != NULL && !ZMAlreadySearched( m_ZM.sight, now ) );
+	const bool scan = now >= m_ZM.scanAt && !keepTarget;
 	if ( scan )
 	{
-		m_ZM.scanAt = now + SightInterval;
-		float distance = 2400.0f * 2400.0f;
+		m_ZM.scanAt = now + ( human ? SightInterval : ZombieSightInterval );
+		constexpr float sightRangeSq = 2400.0f * 2400.0f;
+		float bestDistanceSq = sightRangeSq;
+		std::vector<ZMSighting> zombieCandidates;
 		for ( int slot = 1; slot <= globals->maxClients; ++slot )
 		{
 			edict_t *entity = m_Ctx.pEngine->PEntityOfEntIndex( slot );
@@ -408,26 +491,58 @@ void CAgPB::UpdateZombieMode( CGlobalVars *globals, CBotCmd &cmd )
 			IPlayerInfo *info = ZMPlayer( entity, opponent );
 			if ( info == NULL || !info->GetAbsOrigin().IsValid() ||
 			     ( AgPB_ReadNetVarInt( entity, "m_fFlags" ) & FL_NOTARGET ) != 0 ) continue;
-			const float candidate = ( info->GetAbsOrigin() - origin ).LengthSqr();
 			const uintp handle = AgPB_RefEHandle( entity );
-			if ( candidate >= distance || !NetVar_HandleIsValid( handle ) || !ZombieModeAimPoint( entity, aimPoint ) ) continue;
-			distance = candidate;
-			visible = entity;
-			m_ZM.sight.handle = handle;
-			m_ZM.sight.userId = info->GetUserID();
-			m_ZM.sight.origin = info->GetAbsOrigin();
-			m_ZM.sight.seenAt = now;
+			const ZMSighting candidate = { handle, info->GetUserID(), info->GetAbsOrigin(), now };
+			const float directDistanceSq = ( candidate.origin - origin ).LengthSqr();
+			if ( directDistanceSq >= bestDistanceSq || !NetVar_HandleIsValid( handle ) ||
+			     ( !human && ZMAlreadySearched( candidate, now ) ) || !ZombieModeAimPoint( entity, aimPoint ) ) continue;
+			if ( human )
+			{
+				bestDistanceSq = directDistanceSq;
+				visible = entity;
+				m_ZM.sight = candidate;
+			}
+			else zombieCandidates.push_back( candidate );
+		}
+		if ( !zombieCandidates.empty() )
+		{
+			CUtlVector<float> routeDistances;
+			if ( zombieCandidates.size() > 1 )
+			{
+				const int entry = FindZMRouteEntry();
+				CUtlVector<short> parents;
+				if ( entry >= 0 ) waypoints.ComputeDistances( entry, routeDistances, parents, m_pInfo->GetTeamIndex() );
+			}
+			float bestScore = sightRangeSq;
+			for ( const ZMSighting &candidate : zombieCandidates )
+			{
+				const float directDistance = ( candidate.origin - origin ).Length();
+				float score = directDistance;
+				if ( routeDistances.Count() > 0 )
+				{
+					score = AgPB_WP_DIST_INF + directDistance;
+					float anchorDistanceSq = 512.0f * 512.0f;
+					for ( int anchor = 0; anchor < routeDistances.Count(); ++anchor )
+					{
+						const AgPBPath *node = waypoints.Get( anchor );
+						if ( routeDistances[anchor] >= AgPB_WP_DIST_INF || !SafeTerminal( node ) ||
+						     ( anchor == m_ZM.blockedGoal && now < m_ZM.blockedUntil ) ) continue;
+						const float distanceSq = ( candidate.origin - node->origin ).LengthSqr();
+						if ( distanceSq >= anchorDistanceSq ) continue;
+						anchorDistanceSq = distanceSq;
+						score = routeDistances[anchor] + std::sqrt( distanceSq );
+					}
+				}
+				if ( score >= bestScore ) continue;
+				bestScore = score;
+				m_ZM.sight = candidate;
+			}
+			visible = HandleToEdict( m_ZM.sight.handle );
 		}
 	}
-	else if ( lastInfo != NULL && lastInfo->GetAbsOrigin().IsValid() &&
-	          ( AgPB_ReadNetVarInt( last, "m_fFlags" ) & FL_NOTARGET ) == 0 && ZombieModeAimPoint( last, aimPoint ) )
-	{
-		visible = last;
-		m_ZM.sight.origin = lastInfo->GetAbsOrigin();
-		m_ZM.sight.seenAt = now;
-	}
-	const bool remember = m_ZM.sight.seenAt >= 0.0f && now - m_ZM.sight.seenAt < SightMemory &&
-		( visible != NULL || lastInfo != NULL );
+	else if ( human ) observeLast();
+	const bool freshSight = m_ZM.sight.seenAt >= 0.0f && now - m_ZM.sight.seenAt < SightMemory;
+	const bool remember = freshSight && ( visible != NULL || validLast );
 	bool routeDriven = false;
 	if ( !committedRoute && ( flags & FL_ONGROUND ) != 0 )
 	{
@@ -444,15 +559,17 @@ void CAgPB::UpdateZombieMode( CGlobalVars *globals, CBotCmd &cmd )
 				m_ZM.reachableThreat = ZMThreatCanReach( visible, m_ZM.sight.origin );
 			}
 			const bool urgent = visible != NULL && m_ZM.reachableThreat;
-			const AgPBPath *occupiedCamp = IsZMHoldingPosition() && m_ZM.campGoal ? BotWaypoints().Get( m_ZM.goal ) : NULL;
-			if ( occupiedCamp != NULL && ( ( occupiedCamp->origin - origin ).Length2DSqr() > 96.0f * 96.0f ||
-			     std::abs( occupiedCamp->origin.z - origin.z ) > 32.0f ) )
+			const AgPBPath *heldPoint = IsZMHoldingPosition() ? waypoints.Get( m_ZM.goal ) : NULL;
+			const bool occupiedCamp = heldPoint != NULL && m_ZM.campGoal;
+			if ( heldPoint != NULL && ( ( heldPoint->origin - origin ).Length2DSqr() > 96.0f * 96.0f ||
+			     std::abs( heldPoint->origin.z - origin.z ) > 32.0f ) )
 			{
 				releaseGoal();
 				m_ZM.planAt = now;
 			}
-			const bool unsafeLeg = urgent && routeNode != NULL &&
-				ThreatDistance( routeNode->origin, m_ZM.sight.origin ) + 48.0f < threatDistance;
+			const bool unsafeLeg = urgent && (
+				ZMThreatCanIntercept( routeNode, origin, m_ZM.sight.origin ) ||
+				ZMThreatCanIntercept( waypoints.Get( RouteNode( m_iRouteIndex + 1 ) ), origin, m_ZM.sight.origin ) );
 			const bool seekRetreat = urgent && ( !m_ZM.retreating || unsafeLeg );
 			const bool seekCamp = !HasRoute() && ( !IsZMHoldingPosition() || !m_ZM.campGoal );
 			const AgPBRadio retreatCall = m_pInfo->GetHealth() <= 40 ? AgPBRadio::NeedBackup : AgPBRadio::FallBack;
@@ -476,7 +593,7 @@ void CAgPB::UpdateZombieMode( CGlobalVars *globals, CBotCmd &cmd )
 					     ZMGroundMove( origin + away * 95.0f - side * 95.0f, cmd ) )
 					{
 						releaseGoal();
-						if ( occupiedCamp != NULL ) SendRadio( retreatCall, now );
+						if ( occupiedCamp ) SendRadio( retreatCall, now );
 						UpdateZMCombatOverlay( globals, cmd, visible );
 						return;
 					}
@@ -486,12 +603,13 @@ void CAgPB::UpdateZombieMode( CGlobalVars *globals, CBotCmd &cmd )
 		}
 		else
 		{
-			const auto alreadySearched = [&]( const ZMSighting &sight ) {
-				return now < m_ZM.searchedUntil &&
-					( m_ZM.searchedPoint - sight.origin ).LengthSqr() <= 128.0f * 128.0f;
-			};
-			const ZMSighting *target = remember && ( visible != NULL || !alreadySearched( m_ZM.sight ) )
+			const ZMSighting *target = remember && !ZMAlreadySearched( m_ZM.sight, now )
 				? &m_ZM.sight : NULL;
+			if ( followPursuit )
+			{
+				const bool sameTarget = m_ZM.sight.userId == m_ZM.pursuit.userId && m_ZM.sight.handle == m_ZM.pursuit.handle;
+				target = freshSight && sameTarget && m_ZM.sight.seenAt >= m_ZM.pursuit.seenAt ? &m_ZM.sight : &m_ZM.pursuit;
+			}
 			const bool canPlan = now >= m_ZM.planAt;
 			if ( target == NULL && canPlan )
 			{
@@ -503,10 +621,12 @@ void CAgPB::UpdateZombieMode( CGlobalVars *globals, CBotCmd &cmd )
 				{
 					const CAgPB *other = bots.Get( i );
 					const ZMSighting &sight = other->m_ZM.sight;
+					edict_t *sharedTarget = HandleToEdict( sight.handle );
 					if ( other == this || other->m_ZM.role != role || sight.seenAt < 0.0f ||
 					     now - sight.seenAt >= SharedSightMemory || ZMPlayer( other->Edict(), role ) == NULL ||
-					     alreadySearched( sight ) ||
-					     ZMPlayer( HandleToEdict( sight.handle ), opponent, sight.userId ) == NULL ) continue;
+					     ZMAlreadySearched( sight, now ) ||
+					     ZMPlayer( sharedTarget, opponent, sight.userId ) == NULL ||
+					     ( AgPB_ReadNetVarInt( sharedTarget, "m_fFlags" ) & FL_NOTARGET ) != 0 ) continue;
 					const float distance = ( sight.origin - origin ).LengthSqr();
 					if ( target != NULL && distance >= closest ) continue;
 					closest = distance;
@@ -529,16 +649,19 @@ void CAgPB::UpdateZombieMode( CGlobalVars *globals, CBotCmd &cmd )
 			}
 			if ( canPlan )
 			{
-				const bool retarget = target != NULL && ( !m_ZM.pursuing ||
-					target->userId != m_ZM.pursuitUserId ||
-					( target->origin - m_ZM.pursuitPoint ).LengthSqr() >= 128.0f * 128.0f );
+				const AgPBPath *goal = waypoints.Get( m_ZM.goal );
+				const bool goalFellBehind = followPursuit && target != NULL && goal != NULL &&
+					( target->origin - m_ZM.pursuit.origin ).LengthSqr() >= PursuitUpdateDistance * PursuitUpdateDistance &&
+					( goal->origin - origin ).LengthSqr() < ( goal->origin - target->origin ).LengthSqr();
+				const bool retarget = target != NULL && ( !m_ZM.pursuing || goalFellBehind );
 				m_ZM.planAt = now + ( !HasRoute() && target == NULL ? 1.25f : 0.65f );
 				if ( !HasRoute() || retarget )
 				{
-					if ( target != NULL && PlanZMZombie( now, &target->origin ) )
-						m_ZM.pursuitUserId = target->userId;
-					else if ( !HasRoute() )
-						PlanZMZombie( now, NULL );
+					if ( target == NULL || !PlanZMZombie( now, target ) )
+					{
+						if ( target != NULL && !followPursuit ) RememberZMSearch( *target, *globals );
+						if ( !HasRoute() ) PlanZMZombie( now, NULL );
+					}
 				}
 			}
 		}
@@ -552,13 +675,12 @@ void CAgPB::UpdateZombieMode( CGlobalVars *globals, CBotCmd &cmd )
 		if ( !HasRoute() )
 		{
 			const bool arrived = m_bRouteArrived;
-			if ( arrived && !human && m_ZM.pursuing && visible == NULL )
+			if ( arrived && !human && m_ZM.pursuing )
 			{
-				m_ZM.searchedPoint = m_ZM.pursuitPoint;
-				m_ZM.searchedUntil = now + SightMemory;
+				RememberZMSearch( m_ZM.pursuit, *globals );
+				m_ZM.planAt = now;
 			}
 			releaseGoal();
-			m_ZM.previousGoal = arriving;
 			if ( arrived && human )
 			{
 				hold( arriving, camp );

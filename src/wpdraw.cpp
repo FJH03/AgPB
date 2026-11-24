@@ -15,7 +15,7 @@
  *   双向=黄  只有出边=白  只有入边=墨绿  其它点的连线=蓝（压暗）
  * 半径：蓝色方框（半径 <= 4 画个小叉）
  * 缓存点=黄箭头  准星指向点=白箭头
- * FALLCHECK 点：往下探 60 单位，有地面=蓝，悬空=红
+ * FALLCHECK 点：下方标线显示该点的地面支撑，蓝色有支撑，红色无支撑
  *
  * 关于"线太细/太浅"：Source 的 IVDebugOverlay 没有线宽参数，所以这里用两个办法：
  *   1. 同一根线按**观察者视角的 right/up** 做世界空间小偏移，叠画 N 遍（agpb_wp_thick）
@@ -337,21 +337,14 @@ void AgPB_DrawWaypoints( edict_t *pViewer )
 		if ( ed.bLabels )
 			DrawTextAt( pPath->origin + Vector( 0.0f, 0.0f, 84.0f ), 0, "#%d", i );
 
-		// FALLCHECK：往下探一脚，悬空画红
-		if ( ( pPath->flags & ( AgPB_WP_FALLCHECK | AgPB_WP_FALLRISK ) ) != 0 )
+		const bool bFallCheck = ( pPath->flags & AgPB_WP_FALLCHECK ) != 0;
+		if ( bFallCheck || ( pPath->flags & AgPB_WP_FALLRISK ) != 0 )
 		{
 			const Vector vDown = pPath->origin - Vector( 0.0f, 0.0f, 60.0f );
 
-			AgPBColor ground;
-
-			if ( AgPB_TraceClear( pPath->origin, vDown, NULL ) )
-			{
-				ground.r = 255; ground.g = 0; ground.b = 0;   // 没砸到地面 = 悬空
-			}
-			else
-			{
-				ground.r = 0; ground.g = 0; ground.b = 255;
-			}
+			const bool bSupported = bFallCheck ? wp.PointHasGroundSupport( i ) :
+				!AgPB_TraceClear( pPath->origin, vDown, NULL );
+			const AgPBColor ground = bSupported ? AgPBColor{ 0, 0, 255 } : AgPBColor{ 255, 0, 0 };
 
 			DrawLine( pPath->origin, vDown, ground, bXray );
 		}
@@ -444,7 +437,8 @@ void AgPB_DrawPrintLegend( edict_t *pClient )
 	engine->ClientPrintf( pClient, "            other waypoints' links = dim blue\n" );
 	engine->ClientPrintf( pClient, "radius    : blue box (<=4 draws a small X)\n" );
 	engine->ClientPrintf( pClient, "arrows    : cached=yellow facing=white (always through walls)\n" );
-	engine->ClientPrintf( pClient, "fallcheck : line 60 units down -> ground=blue, air=red\n" );
+	engine->ClientPrintf( pClient, "FALLCHECK : point support marker, blue=supported, red=unsupported\n" );
+	engine->ClientPrintf( pClient, "            navigation also checks support along the marked route segment\n" );
 	engine->ClientPrintf( pClient, "jump edge : link=red; the takeoff node gets JUMP + radius 4 (EBot's AddPath type 1)\n" );
 	engine->ClientPrintf( pClient, "view      : agpb_wp_thick <1..5> line thickness, agpb_wp_xray <0|1> through walls\n" );
 }

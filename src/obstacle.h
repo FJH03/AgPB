@@ -68,6 +68,10 @@ bool AgPB_FindPathBreakable( const BotEngineContext &ctx, edict_t *self,
 // Reuse the route-entry walk-hull collision rules for player avoidance.
 bool AgPB_BlocksWalkHull( ICollideable *collide );
 
+// Read-only support check along an authored ground segment at foot height.
+// World, static props and solid map-controlled entities can provide support.
+bool AgPB_HasGroundSupport( const BotEngineContext &ctx, const Vector &from, const Vector &to );
+
 // Complete ground movement hull, including individually clipped pushaway props.
 // Reports the nearest real contact. Player/world contacts remain in result;
 // only a physics-prop return can start local prop recovery.

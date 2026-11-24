@@ -18,8 +18,10 @@
 #include <mathlib/mathlib.h>
 
 #include "bot.h"
+#include "obstacle.h"
 #include "waypoint.h"
 
+extern IVEngineServer *engine;
 extern IEngineTrace *enginetrace;
 extern IServerGameEnts *gameents;
 extern ICvar *icvar;
@@ -74,6 +76,7 @@ void CAgPBWaypoints::RebuildFile()
 
 void CAgPBWaypoints::Clear()
 {
+	m_GroundSupport.RemoveAll();
 	m_Paths.RemoveAll();
 	m_FileVersion = 1;
 	m_szMapName[0] = '\0';
@@ -90,6 +93,7 @@ bool CAgPBWaypoints::SetMapName( const char *pszMapName )
 	if ( V_strcmp( s_szLoadAttempted, pszMapName ) == 0 )
 		return ( m_Paths.Count() > 0 );
 
+	m_GroundSupport.RemoveAll();
 	m_Paths.RemoveAll();
 	m_FileVersion = 1;
 
@@ -108,6 +112,7 @@ const AgPBPath *CAgPBWaypoints::Get( int i ) const
 
 AgPBPath *CAgPBWaypoints::GetMutable( int i )
 {
+	m_GroundSupport.RemoveAll();
 	return IsValid( i ) ? &m_Paths[i] : NULL;
 }
 
@@ -148,6 +153,7 @@ void CAgPBWaypoints::Delete( int i )
 		return;
 
 	m_Paths.Remove( i );
+	m_GroundSupport.RemoveAll();
 
 	// 修所有还在的连边：指向 i 的清掉，大于 i 的整体减一
 	for ( int p = 0; p < m_Paths.Count(); ++p )
@@ -560,6 +566,54 @@ bool CAgPBWaypoints::IsPassable( int i, int iTeam ) const
 	return IsWaypointPassable( i, iTeam );
 }
 
+bool CAgPBWaypoints::RequiresGroundSupport( int from, int to, unsigned int flags ) const
+{
+	const AgPBPath *start = Get( from );
+	const AgPBPath *end = Get( to );
+	if ( start == NULL || end == NULL || ( flags & ( AgPB_PATH_JUMP | AgPB_PATH_DOUBLE ) ) != 0 )
+		return false;
+	const unsigned int points = start->flags | end->flags;
+	return ( points & AgPB_WP_FALLCHECK ) != 0 &&
+		( points & ( AgPB_WP_LADDER | AgPB_WP_LIFT ) ) == 0;
+}
+
+static bool ProbeWaypointSupport( const Vector &from, const Vector &to )
+{
+	BotEngineContext ctx;
+	ctx.pEngine = engine;
+	ctx.pTrace = enginetrace;
+	ctx.pGameEnts = gameents;
+	return AgPB_HasGroundSupport( ctx, from, to );
+}
+
+bool CAgPBWaypoints::PointHasGroundSupport( int waypoint ) const
+{
+	const AgPBPath *point = Get( waypoint );
+	return point != NULL && ProbeWaypointSupport( point->origin, point->origin );
+}
+
+bool CAgPBWaypoints::LinkHasGroundSupport( int from, int to, unsigned int flags ) const
+{
+	if ( !RequiresGroundSupport( from, to, flags ) ) return true;
+	const int first = MIN( from, to );
+	const int last = MAX( from, to );
+	if ( gpGlobals == NULL ) return ProbeWaypointSupport( m_Paths[first].origin, m_Paths[last].origin );
+
+	// Both directions and all bots share one observation per server tick.
+	if ( m_iGroundSupportTick != gpGlobals->tickcount )
+	{
+		m_GroundSupport.RemoveAll();
+		m_iGroundSupportTick = gpGlobals->tickcount;
+	}
+	const int key = first * AgPB_WP_MAX + last;
+	const int cached = m_GroundSupport.Find( key );
+	if ( cached != m_GroundSupport.InvalidIndex() ) return m_GroundSupport[cached];
+
+	const bool supported = ProbeWaypointSupport( m_Paths[first].origin, m_Paths[last].origin );
+	m_GroundSupport.Insert( key, supported );
+	return supported;
+}
+
 /**
  * 从 iFrom 走到 iTo 的代价。返回 false = 这条边不能走。
  *
@@ -575,6 +629,7 @@ bool CAgPBWaypoints::GetLinkCost( int iFrom, int iTo, unsigned int uLinkFlags, f
 {
 	if ( uLinkFlags & AgPB_PATH_DOUBLE )
 		return false;      // 需要队友叠罗汉
+	if ( !LinkHasGroundSupport( iFrom, iTo, uLinkFlags ) ) return false;
 
 	const AgPBPath &from = m_Paths[iFrom];
 	const AgPBPath &to = m_Paths[iTo];
@@ -1009,6 +1064,7 @@ bool CAgPBWaypoints::Load()
 		return false;
 	}
 	m_Paths.Swap( loaded );
+	m_GroundSupport.RemoveAll();
 	m_FileVersion = iVersion;
 
 	char szMsg[176];

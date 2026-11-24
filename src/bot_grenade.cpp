@@ -20,15 +20,13 @@ extern bool AgPB_IsRoundFrozen();
 
 namespace
 {
-#if defined( AGPB_GAME_CSCZS )
+#if !defined( AGPB_GAME_CSGO )
 ConVarRef &NativeGrenadeRadio()
 {
 	static ConVarRef cvar( "sv_ignoregrenaderadio", true );
 	return cvar;
 }
-#endif
 
-#if !defined( AGPB_GAME_CSGO )
 struct GrenadeChoice
 {
 	const char *classname;
@@ -300,11 +298,7 @@ bool CAgPB::UpdateGrenadeThrow( CGlobalVars *globals, CBotCmd &cmd )
 		( task.deadline <= 0.0f || now < task.deadline ) &&
 		task.id != AgPBTaskId::DestroyBreakable &&
 		( !zm || !m_ZM.retreating );
-	if ( !available
-#if defined( AGPB_GAME_CSCZS )
-		|| !NativeGrenadeRadio().IsValid()
-#endif
-		)
+	if ( !available || !NativeGrenadeRadio().IsValid() )
 	{
 		if ( m_Grenade.phase != GrenadePhase::Idle ) finish( "interrupted" );
 		return false;
@@ -376,8 +370,8 @@ bool CAgPB::UpdateGrenadeThrow( CGlobalVars *globals, CBotCmd &cmd )
 
 void CAgPB::RunPlayerCommand( CBotCmd &cmd )
 {
-#if defined( AGPB_GAME_CSCZS )
-	// [game-diff] Native csczs grenade emission calls CCSPlayer::Radio.
+#if !defined( AGPB_GAME_CSGO )
+	// [game-diff] CS:S and CS:CZS grenade emission calls CCSPlayer::Radio.
 	// Suppress that call for this fake client's command only.
 	ConVarRef &radio = NativeGrenadeRadio();
 	if ( radio.IsValid() && !radio.GetBool() )

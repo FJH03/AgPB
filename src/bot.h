@@ -79,6 +79,7 @@ struct BotEngineContext
 };
 
 struct AgPBObstacle;
+struct AgPBPath;
 
 struct AgPBBotAddOptions
 {
@@ -261,8 +262,12 @@ private:
 	/** 每 tick 的"走路"部分：把路线翻译成 CUserCmd。 */
 	void UpdateRoute( CGlobalVars *pGlobals, CBotCmd &cmd );
 	bool UpdateLadderRoute( CGlobalVars *globals, CBotCmd &cmd );
+	bool RecoverLadderAttachment( CBotCmd &cmd, bool hadRoute, float now );
+	bool UpdateRouteGroundSupport( CGlobalVars *globals, CBotCmd &cmd, const AgPBPath &node,
+	                               const Vector &position, int playerFlags, unsigned int legFlags );
 	bool BuildRoute( int goal, char *error, size_t maxlen );
 	bool FindRouteCandidate( int goal, CUtlVector<int> &path, char *error, size_t maxlen, int avoid = -1 ) const;
+	void AdoptRoute( int goal, const CUtlVector<int> &path );
 	void ClearRoute();
 	void UpdateTasks( CGlobalVars *globals, CBotCmd &cmd );
 	void UpdateAgentIntent( CGlobalVars *globals );
@@ -352,9 +357,12 @@ private:
 	void UpdateZMCombat( CGlobalVars *globals, CBotCmd &cmd, edict_t *target, AgPBZRRole role );
 	bool IsZMHoldingPosition() const;
 	IPlayerInfo *ZMPlayer( edict_t *entity, AgPBZRRole role, int expectedUserId = 0 ) const;
-	bool StartZMRoute( int goal, float now, bool camp, bool retreat );
+	bool StartZMRoute( int goal, float now, bool camp, const Vector *escapeFrom = NULL );
 	bool PlanZMHuman( CGlobalVars *globals, const Vector *threat, bool retreat );
-	bool PlanZMZombie( float now, const Vector *target );
+	struct ZMSighting;
+	bool PlanZMZombie( float now, const ZMSighting *target );
+	bool ZMAlreadySearched( const ZMSighting &sight, float now ) const;
+	void RememberZMSearch( const ZMSighting &sight, const CGlobalVars &globals );
 	bool ZMGroundMove( const Vector &step, CBotCmd &cmd ) const;
 	bool ZMThreatCanReach( edict_t *threat, const Vector &position ) const;
 	int FindZMRouteEntry() const;
@@ -415,6 +423,7 @@ private:
 	bool   m_bRouteArrived;
 	float  m_flRouteSettleSince;
 	bool   m_bRouteLegAirborne;
+	int    m_iFallCheckBlockedTick = -1;
 	AgPBJump::State m_JumpLaunch;
 	AgPBLadder::State m_Ladder;
 	bool m_bPendingJumpLaunch = false;
@@ -501,15 +510,13 @@ private:
 	{
 		AgPBZRRole role = AgPBZRRole::Unknown;
 		ZMSighting sight;
+		ZMSighting pursuit;
+		CUtlVector<ZMSighting> searched;
 		std::uint64_t task = 0;
-		int goal = -1, previousGoal = -1, blockedGoal = -1;
+		int goal = -1, blockedGoal = -1;
 		float scanAt = 0.0f, planAt = 0.0f, blockedUntil = 0.0f;
 		float threatCheckAt = 0.0f, checkedThreatDistance = 0.0f;
 		uintp checkedThreat = (uintp)INVALID_EHANDLE_INDEX;
-		Vector pursuitPoint = Vector( 0, 0, 0 );
-		int pursuitUserId = 0;
-		Vector searchedPoint = Vector( 0, 0, 0 );
-		float searchedUntil = 0.0f;
 		float sweepAt = 0.0f, sweepYaw = 0.0f;
 		bool campGoal = false, retreating = false, holding = false, pursuing = false, reachableThreat = false;
 	};
